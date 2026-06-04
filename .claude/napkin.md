@@ -8,9 +8,14 @@
 ## User Preferences
 - Idioma: **português** em toda comunicação.
 
+## Estado do projeto (2026-06-04)
+- Plano `2026-06-04-brain-memory-provider.md` 100% executado: 23 tarefas, 63 testes verdes (unit + integração). Mergeado na `main` (commit de merge ef36534); branch feat/brain-memory-provider apagada.
+- **PENDENTE:** push para o remoto `origin` (https://github.com/renatinhosfaria/brain). Repo remoto estava vazio; ainda NÃO houve push (sem GITHUB_TOKEN no ambiente). Nada da `main` local foi enviado.
+- Stack Docker validado: `docker compose build` + `up` sobe postgres+api+worker; migration aplica no boot; `/health` → ok.
+
 ## Patterns That Work
-- `uv` instalado em ~/.local/bin; prefixar `export PATH="$HOME/.local/bin:$PATH"` nos comandos Bash (env não persiste entre chamadas).
-- Imagem `brain-postgres:local` builda em ~1min (AGE compilado). Testcontainers sobe ela rápido.
+- `uv` instalado em ~/.local/bin; prefixar `export PATH="$HOME/.local/bin:$PATH"` nos comandos Bash (env não persiste entre chamadas). Rodar testes: `cd /root/brain/brain && uv run pytest`.
+- Imagem `brain-postgres:local` builda em ~1min (AGE compilado). Testcontainers sobe ela rápido. Testes de integração precisam dela construída.
 
 ## Patterns That Don't Work
 - (acumular aqui)
