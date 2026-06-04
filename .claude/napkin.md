@@ -18,6 +18,7 @@
 ## Lacunas do plano (corrigidas durante execução)
 - Plano usa `sync_dsn` (DSN psycopg2 do testcontainers) nos testes de infra, mas NÃO lista `psycopg2`. `testcontainers[postgres]` 4.14 não traz psycopg2. **Correção:** `uv add --dev psycopg2-binary` (Task 2).
 - `uv` escolhe Python mais novo (3.14) por padrão; fixei 3.12 via `.python-version` (Task 1) para casar com `python:3.12-slim` de prod.
+- **BUG do plano (Task 5, db.py):** o hook `register_vector` do `pgvector.asyncpg` CONFLITA com o tipo `pgvector.sqlalchemy.Vector`. O tipo SQLAlchemy já serializa a lista para o literal `'[...]'`; o codec asyncpg recebe essa string e falha ("could not convert string to float"). **Correção:** remover o event listener `register_vector` de `make_engine`. Via ORM o tipo Vector basta (inclusive `cosine_distance`). Não reintroduzir.
 
 ## Domain Notes
 - Projeto `brain`: provedor de memória pessoal como servidor MCP. Plano em `docs/superpowers/plans/2026-06-04-brain-memory-provider.md`, spec em `docs/superpowers/specs/2026-06-03-brain-memory-provider-design.md`.
