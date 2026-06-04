@@ -9,10 +9,15 @@
 - Idioma: **português** em toda comunicação.
 
 ## Patterns That Work
-- (acumular aqui)
+- `uv` instalado em ~/.local/bin; prefixar `export PATH="$HOME/.local/bin:$PATH"` nos comandos Bash (env não persiste entre chamadas).
+- Imagem `brain-postgres:local` builda em ~1min (AGE compilado). Testcontainers sobe ela rápido.
 
 ## Patterns That Don't Work
 - (acumular aqui)
+
+## Lacunas do plano (corrigidas durante execução)
+- Plano usa `sync_dsn` (DSN psycopg2 do testcontainers) nos testes de infra, mas NÃO lista `psycopg2`. `testcontainers[postgres]` 4.14 não traz psycopg2. **Correção:** `uv add --dev psycopg2-binary` (Task 2).
+- `uv` escolhe Python mais novo (3.14) por padrão; fixei 3.12 via `.python-version` (Task 1) para casar com `python:3.12-slim` de prod.
 
 ## Domain Notes
 - Projeto `brain`: provedor de memória pessoal como servidor MCP. Plano em `docs/superpowers/plans/2026-06-04-brain-memory-provider.md`, spec em `docs/superpowers/specs/2026-06-03-brain-memory-provider-design.md`.
