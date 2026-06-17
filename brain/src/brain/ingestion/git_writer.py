@@ -25,6 +25,8 @@ def _validate_relative_path(path: str, *, required_suffix: str | None = None) ->
     raw = str(path).replace("\\", "/")
     if raw.startswith("/") or re.match(r"^[a-zA-Z]:/", raw):
         raise ValueError("path deve ser relativo")
+    if raw.startswith(":"):
+        raise ValueError("path nao pode usar pathspec magic")
 
     parts: list[str] = []
     for part in raw.split("/"):
@@ -99,10 +101,11 @@ def _redact_token_values(value: Any, token: str | None) -> Any:
         redacted = {}
         for key, item in value.items():
             key_text = str(key).lower()
+            safe_key = _redact_token_values(key, token)
             if key_text != "token_prefix" and ("token" in key_text or "secret" in key_text):
-                redacted[key] = "[redacted]"
+                redacted[safe_key] = "[redacted]"
             else:
-                redacted[key] = _redact_token_values(item, token)
+                redacted[safe_key] = _redact_token_values(item, token)
         return redacted
     if isinstance(value, list):
         return [_redact_token_values(item, token) for item in value]
@@ -210,7 +213,7 @@ def _commit_path(
     push: bool,
     retries: int,
 ) -> None:
-    _git(["add", rel], dest)
+    _git(["add", "--", rel], dest)
     _git(
         [
             "-c", f"user.name={author_name}",

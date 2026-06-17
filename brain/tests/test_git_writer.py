@@ -103,6 +103,23 @@ def test_render_agent_client_profile_redige_token_em_campos_textuais():
     assert "token completo: [redacted]" in md
 
 
+def test_render_agent_client_profile_redige_token_em_chaves_de_metadata():
+    full_token = "brain_client_chatgpt-web_super-secret-token"
+
+    md = git_writer.render_agent_client_profile(
+        client_slug="chatgpt-web",
+        client_name="ChatGPT Web",
+        token_prefix="brain_client_chatgpt-web",
+        token=full_token,
+        metadata={full_token: "value", "nested": {f"key-{full_token}": "value"}},
+    )
+
+    assert full_token not in md
+    assert "super-secret-token" not in md
+    assert "'[redacted]': '[redacted]'" in md
+    assert "key-[redacted]: '[redacted]'" in md
+
+
 def test_write_agent_client_profile_cria_perfil_sem_token_completo(tmp_path):
     repo = tmp_path / "vault"
     _init_repo(repo)
@@ -221,6 +238,7 @@ def test_write_agent_note_rejeita_timestamp_inseguro_sem_escrever_fora(tmp_path)
         "C:/tmp/raw.md",
         "projetos/../raw.md",
         "projetos/raw.txt",
+        ":(glob)*.md",
     ],
 )
 def test_validate_curated_note_path_rejeita_paths_invalidos(path):
