@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, Response
 from sqlalchemy import text
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from brain import auth
 from brain.config import get_settings
 from brain.extraction.llm import LLMClient
 from brain.indexing.embeddings import Embedder
@@ -28,25 +29,54 @@ def verify_signature(secret: str, body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected, header)
 
 
-class _BearerAuth:
+class _PrincipalAuth:
     """Middleware ASGI que protege o app MCP montado."""
 
-    def __init__(self, app: ASGIApp, token: str) -> None:
+    def __init__(self, app: ASGIApp, sf, settings) -> None:
         self.app = app
-        self.token = token
+        self.sf = sf
+        self.settings = settings
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            headers = dict(scope.get("headers", []))
-            auth = headers.get(b"authorization", b"").decode()
-            if auth != f"Bearer {self.token}":
-                await send({
-                    "type": "http.response.start", "status": 401,
-                    "headers": [(b"content-type", b"text/plain")],
-                })
-                await send({"type": "http.response.body", "body": b"Unauthorized"})
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        authorization = headers.get(b"authorization", b"").decode()
+        prefix = "Bearer "
+        if not authorization.startswith(prefix) or not authorization[len(prefix):]:
+            await self._unauthorized(send)
+            return
+
+        principal_token = None
+        async with self.sf() as session:
+            try:
+                principal = await auth.resolve_principal(
+                    session, self.settings, authorization[len(prefix):]
+                )
+            except auth.AuthError:
+                await session.rollback()
+                await self._unauthorized(send)
                 return
-        await self.app(scope, receive, send)
+
+            try:
+                principal_token = auth.set_current_principal(principal)
+                await self.app(scope, receive, send)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                if principal_token is not None:
+                    auth.reset_current_principal(principal_token)
+
+    async def _unauthorized(self, send: Send) -> None:
+        await send({
+            "type": "http.response.start", "status": 401,
+            "headers": [(b"content-type", b"text/plain")],
+        })
+        await send({"type": "http.response.body", "body": b"Unauthorized"})
 
 
 def build_deps(settings):
@@ -109,7 +139,7 @@ def create_app(deps: Deps, sf) -> FastAPI:
             enqueued += 1
         return {"enqueued": enqueued}
 
-    app.mount("/mcp", _BearerAuth(mcp_app, settings.brain_auth_token))
+    app.mount("/mcp", _PrincipalAuth(mcp_app, sf, settings))
     return app
 
 

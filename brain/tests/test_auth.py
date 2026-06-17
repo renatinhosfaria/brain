@@ -1,7 +1,10 @@
+from types import SimpleNamespace
+
 import pytest
 from cryptography.fernet import Fernet
 
 from brain import auth
+from brain.storage import repositories as repo
 from brain.auth import verify_bearer_token, AuthError
 
 
@@ -40,3 +43,30 @@ def test_principal_context_roundtrip():
         assert auth.get_current_principal() == principal
     finally:
         auth.reset_current_principal(token)
+
+
+async def test_resolve_principal_accepts_curator_token():
+    settings = SimpleNamespace(
+        brain_curator_token="curator-token",
+        brain_curator_slug="hermes",
+        brain_curator_name="Hermes",
+    )
+
+    principal = await auth.resolve_principal(object(), settings, "curator-token")
+
+    assert principal == auth.Principal(type="curator", slug="hermes", name="Hermes")
+
+
+async def test_resolve_principal_rejects_curator_when_not_configured(monkeypatch):
+    async def no_client(_session, _token_hash):
+        return None
+
+    monkeypatch.setattr(repo, "get_agent_client_by_token_hash", no_client)
+    settings = SimpleNamespace(
+        brain_curator_token=None,
+        brain_curator_slug="hermes",
+        brain_curator_name="Hermes",
+    )
+
+    with pytest.raises(AuthError, match="curador.*configurado"):
+        await auth.resolve_principal(object(), settings, "curator-token")

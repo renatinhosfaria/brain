@@ -64,3 +64,20 @@ def get_current_principal() -> Principal:
     if principal is None:
         raise AuthError("Principal ausente")
     return principal
+
+
+async def resolve_principal(session, settings, bearer_token: str) -> Principal:
+    curator_token = settings.brain_curator_token
+    if curator_token and hmac.compare_digest(bearer_token, curator_token):
+        return Principal("curator", settings.brain_curator_slug, settings.brain_curator_name)
+
+    from brain.storage import repositories as repo
+
+    client = await repo.get_agent_client_by_token_hash(session, hash_token(bearer_token))
+    if client is not None and client.status == "active":
+        await repo.touch_agent_client_seen(session, client.slug)
+        return Principal("client", client.slug, client.name)
+
+    if not curator_token:
+        raise AuthError("Token de curador nao configurado")
+    raise AuthError("Token invalido")
