@@ -5,7 +5,7 @@ from brain.mcp.handlers import Deps
 
 
 def create_mcp_server(deps: Deps) -> FastMCP:
-    mcp = FastMCP("brain", stateless_http=True)
+    mcp = FastMCP("brain", stateless_http=True, streamable_http_path="/")
 
     @mcp.tool()
     async def remember(namespace: str, messages: list[dict], metadata: dict | None = None) -> dict:

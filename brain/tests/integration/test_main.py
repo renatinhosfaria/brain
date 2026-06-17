@@ -133,6 +133,25 @@ def test_webhook_enfileira_jobs(async_dsn, tmp_path, prepared_db, monkeypatch):
     assert r.json() == {"enqueued": 2}
 
 
+def test_mcp_rota_publica_existe_com_auth_valida(async_dsn, tmp_path, prepared_db):
+    app = create_app(*build_deps(_settings(async_dsn, tmp_path)))
+    headers = {"Authorization": "Bearer curator-token", "host": "localhost"}
+
+    def get_following_redirect(client: TestClient, path: str):
+        response = client.get(path, headers=headers, follow_redirects=False)
+        if response.status_code in {307, 308}:
+            response = client.get(
+                response.headers["location"], headers=headers, follow_redirects=False
+            )
+        return response
+
+    with TestClient(app) as client:
+        for path in ("/mcp", "/mcp/"):
+            response = get_following_redirect(client, path)
+            assert response.status_code != 401
+            assert response.status_code != 404
+
+
 async def test_resolve_principal_accepts_client_token(principal_auth_ctx):
     async with principal_auth_ctx.sf() as session:
         principal = await auth.resolve_principal(

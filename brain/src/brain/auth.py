@@ -71,6 +71,10 @@ async def resolve_principal(session, settings, bearer_token: str) -> Principal:
     if curator_token and hmac.compare_digest(bearer_token, curator_token):
         return Principal("curator", settings.brain_curator_slug, settings.brain_curator_name)
 
+    legacy_token = getattr(settings, "brain_auth_token", None)
+    if not curator_token and legacy_token and hmac.compare_digest(bearer_token, legacy_token):
+        return Principal("curator", settings.brain_curator_slug, settings.brain_curator_name)
+
     from brain.storage import repositories as repo
 
     client = await repo.get_agent_client_by_token_hash(session, hash_token(bearer_token))

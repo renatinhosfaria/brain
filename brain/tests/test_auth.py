@@ -48,11 +48,25 @@ def test_principal_context_roundtrip():
 async def test_resolve_principal_accepts_curator_token():
     settings = SimpleNamespace(
         brain_curator_token="curator-token",
+        brain_auth_token="legacy-token",
         brain_curator_slug="hermes",
         brain_curator_name="Hermes",
     )
 
     principal = await auth.resolve_principal(object(), settings, "curator-token")
+
+    assert principal == auth.Principal(type="curator", slug="hermes", name="Hermes")
+
+
+async def test_resolve_principal_accepts_legacy_auth_token_when_curator_token_missing():
+    settings = SimpleNamespace(
+        brain_curator_token=None,
+        brain_auth_token="legacy-token",
+        brain_curator_slug="hermes",
+        brain_curator_name="Hermes",
+    )
+
+    principal = await auth.resolve_principal(object(), settings, "legacy-token")
 
     assert principal == auth.Principal(type="curator", slug="hermes", name="Hermes")
 
@@ -64,6 +78,7 @@ async def test_resolve_principal_rejects_curator_when_not_configured(monkeypatch
     monkeypatch.setattr(repo, "get_agent_client_by_token_hash", no_client)
     settings = SimpleNamespace(
         brain_curator_token=None,
+        brain_auth_token=None,
         brain_curator_slug="hermes",
         brain_curator_name="Hermes",
     )
