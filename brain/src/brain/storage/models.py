@@ -114,12 +114,12 @@ class AgentClient(Base):
     __tablename__ = "agent_clients"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    slug: Mapped[str] = mapped_column(String, unique=True, index=True)
+    slug: Mapped[str] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String, default="active", index=True)
     token_prefix: Mapped[str] = mapped_column(String)
-    token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String, unique=True)
     token_encrypted: Mapped[str] = mapped_column(Text)
     permissions: Mapped[list[str]] = mapped_column(JSONB, default=list)
     meta: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
@@ -141,7 +141,7 @@ class AgentNote(Base):
     client_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_clients.id"))
     client_slug: Mapped[str] = mapped_column(String, index=True)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
-    repo_path: Mapped[str] = mapped_column(String, unique=True, index=True)
+    repo_path: Mapped[str] = mapped_column(String, unique=True)
     status: Mapped[str] = mapped_column(String, default="pending", index=True)
     suggested_namespace: Mapped[str | None] = mapped_column(String, nullable=True)
     meta: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)

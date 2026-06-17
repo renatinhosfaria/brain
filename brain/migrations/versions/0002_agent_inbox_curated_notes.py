@@ -37,13 +37,21 @@ def upgrade() -> None:
         sa.Column("token_encrypted", sa.Text(), nullable=False),
         sa.Column("permissions", JSONB(), nullable=False, server_default=sa.text("'[]'::jsonb")),
         sa.Column("metadata", JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.create_index("ix_agent_clients_slug", "agent_clients", ["slug"])
     op.create_index("ix_agent_clients_status", "agent_clients", ["status"])
-    op.create_index("ix_agent_clients_token_hash", "agent_clients", ["token_hash"])
 
     op.create_table(
         "agent_notes",
@@ -62,13 +70,22 @@ def upgrade() -> None:
         sa.Column("metadata", JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
         sa.Column("outcome", JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
         sa.Column("error", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
         sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_agent_notes_client_slug", "agent_notes", ["client_slug"])
-    op.create_index("ix_agent_notes_repo_path", "agent_notes", ["repo_path"])
     op.create_index("ix_agent_notes_status", "agent_notes", ["status"])
 
     op.create_table(
@@ -82,8 +99,18 @@ def upgrade() -> None:
         sa.Column("run_after", sa.DateTime(timezone=True), nullable=True),
         sa.Column("locked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("locked_by", sa.String(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
     op.create_index("ix_outbox_events_type", "outbox_events", ["type"])
     op.create_index("ix_outbox_events_status", "outbox_events", ["status"])
@@ -105,7 +132,12 @@ def upgrade() -> None:
         sa.Column("anchor", sa.String(), nullable=True),
         sa.Column("raw", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False, server_default="unresolved"),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
     op.create_index("ix_note_links_source_path", "note_links", ["source_path"])
     op.create_index("ix_note_links_target", "note_links", ["target"])

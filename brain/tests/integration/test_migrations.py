@@ -39,6 +39,37 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
         tables = conn.execute(
             text("SELECT tablename FROM pg_tables WHERE schemaname='public'")
         ).scalars().all()
+        timestamp_nullability = {
+            (table_name, column_name): is_nullable
+            for table_name, column_name, is_nullable in conn.execute(
+                text(
+                    """
+                    SELECT table_name, column_name, is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                    AND table_name IN (
+                        'agent_clients',
+                        'agent_notes',
+                        'outbox_events',
+                        'note_links'
+                    )
+                    AND column_name IN ('created_at', 'updated_at')
+                    """
+                )
+            )
+        }
+        index_names = set(
+            conn.execute(
+                text(
+                    """
+                    SELECT indexname
+                    FROM pg_indexes
+                    WHERE schemaname = 'public'
+                    AND tablename IN ('agent_clients', 'agent_notes')
+                    """
+                )
+            ).scalars()
+        )
     assert {"documents", "chunks", "memories", "ingestion_jobs", "namespaces"} <= set(tables)
     expected = {
         "agent_clients",
@@ -47,3 +78,19 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
         "note_links",
     }
     assert expected <= set(tables)
+
+    expected_not_nullable_timestamps = {
+        ("agent_clients", "created_at"),
+        ("agent_clients", "updated_at"),
+        ("agent_notes", "created_at"),
+        ("agent_notes", "updated_at"),
+        ("outbox_events", "created_at"),
+        ("outbox_events", "updated_at"),
+        ("note_links", "created_at"),
+    }
+    for key in expected_not_nullable_timestamps:
+        assert timestamp_nullability[key] == "NO"
+
+    assert "ix_agent_clients_slug" not in index_names
+    assert "ix_agent_clients_token_hash" not in index_names
+    assert "ix_agent_notes_repo_path" not in index_names
