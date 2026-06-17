@@ -378,23 +378,23 @@ def write_conversation(
 ) -> str:
     """Grava a conversa como .md, faz commit (autor brain-bot) e opcionalmente push. Retorna o repo_path relativo."""
     dest = Path(dest)
+    safe_conversations_dir = _validate_relative_path(conversations_dir)
+    safe_namespace = _validate_relative_path(namespace)
     first = messages[0]["content"] if messages else "conversa"
-    rel = f"{conversations_dir}/{namespace}/{timestamp}-{_slugify(first)}.md"
-    path = dest / rel
+    rel = f"{safe_conversations_dir}/{safe_namespace}/{timestamp}-{_slugify(first)}.md"
+    path = _safe_repo_path(dest, rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_markdown(messages), encoding="utf-8")
 
-    _git(["add", rel], dest)
-    _git(
-        [
-            "-c", f"user.name={author_name}",
-            "-c", f"user.email={author_email}",
-            "commit", "-m", f"chat: {namespace} {timestamp}",
-        ],
-        dest,
+    _commit_path(
+        dest=dest,
+        rel=rel,
+        message=f"chat: {safe_namespace} {timestamp}",
+        author_name=author_name,
+        author_email=author_email,
+        push=push,
+        retries=retries,
     )
-    if push:
-        _push_with_retry(dest, retries)
     return rel
 
 

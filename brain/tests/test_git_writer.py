@@ -304,3 +304,23 @@ def test_write_conversation_cria_arquivo_e_commit(tmp_path):
     # o último commit é do brain-bot
     author = _git(["log", "-1", "--format=%an"], repo).stdout.strip()
     assert author == "brain-bot"
+
+
+def test_write_conversation_rejeita_namespace_inseguro_sem_escrever_fora(tmp_path):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+    outside = tmp_path / "outside"
+
+    with pytest.raises(ValueError):
+        write_conversation(
+            repo,
+            "conversas",
+            "../../outside",
+            [{"role": "user", "content": "segredo"}],
+            timestamp="20260604T120000",
+            author_name="brain-bot",
+            author_email="brain-bot@x",
+            push=False,
+        )
+
+    assert not outside.exists()
