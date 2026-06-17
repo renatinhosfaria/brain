@@ -1,3 +1,4 @@
+import asyncio
 import datetime as dt
 import uuid
 
@@ -202,6 +203,61 @@ async def test_agent_client_lookup_token_rotation_e_last_seen(session):
     assert (await repo.get_agent_client_by_token_hash(session, "hash-v2")).slug == "codex"
 
 
+async def test_agent_client_create_retorna_existente_em_corrida_por_slug(async_dsn):
+    engine = make_engine(async_dsn)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    factory = make_session_factory(engine)
+
+    async with factory() as first, factory() as second:
+        created = await repo.create_agent_client(
+            first,
+            slug="chatgpt-web",
+            name="ChatGPT Web",
+            description="web client",
+            token_prefix="brain_client_chatgpt-web",
+            token_hash="hash-v1",
+            token_encrypted="encrypted-v1",
+            permissions=["search"],
+            meta={"host": "chatgpt"},
+        )
+
+        async def create_duplicate():
+            duplicate = await repo.create_agent_client(
+                second,
+                slug="chatgpt-web",
+                name="Nome ignorado",
+                description="descricao ignorada",
+                token_prefix="brain_client_chatgpt-web-v2",
+                token_hash="hash-v2",
+                token_encrypted="encrypted-v2",
+                permissions=["submit_agent_note"],
+                meta={"host": "outro"},
+            )
+            await second.commit()
+            return duplicate
+
+        duplicate_task = asyncio.create_task(create_duplicate())
+        await asyncio.sleep(0.2)
+        await first.commit()
+        duplicate = await asyncio.wait_for(duplicate_task, timeout=5)
+
+    async with factory() as verify:
+        fetched = await repo.get_agent_client(verify, slug="chatgpt-web")
+        assert duplicate.id == created.id
+        assert fetched.id == created.id
+        assert fetched.name == "ChatGPT Web"
+        assert fetched.description == "web client"
+        assert fetched.token_hash == "hash-v1"
+        assert fetched.token_encrypted == "encrypted-v1"
+        assert fetched.permissions == ["search"]
+        assert fetched.meta == {"host": "chatgpt"}
+        assert await repo.get_agent_client_by_token_hash(verify, "hash-v2") is None
+
+    await engine.dispose()
+
+
 async def test_agent_note_create_get_list_e_update_status(session):
     client = await repo.create_agent_client(
         session,
@@ -339,6 +395,49 @@ async def test_outbox_event_create_claim_e_mark(session):
     assert failed.last_error == "erro permanente"
     assert failed.locked_by is None
     assert failed.locked_at is None
+
+
+async def test_outbox_event_reclama_running_stale(session):
+    now = dt.datetime(2026, 6, 17, 12, tzinfo=dt.UTC)
+    event = await repo.create_outbox_event(
+        session,
+        type="agent_note.created",
+        payload={"note_id": "note-1"},
+    )
+    await session.commit()
+
+    claimed = await repo.claim_next_outbox_event(session, now, worker_id="worker-1")
+    await session.commit()
+    assert claimed.status == "running"
+    assert claimed.attempts == 1
+    assert claimed.locked_at == now
+    assert claimed.locked_by == "worker-1"
+
+    assert await repo.claim_next_outbox_event(
+        session,
+        now + dt.timedelta(minutes=10),
+        worker_id="worker-2",
+    ) is None
+    assert await repo.claim_next_outbox_event(
+        session,
+        now + dt.timedelta(minutes=10),
+        worker_id="worker-2",
+        stale_before=now - dt.timedelta(seconds=1),
+    ) is None
+
+    reclaimed = await repo.claim_next_outbox_event(
+        session,
+        now + dt.timedelta(minutes=10),
+        worker_id="worker-2",
+        stale_before=now,
+    )
+    await session.commit()
+
+    assert reclaimed.id == event.id
+    assert reclaimed.status == "running"
+    assert reclaimed.attempts == 2
+    assert reclaimed.locked_at == now + dt.timedelta(minutes=10)
+    assert reclaimed.locked_by == "worker-2"
 
 
 async def test_note_link_replace_list_unresolved_e_resolve(session):

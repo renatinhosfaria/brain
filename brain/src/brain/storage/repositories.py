@@ -1,7 +1,8 @@
 import datetime as dt
 import uuid
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import and_, delete, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from brain.storage.models import (
     AgentClient,
@@ -247,22 +248,25 @@ async def create_agent_client(
     permissions: list[str] | None = None,
     meta: dict | None = None,
 ) -> AgentClient:
-    existing = await get_agent_client(session, slug=slug)
-    if existing is not None:
-        return existing
-
-    client = AgentClient(
-        slug=slug,
-        name=name,
-        description=description,
-        token_prefix=token_prefix,
-        token_hash=token_hash,
-        token_encrypted=token_encrypted,
-        permissions=permissions or [],
-        meta=meta or {},
+    stmt = (
+        pg_insert(AgentClient)
+        .values(
+            slug=slug,
+            name=name,
+            description=description,
+            token_prefix=token_prefix,
+            token_hash=token_hash,
+            token_encrypted=token_encrypted,
+            permissions=permissions or [],
+            meta=meta or {},
+        )
+        .on_conflict_do_nothing(index_elements=[AgentClient.slug])
+        .returning(AgentClient.id)
     )
-    session.add(client)
-    await session.flush()
+    await session.execute(stmt)
+    client = await get_agent_client(session, slug=slug)
+    if client is None:
+        raise RuntimeError(f"Agent client insert did not return slug {slug!r}")
     return client
 
 
@@ -402,11 +406,25 @@ async def claim_next_outbox_event(
     session,
     now: dt.datetime,
     worker_id: str,
+    stale_before: dt.datetime | None = None,
 ) -> OutboxEvent | None:
+    pending_or_retrying_due = and_(
+        OutboxEvent.status.in_(["pending", "retrying"]),
+        or_(OutboxEvent.run_after.is_(None), OutboxEvent.run_after <= now),
+    )
+    claimable = [pending_or_retrying_due]
+    if stale_before is not None:
+        claimable.append(
+            and_(
+                OutboxEvent.status == "running",
+                OutboxEvent.locked_at.is_not(None),
+                OutboxEvent.locked_at <= stale_before,
+            )
+        )
+
     stmt = (
         select(OutboxEvent)
-        .where(OutboxEvent.status.in_(["pending", "retrying"]))
-        .where(or_(OutboxEvent.run_after.is_(None), OutboxEvent.run_after <= now))
+        .where(or_(*claimable))
         .order_by(OutboxEvent.created_at, OutboxEvent.id)
         .limit(1)
         .with_for_update(skip_locked=True)
