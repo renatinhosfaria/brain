@@ -15,7 +15,18 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
     # Garante banco limpo das tabelas (a imagem já tem extensões)
     engine = sa.create_engine(sync_dsn)
     with engine.begin() as conn:
-        for t in ["ingestion_jobs", "memories", "chunks", "documents", "namespaces", "alembic_version"]:
+        for t in [
+            "note_links",
+            "outbox_events",
+            "agent_notes",
+            "agent_clients",
+            "ingestion_jobs",
+            "memories",
+            "chunks",
+            "documents",
+            "namespaces",
+            "alembic_version",
+        ]:
             conn.execute(text(f"DROP TABLE IF EXISTS {t} CASCADE"))
 
     result = subprocess.run(
@@ -29,3 +40,10 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
             text("SELECT tablename FROM pg_tables WHERE schemaname='public'")
         ).scalars().all()
     assert {"documents", "chunks", "memories", "ingestion_jobs", "namespaces"} <= set(tables)
+    expected = {
+        "agent_clients",
+        "agent_notes",
+        "outbox_events",
+        "note_links",
+    }
+    assert expected <= set(tables)
