@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     # Curadoria / auth
     brain_curator_slug: str = "hermes"
     brain_curator_name: str = "Hermes"
-    brain_curator_token: str
-    brain_token_encryption_key: str
+    brain_curator_token: str | None = None
+    brain_token_encryption_key: str | None = None
 
     # Agent inbox
     agent_inbox_dir: str = "_agents"

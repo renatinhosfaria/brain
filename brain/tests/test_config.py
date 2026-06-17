@@ -42,6 +42,21 @@ def test_defaults_de_modelos():
     assert s.git_push_enabled is True
 
 
+def test_settings_aceita_curadoria_ausente_durante_migracao():
+    s = Settings(
+        database_url="postgresql+asyncpg://x",
+        openai_api_key="sk-test",
+        github_token="ghp_test",
+        brain_auth_token="legacy",
+        webhook_secret="webhook",
+        repo_url="https://example/repo.git",
+    )
+    assert s.brain_curator_slug == "hermes"
+    assert s.brain_curator_name == "Hermes"
+    assert s.brain_curator_token is None
+    assert s.brain_token_encryption_key is None
+
+
 def test_settings_curator_bootstrap_fields():
     key = Fernet.generate_key().decode()
     s = Settings(
