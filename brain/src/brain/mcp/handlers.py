@@ -2,6 +2,7 @@ import datetime as dt
 import uuid
 from dataclasses import dataclass
 
+from brain import auth
 from brain.graph import age
 from brain.ingestion import git_writer
 from brain.queue.base import JobType
@@ -20,6 +21,85 @@ class Deps:
 
 def _now_stamp() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%f")
+
+
+def _require_curator():
+    p = auth.get_current_principal()
+    if p.type != "curator":
+        raise PermissionError("curator required")
+    return p
+
+
+def _require_client_or_curator():
+    return auth.get_current_principal()
+
+
+def _require_token_encryption_key(settings) -> str:
+    key = settings.brain_token_encryption_key
+    if not key:
+        raise RuntimeError("brain_token_encryption_key required")
+    return key
+
+
+def _token_prefix(token: str, slug: str) -> str:
+    base_len = len(f"brain_client_{slug}_")
+    prefix_len = min(len(token) - 1, base_len + 8)
+    return token[:prefix_len]
+
+
+def _stored_client_meta(
+    *,
+    metadata: dict | None,
+    capture_policy: str | None,
+    recommended_instructions: str | None,
+) -> dict:
+    return {
+        "metadata": metadata or {},
+        "capture_policy": capture_policy,
+        "recommended_instructions": recommended_instructions,
+    }
+
+
+def _profile_fields(client) -> dict:
+    meta = client.meta or {}
+    if any(k in meta for k in ("metadata", "capture_policy", "recommended_instructions")):
+        return {
+            "metadata": meta.get("metadata") or {},
+            "capture_policy": meta.get("capture_policy"),
+            "recommended_instructions": meta.get("recommended_instructions"),
+        }
+    return {
+        "metadata": meta,
+        "capture_policy": None,
+        "recommended_instructions": None,
+    }
+
+
+def _iso(value) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _agent_client_dict(client) -> dict | None:
+    if client is None:
+        return None
+    fields = _profile_fields(client)
+    return {
+        "id": str(client.id),
+        "slug": client.slug,
+        "name": client.name,
+        "description": client.description,
+        "status": client.status,
+        "token_prefix": client.token_prefix,
+        "permissions": client.permissions or [],
+        "metadata": fields["metadata"],
+        "capture_policy": fields["capture_policy"],
+        "recommended_instructions": fields["recommended_instructions"],
+        "created_at": _iso(client.created_at),
+        "updated_at": _iso(client.updated_at),
+        "last_seen_at": _iso(client.last_seen_at),
+    }
 
 
 def _mem_dict(m) -> dict | None:
@@ -134,6 +214,140 @@ async def reindex(deps: Deps, repo_path: str, namespace: str) -> dict:
         JobType.REINDEX.value, {"namespace": namespace, "repo_path": repo_path}
     )
     return {"job_id": str(job_id)}
+
+
+# ---------- Agent clients ----------
+async def create_agent_client(
+    deps: Deps,
+    name: str,
+    slug: str | None = None,
+    description: str | None = None,
+    capture_policy: str | None = None,
+    recommended_instructions: str | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    _require_curator()
+    key = _require_token_encryption_key(deps.settings)
+    client_slug = git_writer.slugify(slug or name, fallback="client")
+    token = auth.generate_client_token(client_slug)
+    token_prefix = _token_prefix(token, client_slug)
+    permissions = ["search", "get_note", "submit_agent_note"]
+
+    async with deps.session_factory() as s:
+        if await repo.get_agent_client(s, slug=client_slug) is not None:
+            raise ValueError(f"agent client already exists: {client_slug}")
+        client = await repo.create_agent_client(
+            s,
+            slug=client_slug,
+            name=name,
+            description=description,
+            token_prefix=token_prefix,
+            token_hash=auth.hash_token(token),
+            token_encrypted=auth.encrypt_token(token, key),
+            permissions=permissions,
+            meta=_stored_client_meta(
+                metadata=metadata,
+                capture_policy=capture_policy,
+                recommended_instructions=recommended_instructions,
+            ),
+        )
+        profile_path = git_writer.write_agent_client_profile(
+            deps.settings.repo_cache_path,
+            inbox_dir=deps.settings.agent_inbox_dir,
+            client_slug=client.slug,
+            client_name=client.name,
+            token_prefix=token_prefix,
+            token=token,
+            description=description,
+            capture_policy=capture_policy,
+            recommended_instructions=recommended_instructions,
+            metadata=metadata,
+            author_name=deps.settings.git_author_name,
+            author_email=deps.settings.git_author_email,
+            push=deps.settings.git_push_enabled,
+        )
+        await s.commit()
+        out = _agent_client_dict(client)
+        out.update({"token": token, "profile_path": profile_path})
+        return out
+
+
+async def list_agent_clients(deps: Deps) -> list[dict]:
+    _require_curator()
+    async with deps.session_factory() as s:
+        return [_agent_client_dict(c) for c in await repo.list_agent_clients(s)]
+
+
+async def get_agent_client(deps: Deps, slug: str) -> dict | None:
+    _require_curator()
+    async with deps.session_factory() as s:
+        return _agent_client_dict(await repo.get_agent_client(s, slug=slug))
+
+
+async def reveal_agent_client_token(deps: Deps, slug: str) -> dict:
+    _require_curator()
+    key = _require_token_encryption_key(deps.settings)
+    async with deps.session_factory() as s:
+        client = await repo.get_agent_client(s, slug=slug)
+        if client is None:
+            raise ValueError(f"agent client not found: {slug}")
+        return {
+            "slug": client.slug,
+            "token": auth.decrypt_token(client.token_encrypted, key),
+            "token_prefix": client.token_prefix,
+        }
+
+
+async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
+    _require_curator()
+    key = _require_token_encryption_key(deps.settings)
+    async with deps.session_factory() as s:
+        client = await repo.get_agent_client(s, slug=slug)
+        if client is None:
+            raise ValueError(f"agent client not found: {slug}")
+        token = auth.generate_client_token(client.slug)
+        token_prefix = _token_prefix(token, client.slug)
+        client = await repo.update_agent_client_token(
+            s,
+            slug=client.slug,
+            token_prefix=token_prefix,
+            token_hash=auth.hash_token(token),
+            token_encrypted=auth.encrypt_token(token, key),
+        )
+        await s.refresh(client)
+        fields = _profile_fields(client)
+        profile_path = git_writer.write_agent_client_profile(
+            deps.settings.repo_cache_path,
+            inbox_dir=deps.settings.agent_inbox_dir,
+            client_slug=client.slug,
+            client_name=client.name,
+            token_prefix=token_prefix,
+            token=token,
+            description=client.description,
+            capture_policy=fields["capture_policy"],
+            recommended_instructions=fields["recommended_instructions"],
+            metadata=fields["metadata"],
+            author_name=deps.settings.git_author_name,
+            author_email=deps.settings.git_author_email,
+            push=deps.settings.git_push_enabled,
+        )
+        await s.commit()
+        out = _agent_client_dict(client)
+        out.update({"token": token, "profile_path": profile_path})
+        return out
+
+
+async def disable_agent_client(deps: Deps, slug: str) -> dict:
+    _require_curator()
+    async with deps.session_factory() as s:
+        client = await repo.disable_agent_client(s, slug)
+        if client is None:
+            raise ValueError(f"agent client not found: {slug}")
+        await s.refresh(client)
+        await s.commit()
+        out = _agent_client_dict(client)
+        out["disabled"] = True
+        return out
 
 
 # ---------- Grafo ----------

@@ -53,6 +53,45 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         return await handlers.reindex(deps, repo_path, namespace)
 
     @mcp.tool()
+    async def create_agent_client(
+        name: str,
+        slug: str | None = None,
+        description: str | None = None,
+        capture_policy: str | None = None,
+        recommended_instructions: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        return await handlers.create_agent_client(
+            deps,
+            name,
+            slug,
+            description,
+            capture_policy,
+            recommended_instructions,
+            metadata,
+        )
+
+    @mcp.tool()
+    async def list_agent_clients() -> list[dict]:
+        return await handlers.list_agent_clients(deps)
+
+    @mcp.tool()
+    async def get_agent_client(slug: str) -> dict | None:
+        return await handlers.get_agent_client(deps, slug)
+
+    @mcp.tool()
+    async def reveal_agent_client_token(slug: str) -> dict:
+        return await handlers.reveal_agent_client_token(deps, slug)
+
+    @mcp.tool()
+    async def rotate_agent_client_token(slug: str) -> dict:
+        return await handlers.rotate_agent_client_token(deps, slug)
+
+    @mcp.tool()
+    async def disable_agent_client(slug: str) -> dict:
+        return await handlers.disable_agent_client(deps, slug)
+
+    @mcp.tool()
     async def get_entity(name: str, namespace: str) -> dict | None:
         return await handlers.get_entity(deps, name, namespace)
 
