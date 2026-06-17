@@ -7,6 +7,9 @@ from typing import Any
 import yaml
 
 
+_AGENT_TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}(\d{0,6})?$")
+
+
 def slugify(text: str, *, fallback: str = "note") -> str:
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
@@ -18,7 +21,7 @@ def _slugify(text: str) -> str:
     return slugify(text, fallback="conversa")
 
 
-def validate_curated_note_path(path: str) -> str:
+def _validate_relative_path(path: str, *, required_suffix: str | None = None) -> str:
     raw = str(path).replace("\\", "/")
     if raw.startswith("/") or re.match(r"^[a-zA-Z]:/", raw):
         raise ValueError("path deve ser relativo")
@@ -33,12 +36,32 @@ def validate_curated_note_path(path: str) -> str:
 
     if not parts:
         raise ValueError("path vazio")
-    if parts[0] == "_agents":
-        raise ValueError("notas curadas nao podem ser gravadas em _agents/")
 
     rel = "/".join(parts)
-    if not rel.endswith(".md"):
-        raise ValueError("notas curadas devem usar extensao .md")
+    if required_suffix and not rel.endswith(required_suffix):
+        raise ValueError(f"path deve terminar com {required_suffix}")
+    return rel
+
+
+def _safe_repo_path(dest: Path, rel: str) -> Path:
+    repo_root = dest.resolve()
+    path = (repo_root / rel).resolve()
+    if path != repo_root and repo_root not in path.parents:
+        raise ValueError("path deve ficar dentro do repositorio")
+    return path
+
+
+def _validate_agent_timestamp(timestamp: str) -> str:
+    if not _AGENT_TIMESTAMP_RE.fullmatch(timestamp):
+        raise ValueError("timestamp deve usar formato yyyymmddThhmmss[ffffff]")
+    return timestamp
+
+
+def validate_curated_note_path(path: str) -> str:
+    rel = _validate_relative_path(path, required_suffix=".md")
+    parts = rel.split("/")
+    if parts[0] == "_agents":
+        raise ValueError("notas curadas nao podem ser gravadas em _agents/")
     return rel
 
 
@@ -100,27 +123,31 @@ def render_agent_client_profile(
     metadata: dict | None = None,
 ) -> str:
     safe_slug = slugify(client_slug, fallback="client")
+    safe_client_name = _redact_token_values(client_name, token)
+    safe_description = _redact_token_values(description, token)
+    safe_capture_policy = _redact_token_values(capture_policy, token)
+    safe_recommended_instructions = _redact_token_values(recommended_instructions, token)
     safe_metadata = _redact_token_values(metadata or {}, token)
     frontmatter = render_frontmatter(
         {
             "type": "agent_client",
             "client_slug": safe_slug,
-            "client_name": client_name,
+            "client_name": safe_client_name,
             "token_prefix": token_prefix,
             "metadata": safe_metadata or None,
         }
     )
 
-    sections = [frontmatter, f"# {client_name}\n"]
+    sections = [frontmatter, f"# {safe_client_name}\n"]
     sections.append(f"Client slug: `{safe_slug}`\n")
     sections.append(f"Token prefix: `{token_prefix}`\n")
 
-    if description:
-        sections.append(f"\n## Description\n\n{description}\n")
-    if capture_policy:
-        sections.append(f"\n## Capture Policy\n\n{capture_policy}\n")
-    if recommended_instructions:
-        sections.append(f"\n## Recommended Instructions\n\n{recommended_instructions}\n")
+    if safe_description:
+        sections.append(f"\n## Description\n\n{safe_description}\n")
+    if safe_capture_policy:
+        sections.append(f"\n## Capture Policy\n\n{safe_capture_policy}\n")
+    if safe_recommended_instructions:
+        sections.append(f"\n## Recommended Instructions\n\n{safe_recommended_instructions}\n")
     if safe_metadata:
         metadata_yaml = yaml.safe_dump(
             safe_metadata,
@@ -214,9 +241,10 @@ def write_agent_client_profile(
     retries: int = 3,
 ) -> str:
     dest = Path(dest)
+    safe_inbox_dir = _validate_relative_path(inbox_dir)
     safe_client_slug = slugify(client_slug, fallback="client")
-    rel = f"{inbox_dir}/{safe_client_slug}/{safe_client_slug}.md"
-    path = dest / rel
+    rel = f"{safe_inbox_dir}/{safe_client_slug}/{safe_client_slug}.md"
+    path = _safe_repo_path(dest, rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         render_agent_client_profile(
@@ -262,16 +290,15 @@ def write_agent_note(
     push: bool = False,
     retries: int = 3,
 ) -> str:
-    if not re.match(r"^\d{8}T", timestamp):
-        raise ValueError("timestamp deve iniciar com yyyymmddT")
-
     dest = Path(dest)
+    timestamp = _validate_agent_timestamp(timestamp)
+    safe_inbox_dir = _validate_relative_path(inbox_dir)
     safe_client_slug = slugify(client_slug, fallback="client")
     yyyy, mm, dd = timestamp[:4], timestamp[4:6], timestamp[6:8]
     title_source = title or content or note_id
     file_slug = slugify(title_source, fallback="note")
-    rel = f"{inbox_dir}/{safe_client_slug}/{yyyy}/{mm}/{dd}/{timestamp}-{file_slug}.md"
-    path = dest / rel
+    rel = f"{safe_inbox_dir}/{safe_client_slug}/{yyyy}/{mm}/{dd}/{timestamp}-{file_slug}.md"
+    path = _safe_repo_path(dest, rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         render_agent_note(
@@ -313,7 +340,7 @@ def write_curated_note(
 ) -> str:
     dest = Path(dest)
     rel = validate_curated_note_path(path)
-    note_path = dest / rel
+    note_path = _safe_repo_path(dest, rel)
     is_update = note_path.exists()
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(

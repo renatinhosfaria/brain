@@ -81,6 +81,28 @@ def test_render_agent_client_profile_nao_inclui_token_completo():
     assert "owner: Hermes" in md
 
 
+def test_render_agent_client_profile_redige_token_em_campos_textuais():
+    full_token = "brain_client_chatgpt-web_super-secret-token"
+
+    md = git_writer.render_agent_client_profile(
+        client_slug="chatgpt-web",
+        client_name="ChatGPT Web",
+        token_prefix="brain_client_chatgpt-web",
+        token=full_token,
+        description=f"Use {full_token} para autenticar.",
+        capture_policy=f"Nunca grave {full_token}.",
+        recommended_instructions=f"Configure bearer {full_token}.",
+        metadata={"notes": [f"token completo: {full_token}"]},
+    )
+
+    assert full_token not in md
+    assert "super-secret-token" not in md
+    assert "Use [redacted] para autenticar." in md
+    assert "Nunca grave [redacted]." in md
+    assert "Configure bearer [redacted]." in md
+    assert "token completo: [redacted]" in md
+
+
 def test_write_agent_client_profile_cria_perfil_sem_token_completo(tmp_path):
     repo = tmp_path / "vault"
     _init_repo(repo)
@@ -109,6 +131,26 @@ def test_write_agent_client_profile_cria_perfil_sem_token_completo(tmp_path):
     assert "token_prefix: brain_client_chatgpt-web" in text
     subject = _git(["log", "-1", "--format=%s"], repo).stdout.strip()
     assert subject == "client: create chatgpt-web"
+
+
+def test_write_agent_client_profile_rejeita_inbox_dir_inseguro_sem_escrever_fora(tmp_path):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+    outside = tmp_path / "outside"
+
+    with pytest.raises(ValueError):
+        git_writer.write_agent_client_profile(
+            repo,
+            inbox_dir="../outside",
+            client_slug="chatgpt-web",
+            client_name="ChatGPT Web",
+            token_prefix="brain_client_chatgpt-web",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+        )
+
+    assert not outside.exists()
 
 
 def test_write_agent_note_cria_apenas_na_pasta_do_client(tmp_path):
@@ -145,6 +187,29 @@ def test_write_agent_note_cria_apenas_na_pasta_do_client(tmp_path):
     assert "**user:** oi" in text
     subject = _git(["log", "-1", "--format=%s"], repo).stdout.strip()
     assert subject == "agent-note: chatgpt-web 20260617T183000000000"
+
+
+def test_write_agent_note_rejeita_timestamp_inseguro_sem_escrever_fora(tmp_path):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+    outside = tmp_path / "outside-resumo.md"
+
+    with pytest.raises(ValueError):
+        git_writer.write_agent_note(
+            repo,
+            inbox_dir="_agents",
+            client_slug="chatgpt-web",
+            client_name="ChatGPT Web",
+            note_id="agent_note_1",
+            title="Resumo",
+            content="Conteudo livre",
+            timestamp="20260617T183000/../../../../../../outside",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+        )
+
+    assert not outside.exists()
 
 
 @pytest.mark.parametrize(
