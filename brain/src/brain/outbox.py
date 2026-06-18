@@ -84,6 +84,7 @@ async def deliver_once(session_factory, settings, *, worker_id="outbox", client=
         event_type = event.type
         payload = event.payload
         attempts = event.attempts
+        claim = repositories.outbox_claim_token(event)
         await session.commit()
 
     try:
@@ -102,15 +103,21 @@ async def deliver_once(session_factory, settings, *, worker_id="outbox", client=
 
     async with session_factory() as session:
         if error is None:
-            await repositories.mark_outbox_delivered(session, event_id)
+            await repositories.mark_outbox_delivered(session, event_id, claim=claim)
         elif attempts >= settings.outbox_max_attempts:
-            await repositories.mark_outbox_failed(session, event_id, error=error)
+            await repositories.mark_outbox_failed(
+                session,
+                event_id,
+                error=error,
+                claim=claim,
+            )
         else:
             await repositories.mark_outbox_retrying(
                 session,
                 event_id,
                 error=error,
                 run_after=dt.datetime.now(dt.UTC) + _retry_delay(attempts),
+                claim=claim,
             )
         await session.commit()
 

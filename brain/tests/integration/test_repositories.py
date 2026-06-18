@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
-from brain.storage.models import Base, NoteLink
+from brain.storage.models import Base, NoteLink, OutboxEvent
 
 
 @pytest_asyncio.fixture
@@ -353,6 +353,7 @@ async def test_outbox_event_create_claim_e_mark(session):
     assert claimed.attempts == 1
     assert claimed.locked_by == "worker-1"
     assert claimed.locked_at == now
+    claim = repo.outbox_claim_token(claimed)
 
     run_after = now + dt.timedelta(minutes=5)
     retrying = await repo.mark_outbox_retrying(
@@ -360,6 +361,7 @@ async def test_outbox_event_create_claim_e_mark(session):
         claimed.id,
         error="Hermes indisponivel",
         run_after=run_after,
+        claim=claim,
     )
     assert retrying.status == "retrying"
     assert retrying.last_error == "Hermes indisponivel"
@@ -377,8 +379,9 @@ async def test_outbox_event_create_claim_e_mark(session):
     assert claimed_again.status == "running"
     assert claimed_again.attempts == 2
     assert claimed_again.locked_by == "worker-2"
+    claim_again = repo.outbox_claim_token(claimed_again)
 
-    delivered = await repo.mark_outbox_delivered(session, event.id)
+    delivered = await repo.mark_outbox_delivered(session, event.id, claim=claim_again)
     assert delivered.status == "delivered"
     assert delivered.locked_by is None
     assert delivered.locked_at is None
@@ -388,7 +391,14 @@ async def test_outbox_event_create_claim_e_mark(session):
         type="agent_note.failed",
         payload={"note_id": "note-2"},
     )
-    failed = await repo.mark_outbox_failed(session, failed_event.id, error="erro permanente")
+    failed_claimed = await repo.claim_next_outbox_event(session, now, worker_id="worker-1")
+    assert failed_claimed.id == failed_event.id
+    failed = await repo.mark_outbox_failed(
+        session,
+        failed_event.id,
+        error="erro permanente",
+        claim=repo.outbox_claim_token(failed_claimed),
+    )
     await session.commit()
 
     assert failed.status == "failed"
@@ -438,6 +448,68 @@ async def test_outbox_event_reclama_running_stale(session):
     assert reclaimed.attempts == 2
     assert reclaimed.locked_at == now + dt.timedelta(minutes=10)
     assert reclaimed.locked_by == "worker-2"
+
+
+async def test_outbox_mark_ignora_claim_stale_apos_reclaim_e_delivered(session):
+    now = dt.datetime(2026, 6, 17, 12, tzinfo=dt.UTC)
+    event = await repo.create_outbox_event(
+        session,
+        type="agent_note.created",
+        payload={"note_id": "note-1"},
+    )
+    await session.commit()
+
+    worker_a = await repo.claim_next_outbox_event(session, now, worker_id="worker-a")
+    worker_a_claim = repo.outbox_claim_token(worker_a)
+    await session.commit()
+
+    worker_b_now = now + dt.timedelta(minutes=10)
+    worker_b = await repo.claim_next_outbox_event(
+        session,
+        worker_b_now,
+        worker_id="worker-b",
+        stale_before=now,
+    )
+    worker_b_claim = repo.outbox_claim_token(worker_b)
+    delivered = await repo.mark_outbox_delivered(
+        session,
+        event.id,
+        claim=worker_b_claim,
+    )
+    await session.commit()
+
+    assert delivered.status == "delivered"
+    assert delivered.attempts == 2
+
+    assert await repo.mark_outbox_retrying(
+        session,
+        event.id,
+        error="worker-a retry atrasado",
+        run_after=worker_b_now + dt.timedelta(minutes=5),
+        claim=worker_a_claim,
+    ) is None
+    assert await repo.mark_outbox_failed(
+        session,
+        event.id,
+        error="worker-a failed atrasado",
+        claim=worker_a_claim,
+    ) is None
+    assert await repo.mark_outbox_delivered(
+        session,
+        event.id,
+        claim=worker_a_claim,
+    ) is None
+    await session.commit()
+
+    stored = (
+        await session.execute(select(OutboxEvent).where(OutboxEvent.id == event.id))
+    ).scalar_one()
+    assert stored.status == "delivered"
+    assert stored.attempts == 2
+    assert stored.last_error is None
+    assert stored.run_after is None
+    assert stored.locked_at is None
+    assert stored.locked_by is None
 
 
 async def test_note_link_replace_list_unresolved_e_resolve(session):

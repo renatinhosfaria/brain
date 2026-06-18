@@ -1,5 +1,6 @@
 import datetime as dt
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -14,6 +15,13 @@ from brain.storage.models import (
     NoteLink,
     OutboxEvent,
 )
+
+
+@dataclass(frozen=True)
+class OutboxClaimToken:
+    attempts: int
+    locked_at: dt.datetime | None
+    locked_by: str | None
 
 
 # ---------- Documentos ----------
@@ -441,8 +449,21 @@ async def claim_next_outbox_event(
     return event
 
 
-async def mark_outbox_delivered(session, id: uuid.UUID) -> OutboxEvent | None:
-    event = await _get_outbox_event(session, id)
+def outbox_claim_token(event: OutboxEvent) -> OutboxClaimToken:
+    return OutboxClaimToken(
+        attempts=event.attempts,
+        locked_at=event.locked_at,
+        locked_by=event.locked_by,
+    )
+
+
+async def mark_outbox_delivered(
+    session,
+    id: uuid.UUID,
+    *,
+    claim: OutboxClaimToken,
+) -> OutboxEvent | None:
+    event = await _get_outbox_event_for_claim(session, id, claim)
     if event is None:
         return None
     event.status = "delivered"
@@ -457,8 +478,10 @@ async def mark_outbox_retrying(
     id: uuid.UUID,
     error: str,
     run_after: dt.datetime,
+    *,
+    claim: OutboxClaimToken,
 ) -> OutboxEvent | None:
-    event = await _get_outbox_event(session, id)
+    event = await _get_outbox_event_for_claim(session, id, claim)
     if event is None:
         return None
     event.status = "retrying"
@@ -470,8 +493,14 @@ async def mark_outbox_retrying(
     return event
 
 
-async def mark_outbox_failed(session, id: uuid.UUID, error: str) -> OutboxEvent | None:
-    event = await _get_outbox_event(session, id)
+async def mark_outbox_failed(
+    session,
+    id: uuid.UUID,
+    error: str,
+    *,
+    claim: OutboxClaimToken,
+) -> OutboxEvent | None:
+    event = await _get_outbox_event_for_claim(session, id, claim)
     if event is None:
         return None
     event.status = "failed"
@@ -485,6 +514,26 @@ async def mark_outbox_failed(session, id: uuid.UUID, error: str) -> OutboxEvent 
 async def _get_outbox_event(session, id: uuid.UUID) -> OutboxEvent | None:
     return (
         await session.execute(select(OutboxEvent).where(OutboxEvent.id == id))
+    ).scalar_one_or_none()
+
+
+async def _get_outbox_event_for_claim(
+    session,
+    id: uuid.UUID,
+    claim: OutboxClaimToken,
+) -> OutboxEvent | None:
+    return (
+        await session.execute(
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.id == id,
+                OutboxEvent.status == "running",
+                OutboxEvent.attempts == claim.attempts,
+                OutboxEvent.locked_at == claim.locked_at,
+                OutboxEvent.locked_by == claim.locked_by,
+            )
+            .with_for_update()
+        )
     ).scalar_one_or_none()
 
 
