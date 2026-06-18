@@ -37,11 +37,20 @@ def normalize_repo_path(
     if require_markdown and not rel.endswith(".md"):
         raise ValueError("repo_path must end with .md")
 
-    repo_root = Path(repo_cache_path).resolve()
-    resolved = (repo_root / rel).resolve(strict=False)
     try:
-        resolved.relative_to(repo_root)
+        repo_root = Path(repo_cache_path).resolve()
+        resolved = (repo_root / rel).resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("repo_path cannot be resolved") from exc
+
+    try:
+        resolved_rel = resolved.relative_to(repo_root).as_posix()
     except ValueError as exc:
         raise ValueError("repo_path escapes repository") from exc
+
+    if resolved_rel == "_agents" or resolved_rel.startswith("_agents/"):
+        raise ValueError("agent notes are not indexed as curated documents")
+    if require_markdown and not resolved_rel.endswith(".md"):
+        raise ValueError("repo_path must end with .md")
 
     return rel, resolved

@@ -234,6 +234,48 @@ async def test_worker_rejeita_repo_path_que_resolve_fora_do_cache(ctx):
     assert row["last_error"] == "repo_path escapes repository"
 
 
+async def test_worker_rejeita_symlink_para_agents(ctx):
+    sf, queue, settings, tmp = ctx
+    settings = settings.model_copy(update={"max_job_attempts": 1})
+    agent_path = tmp / "_agents" / "codex" / "raw.md"
+    agent_path.parent.mkdir(parents=True)
+    agent_path.write_text("# Raw\nconteudo bruto", encoding="utf-8")
+    (tmp / "alias.md").symlink_to(agent_path)
+    jid = await queue.enqueue(
+        JobType.REINDEX.value,
+        {"namespace": "curated", "repo_path": "alias.md"},
+    )
+
+    assert await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings) is True
+
+    row = await _get_job_state(sf, jid)
+    async with sf() as s:
+        docs = await repo.list_documents(s)
+    assert docs == []
+    assert row["status"] == "failed"
+    assert row["last_error"] == "agent notes are not indexed as curated documents"
+
+
+async def test_worker_rejeita_symlink_markdown_para_alvo_nao_markdown(ctx):
+    sf, queue, settings, tmp = ctx
+    settings = settings.model_copy(update={"max_job_attempts": 1})
+    (tmp / "secret.txt").write_text("# Segredo\nnao markdown", encoding="utf-8")
+    (tmp / "alias.md").symlink_to(tmp / "secret.txt")
+    jid = await queue.enqueue(
+        JobType.REINDEX.value,
+        {"namespace": "curated", "repo_path": "alias.md"},
+    )
+
+    assert await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings) is True
+
+    row = await _get_job_state(sf, jid)
+    async with sf() as s:
+        docs = await repo.list_documents(s)
+    assert docs == []
+    assert row["status"] == "failed"
+    assert row["last_error"] == "repo_path must end with .md"
+
+
 async def test_worker_normaliza_repo_path_seguro_antes_de_indexar(ctx):
     sf, queue, settings, tmp = ctx
     note_path = tmp / "projetos" / "brain.md"

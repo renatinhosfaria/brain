@@ -199,6 +199,28 @@ async def test_webhook_enfileira_markdown_curado_com_namespace_curated(
     }
 
 
+async def test_webhook_ignora_loop_de_symlink_sem_500(
+    async_dsn, tmp_path, prepared_db, monkeypatch
+):
+    (tmp_path / "loop.md").symlink_to("loop.md")
+    monkeypatch.setattr(main.git_sync, "clone_or_pull", lambda *a, **k: ("old", "new"))
+    monkeypatch.setattr(
+        main.git_sync,
+        "changed_files",
+        lambda *a, **k: [("A", "loop.md"), ("A", "trabalho/nota.md")],
+    )
+    app = create_app(*build_deps(_settings(async_dsn, tmp_path)))
+    body = b'{"ref":"refs/heads/main"}'
+    sig = "sha256=" + hmac.new(b"seg", body, hashlib.sha256).hexdigest()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        r = client.post("/webhook/github", content=body, headers={"X-Hub-Signature-256": sig})
+
+    assert r.status_code == 200
+    assert r.json() == {"enqueued": 1}
+    rows = await _queued_jobs(async_dsn)
+    assert [row["payload"]["repo_path"] for row in rows] == ["trabalho/nota.md"]
+
+
 def test_mcp_rota_publica_existe_com_auth_valida(async_dsn, tmp_path, prepared_db):
     app = create_app(*build_deps(_settings(async_dsn, tmp_path)))
     headers = {"Authorization": "Bearer curator-token", "host": "localhost"}
