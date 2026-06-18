@@ -835,7 +835,7 @@ async def test_curator_cria_agent_client_e_recebe_token_uma_vez(deps):
     assert out["token"].startswith("brain_client_chatgpt-web_")
     assert out["token"].startswith(out["token_prefix"])
     assert len(out["token_prefix"]) < len(out["token"])
-    assert out["permissions"] == ["search", "get_note", "submit_agent_note"]
+    assert out["permissions"] == ["search", "deep_search", "get_note", "submit_agent_note"]
 
     clients = await _as_curator(handlers.list_agent_clients, deps)
     got = await _as_curator(handlers.get_agent_client, deps, "chatgpt-web")

@@ -1037,7 +1037,7 @@ async def create_agent_client(
     token = auth.generate_client_token(client_slug)
     token_prefix = _token_prefix(token, client_slug)
     token_hash = auth.hash_token(token)
-    permissions = ["search", "get_note", "submit_agent_note"]
+    permissions = ["search", "deep_search", "get_note", "submit_agent_note"]
 
     async with deps.session_factory() as s:
         try:
