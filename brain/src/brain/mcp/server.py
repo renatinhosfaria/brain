@@ -34,6 +34,35 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         )
 
     @mcp.tool()
+    async def list_agent_notes(
+        status: str | None = None,
+        client_slug: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict:
+        return await handlers.list_agent_notes(deps, status, client_slug, limit, cursor)
+
+    @mcp.tool()
+    async def get_agent_note(note_id: str) -> dict | None:
+        return await handlers.get_agent_note(deps, note_id)
+
+    @mcp.tool()
+    async def claim_agent_note(note_id: str) -> dict:
+        return await handlers.claim_agent_note(deps, note_id)
+
+    @mcp.tool()
+    async def complete_agent_note(note_id: str, outcome: dict | None = None) -> dict:
+        return await handlers.complete_agent_note(deps, note_id, outcome)
+
+    @mcp.tool()
+    async def reject_agent_note(note_id: str, reason: str | None = None) -> dict:
+        return await handlers.reject_agent_note(deps, note_id, reason)
+
+    @mcp.tool()
+    async def fail_agent_note(note_id: str, error: str | None = None) -> dict:
+        return await handlers.fail_agent_note(deps, note_id, error)
+
+    @mcp.tool()
     async def get_memory(id: str) -> dict | None:
         return await handlers.get_memory(deps, id)
 

@@ -75,6 +75,15 @@ async def _create_client_as_curator(deps, **kwargs):
     )
 
 
+async def _submit_note_as_client(deps, principal=CLIENT, **kwargs):
+    return await _as_principal(
+        principal,
+        handlers.submit_agent_note,
+        deps,
+        **({"title": "Nota bruta", "content": "Conteudo bruto."} | kwargs),
+    )
+
+
 def _assert_safe_client(client: dict) -> None:
     assert "token" not in client
     assert "token_hash" not in client
@@ -227,40 +236,47 @@ async def test_principal_client_nao_gerencia_agent_clients(deps):
 def _curator_only_call(case: str, deps):
     memory_id = "00000000-0000-0000-0000-000000000000"
     calls = {
-        "remember": (handlers.remember, (deps, "trabalho", [{"role": "user", "content": "x"}]), {}),
-        "get_memory": (handlers.get_memory, (deps, memory_id), {}),
-        "list_memories": (handlers.list_memories, (deps,), {}),
-        "update_memory": (handlers.update_memory, (deps, memory_id, "novo"), {}),
-        "move_memory": (handlers.move_memory, (deps, memory_id, "trabalho"), {}),
-        "delete_memory": (handlers.delete_memory, (deps, memory_id), {}),
-        "merge_memories": (handlers.merge_memories, (deps, [memory_id]), {}),
-        "get_document": (handlers.get_document, (deps, memory_id), {}),
-        "list_documents": (handlers.list_documents, (deps,), {}),
-        "reindex": (handlers.reindex, (deps, "a.md", "t"), {}),
-        "create_agent_client": (handlers.create_agent_client, (deps, "Codex"), {}),
-        "list_agent_clients": (handlers.list_agent_clients, (deps,), {}),
-        "get_agent_client": (handlers.get_agent_client, (deps, "chatgpt-web"), {}),
+        "remember": ("remember", (deps, "trabalho", [{"role": "user", "content": "x"}]), {}),
+        "get_memory": ("get_memory", (deps, memory_id), {}),
+        "list_memories": ("list_memories", (deps,), {}),
+        "update_memory": ("update_memory", (deps, memory_id, "novo"), {}),
+        "move_memory": ("move_memory", (deps, memory_id, "trabalho"), {}),
+        "delete_memory": ("delete_memory", (deps, memory_id), {}),
+        "merge_memories": ("merge_memories", (deps, [memory_id]), {}),
+        "get_document": ("get_document", (deps, memory_id), {}),
+        "list_documents": ("list_documents", (deps,), {}),
+        "reindex": ("reindex", (deps, "a.md", "t"), {}),
+        "create_agent_client": ("create_agent_client", (deps, "Codex"), {}),
+        "list_agent_clients": ("list_agent_clients", (deps,), {}),
+        "get_agent_client": ("get_agent_client", (deps, "chatgpt-web"), {}),
         "reveal_agent_client_token": (
-            handlers.reveal_agent_client_token,
+            "reveal_agent_client_token",
             (deps, "chatgpt-web"),
             {},
         ),
         "rotate_agent_client_token": (
-            handlers.rotate_agent_client_token,
+            "rotate_agent_client_token",
             (deps, "chatgpt-web"),
             {},
         ),
-        "disable_agent_client": (handlers.disable_agent_client, (deps, "chatgpt-web"), {}),
-        "get_entity": (handlers.get_entity, (deps, "Pessoa", "t"), {}),
-        "search_entities": (handlers.search_entities, (deps, "Pessoa", "t"), {}),
-        "get_related": (handlers.get_related, (deps, "Pessoa", "t"), {}),
-        "update_entity": (handlers.update_entity, (deps, "Pessoa", "t", {"x": 1}), {}),
-        "merge_entities": (handlers.merge_entities, (deps, ["A"], "B", "t"), {}),
-        "delete_entity": (handlers.delete_entity, (deps, "Pessoa", "t"), {}),
-        "create_namespace": (handlers.create_namespace, (deps, "t", "trabalho"), {}),
-        "list_namespaces": (handlers.list_namespaces, (deps,), {}),
+        "disable_agent_client": ("disable_agent_client", (deps, "chatgpt-web"), {}),
+        "list_agent_notes": ("list_agent_notes", (deps,), {}),
+        "get_agent_note": ("get_agent_note", (deps, memory_id), {}),
+        "claim_agent_note": ("claim_agent_note", (deps, memory_id), {}),
+        "complete_agent_note": ("complete_agent_note", (deps, memory_id), {}),
+        "reject_agent_note": ("reject_agent_note", (deps, memory_id), {}),
+        "fail_agent_note": ("fail_agent_note", (deps, memory_id), {}),
+        "get_entity": ("get_entity", (deps, "Pessoa", "t"), {}),
+        "search_entities": ("search_entities", (deps, "Pessoa", "t"), {}),
+        "get_related": ("get_related", (deps, "Pessoa", "t"), {}),
+        "update_entity": ("update_entity", (deps, "Pessoa", "t", {"x": 1}), {}),
+        "merge_entities": ("merge_entities", (deps, ["A"], "B", "t"), {}),
+        "delete_entity": ("delete_entity", (deps, "Pessoa", "t"), {}),
+        "create_namespace": ("create_namespace", (deps, "t", "trabalho"), {}),
+        "list_namespaces": ("list_namespaces", (deps,), {}),
     }
-    return calls[case]
+    handler_name, args, kwargs = calls[case]
+    return getattr(handlers, handler_name), args, kwargs
 
 
 @pytest.mark.parametrize(
@@ -282,6 +298,12 @@ def _curator_only_call(case: str, deps):
         "reveal_agent_client_token",
         "rotate_agent_client_token",
         "disable_agent_client",
+        "list_agent_notes",
+        "get_agent_note",
+        "claim_agent_note",
+        "complete_agent_note",
+        "reject_agent_note",
+        "fail_agent_note",
         "get_entity",
         "search_entities",
         "get_related",
@@ -308,8 +330,7 @@ async def test_search_permite_principal_client(deps):
 async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     await _create_client_as_curator(deps)
 
-    out = await _as_client(
-        handlers.submit_agent_note,
+    out = await _submit_note_as_client(
         deps,
         title="Resumo antes da compressao",
         content="Conteudo livre enviado pelo client.",
@@ -362,20 +383,203 @@ async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     assert "metadata" not in event.payload["agent_note"]
 
 
+async def test_curator_lista_agent_notes_pendentes_sem_conteudo_bruto(deps):
+    await _create_client_as_curator(deps)
+    await _create_client_as_curator(deps, slug="codex", name="Codex")
+    codex = auth.Principal("client", "codex", "Codex")
+    first = await _submit_note_as_client(
+        deps,
+        title="Primeira nota",
+        content="Conteudo que nao deve aparecer na listagem.",
+        metadata={"source": "chatgpt"},
+    )
+    second = await _submit_note_as_client(deps, title="Segunda nota", content="Outro conteudo.")
+    await _submit_note_as_client(deps, codex, title="Nota Codex", content="Conteudo Codex.")
+
+    page = await _as_curator(
+        handlers.list_agent_notes,
+        deps,
+        status="pending",
+        client_slug="chatgpt-web",
+        limit=1,
+    )
+
+    assert set(page) == {"items", "next_cursor"}
+    assert len(page["items"]) == 1
+    assert page["next_cursor"] == "1"
+    assert page["items"][0]["client_slug"] == "chatgpt-web"
+    assert page["items"][0]["status"] == "pending"
+    assert "content" not in page["items"][0]
+
+    next_page = await _as_curator(
+        handlers.list_agent_notes,
+        deps,
+        status="pending",
+        client_slug="chatgpt-web",
+        limit=1,
+        cursor=page["next_cursor"],
+    )
+
+    listed_ids = {page["items"][0]["id"], next_page["items"][0]["id"]}
+    assert listed_ids == {first["note_id"], second["note_id"]}
+    assert next_page["next_cursor"] is None
+
+
+async def test_curator_obtem_conteudo_bruto_da_agent_note(deps):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(
+        deps,
+        title="Nota com markdown",
+        content="Conteudo livre enviado pelo client.",
+        messages=[{"role": "assistant", "content": "Detalhe adicional."}],
+        suggested_namespace="brain",
+        metadata={"model": "gpt-5.5"},
+    )
+
+    got = await _as_curator(handlers.get_agent_note, deps, submitted["note_id"])
+
+    assert got["id"] == submitted["note_id"]
+    assert got["repo_path"] == submitted["repo_path"]
+    assert got["status"] == "pending"
+    assert got["metadata"] == {"model": "gpt-5.5"}
+    assert got["suggested_namespace"] == "brain"
+    assert "Conteudo livre enviado pelo client." in got["content"]
+    assert "**assistant:** Detalhe adicional." in got["content"]
+
+
+async def test_client_nao_lista_nem_obtem_agent_notes_brutas(deps):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+
+    with pytest.raises(PermissionError, match="curator required"):
+        await _as_client(handlers.list_agent_notes, deps)
+    with pytest.raises(PermissionError, match="curator required"):
+        await _as_client(handlers.get_agent_note, deps, submitted["note_id"])
+
+
+async def test_claim_agent_note_muda_pending_para_in_review(deps):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+
+    claimed = await _as_curator(handlers.claim_agent_note, deps, submitted["note_id"])
+
+    assert claimed["status"] == "in_review"
+    assert claimed["claimed_at"] is not None
+    assert claimed["completed_at"] is None
+    async with deps.session_factory() as s:
+        note = await repo.get_agent_note(s, uuid.UUID(submitted["note_id"]))
+    assert note.status == "in_review"
+    assert note.claimed_at is not None
+
+
+@pytest.mark.parametrize("claim_first", [False, True])
+async def test_complete_agent_note_funciona_de_pending_ou_in_review(deps, claim_first):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+    if claim_first:
+        await _as_curator(handlers.claim_agent_note, deps, submitted["note_id"])
+
+    completed = await _as_curator(handlers.complete_agent_note, deps, submitted["note_id"])
+
+    assert completed["status"] == "curated"
+    assert completed["completed_at"] is not None
+    async with deps.session_factory() as s:
+        note = await repo.get_agent_note(s, uuid.UUID(submitted["note_id"]))
+    assert note.status == "curated"
+    assert note.completed_at is not None
+
+
+@pytest.mark.parametrize("claim_first", [False, True])
+async def test_reject_agent_note_funciona_de_pending_ou_in_review(deps, claim_first):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+    if claim_first:
+        await _as_curator(handlers.claim_agent_note, deps, submitted["note_id"])
+
+    rejected = await _as_curator(
+        handlers.reject_agent_note,
+        deps,
+        submitted["note_id"],
+        reason="Sem informacao persistente.",
+    )
+
+    assert rejected["status"] == "rejected"
+    assert rejected["outcome"]["reason"] == "Sem informacao persistente."
+    assert rejected["completed_at"] is not None
+    async with deps.session_factory() as s:
+        note = await repo.get_agent_note(s, uuid.UUID(submitted["note_id"]))
+    assert note.status == "rejected"
+    assert note.outcome == {"reason": "Sem informacao persistente."}
+
+
+async def test_fail_agent_note_armazena_error(deps):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+
+    failed = await _as_curator(
+        handlers.fail_agent_note,
+        deps,
+        submitted["note_id"],
+        error="Falha ao processar markdown.",
+    )
+
+    assert failed["status"] == "failed"
+    assert failed["error"] == "Falha ao processar markdown."
+    assert failed["completed_at"] is not None
+    async with deps.session_factory() as s:
+        note = await repo.get_agent_note(s, uuid.UUID(submitted["note_id"]))
+    assert note.status == "failed"
+    assert note.error == "Falha ao processar markdown."
+
+
+async def test_complete_agent_note_armazena_outcome_flexivel(deps):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+    outcome = {
+        "created": [{"namespace": "brain", "memory_id": str(uuid.uuid4())}],
+        "skipped": False,
+        "notes": ["mantem estrutura flexivel"],
+    }
+
+    completed = await _as_curator(
+        handlers.complete_agent_note,
+        deps,
+        submitted["note_id"],
+        outcome=outcome,
+    )
+
+    assert completed["status"] == "curated"
+    assert completed["outcome"] == outcome
+    async with deps.session_factory() as s:
+        note = await repo.get_agent_note(s, uuid.UUID(submitted["note_id"]))
+    assert note.outcome == outcome
+
+
+async def test_agent_note_terminal_nao_volta_para_estado_nao_terminal(deps):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+    await _as_curator(handlers.complete_agent_note, deps, submitted["note_id"])
+
+    with pytest.raises(ValueError, match="terminal"):
+        await _as_curator(handlers.claim_agent_note, deps, submitted["note_id"])
+
+    async with deps.session_factory() as s:
+        note = await repo.get_agent_note(s, uuid.UUID(submitted["note_id"]))
+    assert note.status == "curated"
+
+
 async def test_submit_agent_note_mesmo_timestamp_e_titulo_cria_paths_distintos(
     deps, monkeypatch
 ):
     await _create_client_as_curator(deps)
     monkeypatch.setattr(handlers, "_now_stamp", lambda: "20260617T183000000000")
 
-    first = await _as_client(
-        handlers.submit_agent_note,
+    first = await _submit_note_as_client(
         deps,
         title="Resumo repetido",
         content="Primeira nota.",
     )
-    second = await _as_client(
-        handlers.submit_agent_note,
+    second = await _submit_note_as_client(
         deps,
         title="Resumo repetido",
         content="Segunda nota.",
@@ -488,8 +692,7 @@ async def test_submit_agent_note_persiste_db_e_outbox_quando_push_falha(deps, mo
     monkeypatch.setattr(handlers.git_writer, "_push_with_retry", fail_push)
 
     with pytest.raises(RuntimeError, match="push failed after local commit"):
-        await _as_client(
-            handlers.submit_agent_note,
+        await _submit_note_as_client(
             deps,
             title="Push posterior",
             content="Conteudo que deve continuar rastreavel.",
@@ -518,8 +721,7 @@ async def test_submit_agent_note_rollback_db_quando_git_write_falha(deps, monkey
     monkeypatch.setattr(handlers.git_writer, "write_agent_note", fail_write)
 
     with pytest.raises(RuntimeError, match="git write failed"):
-        await _as_client(
-            handlers.submit_agent_note,
+        await _submit_note_as_client(
             deps,
             title="Falha antes do commit git",
             content="Nao deve deixar nota pendente.",
