@@ -834,6 +834,12 @@ async def test_search_preserva_namespace_none_limit_graph_posicionais_legados(de
     assert out["graph"] == []
 
 
+@pytest.mark.parametrize("limit", [True, False, "10", 1.5])
+async def test_search_rejeita_limit_invalido_com_namespace_none_posicional(deps, limit):
+    with pytest.raises(ValueError, match="limit"):
+        await _as_client(handlers.search, deps, "brain", None, limit)
+
+
 async def test_search_public_posicional_limit_filters_funciona(deps):
     await _as_curator(
         handlers.create_note,

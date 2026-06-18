@@ -381,16 +381,7 @@ async def search(
     if legacy_args:
         if len(legacy_args) > 3:
             raise TypeError("search accepts at most three positional arguments after query")
-        legacy_namespace_call = isinstance(legacy_args[0], str) or (
-            legacy_args[0] is None
-            and (
-                len(legacy_args) == 1
-                or (
-                    isinstance(legacy_args[1], int)
-                    and not isinstance(legacy_args[1], bool)
-                )
-            )
-        )
+        legacy_namespace_call = isinstance(legacy_args[0], str) or legacy_args[0] is None
         if legacy_namespace_call:
             namespace = legacy_args[0]
             if len(legacy_args) >= 2:
