@@ -22,6 +22,10 @@ from brain.storage.db import make_engine, make_session_factory
 log = structlog.get_logger()
 
 
+def _is_agent_repo_path(path: str) -> bool:
+    return path == "_agents" or path.startswith("_agents/")
+
+
 def verify_signature(secret: str, body: bytes, header: str | None) -> bool:
     if not header or not header.startswith("sha256="):
         return False
@@ -128,13 +132,14 @@ def create_app(deps: Deps, sf) -> FastAPI:
         )
         enqueued = 0
         for code, path in git_sync.changed_files(settings.repo_cache_path, before, after):
-            namespace = path.split("/")[0]
+            if _is_agent_repo_path(path):
+                continue
             if code == "D":
                 await deps.queue.enqueue(JobType.DELETE_DOCUMENT.value, {"repo_path": path})
             else:
                 await deps.queue.enqueue(
                     JobType.INDEX_DOCUMENT.value,
-                    {"namespace": namespace, "repo_path": path, "commit_sha": after},
+                    {"namespace": "curated", "repo_path": path, "commit_sha": after},
                 )
             enqueued += 1
         return {"enqueued": enqueued}

@@ -3,7 +3,7 @@ import datetime as dt
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from brain.config import Settings
 from brain.outbox import sign_webhook
@@ -71,13 +71,38 @@ async def test_worker_processa_index_document(ctx):
     assert doc is not None
 
 
+async def test_worker_nao_indexa_agents_como_documento_curado(ctx):
+    sf, queue, settings, tmp = ctx
+    settings = settings.model_copy(update={"max_job_attempts": 1})
+    agent_path = tmp / "_agents" / "codex" / "raw.md"
+    agent_path.parent.mkdir(parents=True)
+    agent_path.write_text("# Raw\nconteudo bruto", encoding="utf-8")
+    jid = await queue.enqueue(
+        JobType.INDEX_DOCUMENT.value,
+        {"namespace": "curated", "repo_path": "_agents/codex/raw.md"},
+    )
+
+    assert await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings) is True
+
+    async with sf() as s:
+        row = (
+            await s.execute(
+                text("SELECT status, last_error FROM ingestion_jobs WHERE id=:id"),
+                {"id": jid},
+            )
+        ).mappings().one()
+        doc = await repo.get_document(s, repo_path="_agents/codex/raw.md")
+    assert doc is None
+    assert row["status"] == "failed"
+    assert row["last_error"] == "agent notes are not indexed as curated documents"
+
+
 async def test_worker_job_desconhecido_vai_para_failed(ctx):
     sf, queue, settings, _ = ctx
     jid = await queue.enqueue("tipo_invalido", {})
     # esgota tentativas
     for _ in range(settings.max_job_attempts):
         await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings)
-    from sqlalchemy import text
     async with sf() as s:
         status = (await s.execute(
             text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": jid}

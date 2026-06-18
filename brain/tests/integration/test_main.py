@@ -7,11 +7,13 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from brain import auth
 from brain import main
 from brain.config import Settings
 from brain.main import build_deps, create_app
+from brain.queue.base import JobType
 from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
 from brain.storage.models import Base
@@ -33,6 +35,19 @@ def _settings(async_dsn, tmp_path) -> Settings:
         repo_cache_path=str(tmp_path), git_push_enabled=False,
         brain_curator_token="curator-token",
     )
+
+
+async def _queued_jobs(async_dsn):
+    engine = make_engine(async_dsn)
+    sf = make_session_factory(engine)
+    async with sf() as session:
+        rows = (
+            await session.execute(
+                text("SELECT type, payload FROM ingestion_jobs ORDER BY created_at, id")
+            )
+        ).mappings().all()
+    await engine.dispose()
+    return rows
 
 
 @pytest_asyncio.fixture
@@ -131,6 +146,54 @@ def test_webhook_enfileira_jobs(async_dsn, tmp_path, prepared_db, monkeypatch):
     with TestClient(app) as client:
         r = client.post("/webhook/github", content=body, headers={"X-Hub-Signature-256": sig})
     assert r.json() == {"enqueued": 2}
+
+
+async def test_webhook_ignora_alteracoes_em_agents(async_dsn, tmp_path, prepared_db, monkeypatch):
+    monkeypatch.setattr(main.git_sync, "clone_or_pull", lambda *a, **k: ("old", "new"))
+    monkeypatch.setattr(
+        main.git_sync,
+        "changed_files",
+        lambda *a, **k: [
+            ("A", "_agents"),
+            ("A", "_agents/codex/raw.md"),
+            ("M", "_agents/chatgpt-web/nota.md"),
+            ("A", "trabalho/nota.md"),
+        ],
+    )
+    app = create_app(*build_deps(_settings(async_dsn, tmp_path)))
+    body = b'{"ref":"refs/heads/main"}'
+    sig = "sha256=" + hmac.new(b"seg", body, hashlib.sha256).hexdigest()
+    with TestClient(app) as client:
+        r = client.post("/webhook/github", content=body, headers={"X-Hub-Signature-256": sig})
+
+    assert r.json() == {"enqueued": 1}
+    rows = await _queued_jobs(async_dsn)
+    assert [row["payload"]["repo_path"] for row in rows] == ["trabalho/nota.md"]
+
+
+async def test_webhook_enfileira_markdown_curado_com_namespace_curated(
+    async_dsn, tmp_path, prepared_db, monkeypatch
+):
+    monkeypatch.setattr(main.git_sync, "clone_or_pull", lambda *a, **k: ("old", "new"))
+    monkeypatch.setattr(
+        main.git_sync,
+        "changed_files",
+        lambda *a, **k: [("A", "projetos/brain.md")],
+    )
+    app = create_app(*build_deps(_settings(async_dsn, tmp_path)))
+    body = b'{"ref":"refs/heads/main"}'
+    sig = "sha256=" + hmac.new(b"seg", body, hashlib.sha256).hexdigest()
+    with TestClient(app) as client:
+        r = client.post("/webhook/github", content=body, headers={"X-Hub-Signature-256": sig})
+
+    assert r.json() == {"enqueued": 1}
+    rows = await _queued_jobs(async_dsn)
+    assert [row["type"] for row in rows] == [JobType.INDEX_DOCUMENT.value]
+    assert rows[0]["payload"] == {
+        "namespace": "curated",
+        "repo_path": "projetos/brain.md",
+        "commit_sha": "new",
+    }
 
 
 def test_mcp_rota_publica_existe_com_auth_valida(async_dsn, tmp_path, prepared_db):

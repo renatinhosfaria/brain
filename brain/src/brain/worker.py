@@ -15,13 +15,20 @@ from brain.storage.db import make_engine, make_session_factory
 log = structlog.get_logger()
 
 
+def _is_agent_repo_path(path: str) -> bool:
+    return path == "_agents" or path.startswith("_agents/")
+
+
 async def handle_job(session, embedder, llm, settings, job) -> None:
     p = job.payload
     if job.type in ("index_document", "reindex"):
-        content = (Path(settings.repo_cache_path) / p["repo_path"]).read_text(encoding="utf-8")
+        repo_path = p["repo_path"]
+        if _is_agent_repo_path(repo_path):
+            raise ValueError("agent notes are not indexed as curated documents")
+        content = (Path(settings.repo_cache_path) / repo_path).read_text(encoding="utf-8")
         await pipeline.index_document(
             session, embedder, llm, settings,
-            namespace=p["namespace"], repo_path=p["repo_path"],
+            namespace=p["namespace"], repo_path=repo_path,
             content=content, commit_sha=p.get("commit_sha"),
         )
     elif job.type == "delete_document":
