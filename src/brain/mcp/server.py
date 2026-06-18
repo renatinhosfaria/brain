@@ -12,6 +12,27 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         return await handlers.search(deps, query, limit=limit, filters=filters)
 
     @mcp.tool()
+    async def deep_search(
+        query: str,
+        limit: int = 10,
+        depth: int = 1,
+        max_entities: int = 3,
+        rel_types: list[str] | None = None,
+        filters: dict | None = None,
+        namespace: str = "curated",
+    ) -> dict:
+        return await handlers.deep_search(
+            deps,
+            query,
+            limit=limit,
+            depth=depth,
+            max_entities=max_entities,
+            rel_types=rel_types,
+            filters=filters,
+            namespace=namespace,
+        )
+
+    @mcp.tool()
     async def create_note(
         path: str,
         content: str,

@@ -14,6 +14,7 @@ from brain.ingestion import pipeline
 from brain.notes.links import extract_obsidian_links
 from brain.queue.base import JobType
 from brain.repo_paths import normalize_repo_path
+from brain.search.retriever import deep_search as _deep_search
 from brain.search.retriever import search as _search
 from brain.storage import repositories as repo
 
@@ -47,6 +48,14 @@ def _require_client():
 
 def _require_client_or_curator():
     return auth.get_current_principal()
+
+
+def _bounded_int(value, *, name: str, min_value: int, max_value: int) -> int:  # noqa: ANN001
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} deve ser um inteiro entre {min_value} e {max_value}")
+    if value < min_value or value > max_value:
+        raise ValueError(f"{name} deve ser entre {min_value} e {max_value}")
+    return value
 
 
 def _require_token_encryption_key(settings) -> str:
@@ -503,6 +512,43 @@ async def search(
             filters=filters if isinstance(filters, dict) else None,
             namespace=namespace if isinstance(namespace, str) else None,
             include_graph=include_graph,
+        )
+
+
+async def deep_search(
+    deps: Deps,
+    query: str,
+    *,
+    limit: int | None = 10,
+    depth: int = 1,
+    max_entities: int = 3,
+    rel_types: list[str] | None = None,
+    filters: dict | None = None,
+    namespace: str = "curated",
+) -> dict:
+    _require_client_or_curator()
+    resolved_limit = repo.normalize_search_limit(10 if limit is None else limit)
+    resolved_depth = _bounded_int(depth, name="depth", min_value=1, max_value=3)
+    resolved_max_entities = _bounded_int(
+        max_entities,
+        name="max_entities",
+        min_value=1,
+        max_value=3,
+    )
+    resolved_rel_types = None if rel_types == [] else rel_types
+
+    async with deps.session_factory() as s:
+        return await _deep_search(
+            s,
+            deps.embedder,
+            deps.llm,
+            query,
+            limit=resolved_limit,
+            depth=resolved_depth,
+            max_entities=resolved_max_entities,
+            rel_types=resolved_rel_types,
+            filters=filters if isinstance(filters, dict) else None,
+            namespace=namespace if isinstance(namespace, str) else "curated",
         )
 
 
