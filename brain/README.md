@@ -104,9 +104,9 @@ ao curador para compatibilidade e operações.
 Notas brutas de clientes ficam em `_agents/{slug}/...` e representam inbox de
 curadoria. Clientes não conseguem ler essas notas brutas pelo MCP.
 
-Notas curadas são criadas fora de `_agents/` com `create_note` ou
-`update_note`. Só notas curadas entram na busca, em `get_note` para clientes, e
-na resolução de links do vault.
+Notas curadas são criadas fora de `_agents/` com `create_note` e atualizadas
+com `update_note`. Só notas curadas entram na busca, em `get_note` para
+clientes, e na resolução de links do vault.
 
 Quando um cliente chama `submit_agent_note`, o brain grava a nota em `_agents/`,
 cria um evento `agent_note.created` no outbox e faz push se
