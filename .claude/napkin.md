@@ -14,11 +14,14 @@
 - Stack Docker validado: `docker compose build` + `up` sobe postgres+api+worker; migration aplica no boot; `/health` → ok.
 
 ## Patterns That Work
-- `uv` instalado em ~/.local/bin; prefixar `export PATH="$HOME/.local/bin:$PATH"` nos comandos Bash (env não persiste entre chamadas). Rodar testes: `cd /root/brain/brain && uv run pytest`.
+- `uv` instalado em ~/.local/bin; prefixar `export PATH="$HOME/.local/bin:$PATH"` nos comandos Bash (env não persiste entre chamadas). Rodar testes: `cd /root/brain && uv run pytest` (o projeto foi achatado: agora `src/` e `pyproject.toml` vivem direto em `/root/brain`, NÃO mais em `/root/brain/brain`).
 - Imagem `brain-postgres:local` builda em ~1min (AGE compilado). Testcontainers sobe ela rápido. Testes de integração precisam dela construída.
 
 ## Patterns That Don't Work
 - (acumular aqui)
+
+## Lacunas/bugs ainda ABERTOS (não corrigidos)
+- `remember` (handlers.py:51) ACEITA o parâmetro `metadata` mas NUNCA o usa/grava — silenciosamente descartado. A tabela `documents` (models.py) não tem coluna de autor; só `memories.meta` (jsonb) existe e também não é preenchido por extract_and_store_facts. Resultado: nota de conversa registra QUANDO (nome do arquivo + commit + created_at) mas não QUEM (commit é sempre brain-bot; só o namespace marca contexto). O texto do .md (git_writer.render_markdown) também não inclui timestamp/autor no corpo. Se for pedir "quem criou/quando", corrigir: cabeçalho no .md + persistir metadata.
 
 ## Lacunas do plano (corrigidas durante execução)
 - Plano usa `sync_dsn` (DSN psycopg2 do testcontainers) nos testes de infra, mas NÃO lista `psycopg2`. `testcontainers[postgres]` 4.14 não traz psycopg2. **Correção:** `uv add --dev psycopg2-binary` (Task 2).
