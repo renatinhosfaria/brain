@@ -198,6 +198,40 @@ def test_write_agent_client_profile_rollback_create_quando_commit_falha(tmp_path
     assert _git(["status", "--short"], repo).stdout == ""
 
 
+def test_write_agent_client_profile_mantem_commit_local_quando_push_falha(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+
+    def fail_push(*args, **kwargs):
+        raise RuntimeError("push failed after local commit")
+
+    monkeypatch.setattr(git_writer, "_push_with_retry", fail_push)
+
+    rel = "_agents/chatgpt-web/chatgpt-web.md"
+    with pytest.raises(RuntimeError, match="push failed after local commit"):
+        git_writer.write_agent_client_profile(
+            repo,
+            inbox_dir="_agents",
+            client_slug="chatgpt-web",
+            client_name="ChatGPT Web",
+            token_prefix="brain_client_chatgpt-web",
+            token="brain_client_chatgpt-web_secret",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=True,
+        )
+
+    assert (repo / rel).exists()
+    assert "token_prefix: brain_client_chatgpt-web" in (repo / rel).read_text(
+        encoding="utf-8"
+    )
+    committed = _git(["show", f"HEAD:{rel}"], repo).stdout
+    assert "token_prefix: brain_client_chatgpt-web" in committed
+    assert _git(["status", "--short"], repo).stdout == ""
+
+
 def test_write_agent_note_cria_apenas_na_pasta_do_client(tmp_path):
     repo = tmp_path / "vault"
     _init_repo(repo)
@@ -310,6 +344,43 @@ def test_write_agent_note_rollback_create_quando_commit_falha(tmp_path, monkeypa
 
     assert not (repo / "_agents" / "chatgpt-web").exists()
     assert not (repo / "_agents").exists()
+    assert _git(["status", "--short"], repo).stdout == ""
+
+
+def test_write_agent_note_mantem_commit_local_quando_push_falha(tmp_path, monkeypatch):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+
+    def fail_push(*args, **kwargs):
+        raise RuntimeError("push failed after local commit")
+
+    monkeypatch.setattr(git_writer, "_push_with_retry", fail_push)
+
+    rel = (
+        "_agents/chatgpt-web/2026/06/17/"
+        "20260617T183000000000-resumo-agent-note-1.md"
+    )
+    with pytest.raises(RuntimeError, match="push failed after local commit"):
+        git_writer.write_agent_note(
+            repo,
+            inbox_dir="_agents",
+            client_slug="chatgpt-web",
+            client_name="ChatGPT Web",
+            note_id="agent_note_1",
+            title="Resumo",
+            content="Conteudo que deve ficar commitado.",
+            timestamp="20260617T183000000000",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=True,
+        )
+
+    assert (repo / rel).exists()
+    assert "Conteudo que deve ficar commitado." in (repo / rel).read_text(
+        encoding="utf-8"
+    )
+    committed = _git(["show", f"HEAD:{rel}"], repo).stdout
+    assert "Conteudo que deve ficar commitado." in committed
     assert _git(["status", "--short"], repo).stdout == ""
 
 

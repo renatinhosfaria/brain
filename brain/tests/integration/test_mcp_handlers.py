@@ -1642,6 +1642,101 @@ async def test_submit_agent_note_persiste_db_e_outbox_quando_push_falha(deps, mo
     assert events[0].payload["agent_note"]["repo_path"] == notes[0].repo_path
 
 
+async def test_create_agent_client_persiste_db_e_git_local_quando_push_falha(
+    deps, monkeypatch
+):
+    deps.settings.git_push_enabled = True
+    token = "brain_client_codex_created-secret"
+
+    def fail_push(*args, **kwargs):
+        raise RuntimeError("push failed after local commit")
+
+    monkeypatch.setattr(handlers.auth, "generate_client_token", lambda slug: token)
+    monkeypatch.setattr(handlers.git_writer, "push_repo", fail_push, raising=False)
+    monkeypatch.setattr(handlers.git_writer, "_push_with_retry", fail_push)
+
+    with pytest.raises(RuntimeError, match="push failed after local commit"):
+        await _create_client_as_curator(deps, slug="codex", name="Codex")
+
+    async with deps.session_factory() as s:
+        client = await repo.get_agent_client(s, slug="codex")
+
+    expected_prefix = handlers._token_prefix(token, "codex")
+    profile_path = "_agents/codex/codex.md"
+    profile = Path(deps.settings.repo_cache_path) / profile_path
+    assert client is not None
+    assert client.token_hash == auth.hash_token(token)
+    assert client.token_prefix == expected_prefix
+    assert profile.exists()
+    assert expected_prefix in profile.read_text(encoding="utf-8")
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{profile_path}"],
+        cwd=deps.settings.repo_cache_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert expected_prefix in committed
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=deps.settings.repo_cache_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
+
+
+async def test_rotate_agent_client_persiste_token_e_git_local_quando_push_falha(
+    deps, monkeypatch
+):
+    await _create_client_as_curator(deps, slug="codex", name="Codex")
+    async with deps.session_factory() as s:
+        before = await repo.get_agent_client(s, slug="codex")
+        old_hash = before.token_hash
+
+    deps.settings.git_push_enabled = True
+    token = "brain_client_codex_rotated-secret"
+
+    def fail_push(*args, **kwargs):
+        raise RuntimeError("push failed after local commit")
+
+    monkeypatch.setattr(handlers.auth, "generate_client_token", lambda slug: token)
+    monkeypatch.setattr(handlers.git_writer, "push_repo", fail_push, raising=False)
+    monkeypatch.setattr(handlers.git_writer, "_push_with_retry", fail_push)
+
+    with pytest.raises(RuntimeError, match="push failed after local commit"):
+        await _as_curator(handlers.rotate_agent_client_token, deps, "codex")
+
+    async with deps.session_factory() as s:
+        after = await repo.get_agent_client(s, slug="codex")
+
+    expected_prefix = handlers._token_prefix(token, "codex")
+    profile_path = "_agents/codex/codex.md"
+    profile = Path(deps.settings.repo_cache_path) / profile_path
+    assert after.token_hash == auth.hash_token(token)
+    assert after.token_hash != old_hash
+    assert after.token_prefix == expected_prefix
+    assert profile.exists()
+    assert expected_prefix in profile.read_text(encoding="utf-8")
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{profile_path}"],
+        cwd=deps.settings.repo_cache_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert expected_prefix in committed
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=deps.settings.repo_cache_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
+
+
 async def test_submit_agent_note_rollback_db_quando_commit_local_falha(deps, monkeypatch):
     await _create_client_as_curator(deps)
 

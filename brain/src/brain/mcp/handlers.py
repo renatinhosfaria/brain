@@ -990,7 +990,7 @@ async def create_agent_client(
                 metadata=metadata,
                 author_name=deps.settings.git_author_name,
                 author_email=deps.settings.git_author_email,
-                push=deps.settings.git_push_enabled,
+                push=False,
             )
             out = _agent_client_dict(client)
             await s.commit()
@@ -998,6 +998,8 @@ async def create_agent_client(
             await s.rollback()
             raise
 
+    if deps.settings.git_push_enabled:
+        git_writer.push_repo(deps.settings.repo_cache_path)
     out.update({"token": token, "profile_path": profile_path})
     return out
 
@@ -1060,7 +1062,7 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
                 metadata=fields["metadata"],
                 author_name=deps.settings.git_author_name,
                 author_email=deps.settings.git_author_email,
-                push=deps.settings.git_push_enabled,
+                push=False,
             )
             out = _agent_client_dict(client)
             await s.commit()
@@ -1068,6 +1070,8 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
             await s.rollback()
             raise
 
+    if deps.settings.git_push_enabled:
+        git_writer.push_repo(deps.settings.repo_cache_path)
     out.update({"token": token, "profile_path": profile_path})
     return out
 

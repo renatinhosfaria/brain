@@ -335,7 +335,7 @@ def write_agent_client_profile(
             message=f"client: create {safe_client_slug}",
             author_name=author_name,
             author_email=author_email,
-            push=push,
+            push=False,
             retries=retries,
         )
     except Exception:
@@ -347,6 +347,8 @@ def write_agent_client_profile(
             previous_content=previous_content,
         )
         raise
+    if push:
+        _push_with_retry(dest, retries)
     return rel
 
 
@@ -403,7 +405,7 @@ def write_agent_note(
             message=f"agent-note: {safe_client_slug} {timestamp}",
             author_name=author_name,
             author_email=author_email,
-            push=push,
+            push=False,
             retries=retries,
         )
     except Exception:
@@ -415,6 +417,8 @@ def write_agent_note(
             previous_content=previous_content,
         )
         raise
+    if push:
+        _push_with_retry(dest, retries)
     return rel
 
 
@@ -460,7 +464,7 @@ def write_curated_note(
                 message=f"note: {operation} {rel}",
                 author_name=author_name,
                 author_email=author_email,
-                push=push,
+                push=False,
                 retries=retries,
             )
         except Exception:
@@ -472,6 +476,8 @@ def write_curated_note(
                 previous_content=previous_content,
             )
             raise
+        if push:
+            _push_with_retry(dest, retries)
     return rel
 
 
