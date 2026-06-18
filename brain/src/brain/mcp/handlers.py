@@ -1,4 +1,7 @@
+import base64
+import binascii
 import datetime as dt
+import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,16 +171,23 @@ def _repo_note_path(repo_cache_path: str, repo_path: str) -> Path:
     return note_path
 
 
-def _parse_note_cursor(cursor: str | None) -> int:
+def _note_cursor(note) -> str:
+    payload = {
+        "created_at": note.created_at.isoformat(),
+        "id": str(note.id),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _parse_note_cursor(cursor: str | None) -> tuple[dt.datetime, uuid.UUID] | None:
     if cursor is None:
-        return 0
+        return None
     try:
-        offset = int(cursor)
-    except ValueError as exc:
-        raise ValueError("cursor must be a non-negative integer") from exc
-    if offset < 0:
-        raise ValueError("cursor must be a non-negative integer")
-    return offset
+        payload = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+        return dt.datetime.fromisoformat(payload["created_at"]), uuid.UUID(payload["id"])
+    except (binascii.Error, KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid cursor") from exc
 
 
 def _validate_agent_note_transition(note, *, action: str, allowed_statuses: set[str]) -> None:
@@ -186,6 +196,42 @@ def _validate_agent_note_transition(note, *, action: str, allowed_statuses: set[
         raise ValueError(f"cannot {action} terminal agent note with status {note.status}")
     if note.status not in allowed_statuses:
         raise ValueError(f"cannot {action} agent note with status {note.status}")
+
+
+async def _transition_agent_note(
+    deps: Deps,
+    note_id: str,
+    *,
+    action: str,
+    status: str,
+    allowed_statuses: set[str],
+    outcome: dict | None = None,
+    error: str | None = None,
+) -> dict:
+    note_uuid = uuid.UUID(note_id)
+    async with deps.session_factory() as s:
+        note = await repo.update_agent_note_status(
+            s,
+            note_uuid,
+            status,
+            outcome=outcome,
+            error=error,
+            allowed_statuses=allowed_statuses,
+        )
+        if note is None:
+            current = await repo.get_agent_note(s, note_uuid)
+            if current is None:
+                raise ValueError(f"agent note not found: {note_id}")
+            _validate_agent_note_transition(
+                current,
+                action=action,
+                allowed_statuses=allowed_statuses,
+            )
+            raise ValueError(f"cannot {action} agent note with status {current.status}")
+        await s.refresh(note)
+        out = _agent_note_dict(note)
+        await s.commit()
+        return out
 
 
 # ---------- Memória & recall ----------
@@ -305,16 +351,17 @@ async def list_agent_notes(
     _require_curator()
     if limit < 1:
         raise ValueError("limit must be positive")
-    offset = _parse_note_cursor(cursor)
+    before = _parse_note_cursor(cursor)
     async with deps.session_factory() as s:
         notes = await repo.list_agent_notes(
             s,
             status=status,
             client_slug=client_slug,
-            limit=offset + limit + 1,
+            limit=limit + 1,
+            before=before,
         )
-    page = notes[offset : offset + limit]
-    next_cursor = str(offset + limit) if len(notes) > offset + limit else None
+    page = notes[:limit]
+    next_cursor = _note_cursor(page[-1]) if len(notes) > limit and page else None
     return {"items": [_agent_note_dict(note) for note in page], "next_cursor": next_cursor}
 
 
@@ -332,20 +379,13 @@ async def get_agent_note(deps: Deps, note_id: str) -> dict | None:
 
 async def claim_agent_note(deps: Deps, note_id: str) -> dict:
     _require_curator()
-    async with deps.session_factory() as s:
-        note = await repo.get_agent_note(s, uuid.UUID(note_id))
-        if note is None:
-            raise ValueError(f"agent note not found: {note_id}")
-        _validate_agent_note_transition(
-            note,
-            action="claim",
-            allowed_statuses={"pending", "in_review"},
-        )
-        note = await repo.update_agent_note_status(s, note.id, "in_review")
-        await s.refresh(note)
-        out = _agent_note_dict(note)
-        await s.commit()
-        return out
+    return await _transition_agent_note(
+        deps,
+        note_id,
+        action="claim",
+        status="in_review",
+        allowed_statuses={"pending", "in_review"},
+    )
 
 
 async def complete_agent_note(
@@ -354,20 +394,14 @@ async def complete_agent_note(
     outcome: dict | None = None,
 ) -> dict:
     _require_curator()
-    async with deps.session_factory() as s:
-        note = await repo.get_agent_note(s, uuid.UUID(note_id))
-        if note is None:
-            raise ValueError(f"agent note not found: {note_id}")
-        _validate_agent_note_transition(
-            note,
-            action="complete",
-            allowed_statuses={"pending", "in_review"},
-        )
-        note = await repo.update_agent_note_status(s, note.id, "curated", outcome=outcome)
-        await s.refresh(note)
-        out = _agent_note_dict(note)
-        await s.commit()
-        return out
+    return await _transition_agent_note(
+        deps,
+        note_id,
+        action="complete",
+        status="curated",
+        allowed_statuses={"pending", "in_review"},
+        outcome=outcome,
+    )
 
 
 async def reject_agent_note(
@@ -377,20 +411,14 @@ async def reject_agent_note(
 ) -> dict:
     _require_curator()
     outcome = {"reason": reason} if reason is not None else {}
-    async with deps.session_factory() as s:
-        note = await repo.get_agent_note(s, uuid.UUID(note_id))
-        if note is None:
-            raise ValueError(f"agent note not found: {note_id}")
-        _validate_agent_note_transition(
-            note,
-            action="reject",
-            allowed_statuses={"pending", "in_review"},
-        )
-        note = await repo.update_agent_note_status(s, note.id, "rejected", outcome=outcome)
-        await s.refresh(note)
-        out = _agent_note_dict(note)
-        await s.commit()
-        return out
+    return await _transition_agent_note(
+        deps,
+        note_id,
+        action="reject",
+        status="rejected",
+        allowed_statuses={"pending", "in_review"},
+        outcome=outcome,
+    )
 
 
 async def fail_agent_note(
@@ -399,20 +427,14 @@ async def fail_agent_note(
     error: str | None = None,
 ) -> dict:
     _require_curator()
-    async with deps.session_factory() as s:
-        note = await repo.get_agent_note(s, uuid.UUID(note_id))
-        if note is None:
-            raise ValueError(f"agent note not found: {note_id}")
-        _validate_agent_note_transition(
-            note,
-            action="fail",
-            allowed_statuses={"pending", "in_review"},
-        )
-        note = await repo.update_agent_note_status(s, note.id, "failed", error=error)
-        await s.refresh(note)
-        out = _agent_note_dict(note)
-        await s.commit()
-        return out
+    return await _transition_agent_note(
+        deps,
+        note_id,
+        action="fail",
+        status="failed",
+        allowed_statuses={"pending", "in_review"},
+        error=error,
+    )
 
 
 async def get_memory(deps: Deps, id: str) -> dict | None:

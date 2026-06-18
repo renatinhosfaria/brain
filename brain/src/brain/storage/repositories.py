@@ -369,12 +369,21 @@ async def list_agent_notes(
     status: str | None = None,
     client_slug: str | None = None,
     limit: int = 50,
+    before: tuple[dt.datetime, uuid.UUID] | None = None,
 ) -> list[AgentNote]:
     stmt = select(AgentNote)
     if status is not None:
         stmt = stmt.where(AgentNote.status == status)
     if client_slug is not None:
         stmt = stmt.where(AgentNote.client_slug == client_slug)
+    if before is not None:
+        created_at, note_id = before
+        stmt = stmt.where(
+            or_(
+                AgentNote.created_at < created_at,
+                and_(AgentNote.created_at == created_at, AgentNote.id < note_id),
+            )
+        )
     stmt = stmt.order_by(AgentNote.created_at.desc(), AgentNote.id.desc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 
@@ -385,8 +394,12 @@ async def update_agent_note_status(
     status: str,
     outcome: dict | None = None,
     error: str | None = None,
+    allowed_statuses: set[str] | None = None,
 ) -> AgentNote | None:
-    note = await get_agent_note(session, id)
+    stmt = select(AgentNote).where(AgentNote.id == id)
+    if allowed_statuses is not None:
+        stmt = stmt.where(AgentNote.status.in_(allowed_statuses))
+    note = (await session.execute(stmt.with_for_update())).scalar_one_or_none()
     if note is None:
         return None
     note.status = status

@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 import uuid
 from pathlib import Path
@@ -406,7 +407,7 @@ async def test_curator_lista_agent_notes_pendentes_sem_conteudo_bruto(deps):
 
     assert set(page) == {"items", "next_cursor"}
     assert len(page["items"]) == 1
-    assert page["next_cursor"] == "1"
+    assert page["next_cursor"] is not None
     assert page["items"][0]["client_slug"] == "chatgpt-web"
     assert page["items"][0]["status"] == "pending"
     assert "content" not in page["items"][0]
@@ -423,6 +424,35 @@ async def test_curator_lista_agent_notes_pendentes_sem_conteudo_bruto(deps):
     listed_ids = {page["items"][0]["id"], next_page["items"][0]["id"]}
     assert listed_ids == {first["note_id"], second["note_id"]}
     assert next_page["next_cursor"] is None
+
+
+async def test_list_agent_notes_cursor_nao_duplica_quando_nota_nova_entrar(deps):
+    await _create_client_as_curator(deps)
+    originals = [
+        await _submit_note_as_client(deps, title=f"Nota original {i}", content=f"Conteudo {i}.")
+        for i in range(3)
+    ]
+    original_page = await _as_curator(handlers.list_agent_notes, deps, status="pending", limit=10)
+    original_ids = [item["id"] for item in original_page["items"]]
+    assert set(original_ids) == {note["note_id"] for note in originals}
+
+    first_page = await _as_curator(handlers.list_agent_notes, deps, status="pending", limit=2)
+    assert len(first_page["items"]) == 2
+    assert first_page["next_cursor"] is not None
+
+    await _submit_note_as_client(deps, title="Nota mais nova", content="Entrou entre paginas.")
+
+    second_page = await _as_curator(
+        handlers.list_agent_notes,
+        deps,
+        status="pending",
+        limit=2,
+        cursor=first_page["next_cursor"],
+    )
+
+    listed_ids = [item["id"] for item in first_page["items"] + second_page["items"]]
+    assert listed_ids[: len(original_ids)] == original_ids
+    assert len(set(listed_ids)) == len(listed_ids)
 
 
 async def test_curator_obtem_conteudo_bruto_da_agent_note(deps):
@@ -566,6 +596,45 @@ async def test_agent_note_terminal_nao_volta_para_estado_nao_terminal(deps):
     async with deps.session_factory() as s:
         note = await repo.get_agent_note(s, uuid.UUID(submitted["note_id"]))
     assert note.status == "curated"
+
+
+async def test_agent_note_transicoes_terminais_concorrentes_so_uma_vence(deps, monkeypatch):
+    await _create_client_as_curator(deps)
+    submitted = await _submit_note_as_client(deps)
+    note_uuid = uuid.UUID(submitted["note_id"])
+    original_get_agent_note = repo.get_agent_note
+    both_read_pending = asyncio.Event()
+    reads_before_transition = 0
+
+    async def gated_get_agent_note(session, id):
+        nonlocal reads_before_transition
+        note = await original_get_agent_note(session, id)
+        if id == note_uuid and note is not None and note.status == "pending":
+            reads_before_transition += 1
+            if reads_before_transition == 2:
+                both_read_pending.set()
+            if reads_before_transition <= 2:
+                await both_read_pending.wait()
+        return note
+
+    monkeypatch.setattr(repo, "get_agent_note", gated_get_agent_note)
+
+    results = await asyncio.gather(
+        _as_curator(handlers.complete_agent_note, deps, submitted["note_id"], {"winner": "complete"}),
+        _as_curator(handlers.reject_agent_note, deps, submitted["note_id"], "concorrente"),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if isinstance(result, dict)]
+    failures = [result for result in results if isinstance(result, ValueError)]
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert successes[0]["status"] in {"curated", "rejected"}
+    async with deps.session_factory() as s:
+        note = await original_get_agent_note(s, note_uuid)
+    assert note.status == successes[0]["status"]
+    assert note.completed_at is not None
 
 
 async def test_submit_agent_note_mesmo_timestamp_e_titulo_cria_paths_distintos(
