@@ -362,3 +362,47 @@ async def test_deep_search_fallback_llm_falha_retorna_warning(session):
     assert out["graph"] == {"entities": [], "relationships": []}
     assert out["meta"]["seed_strategy"] == "none"
     assert out["meta"]["warnings"] == ["query entity fallback failed: llm indisponivel"]
+
+
+async def test_deep_search_max_entities_invalido_nao_expande_grafo(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+    await session.commit()
+
+    emb = FakeEmbedder({"brain": _vec(0.11)})
+    out = await deep_search(session, emb, None, "brain", max_entities=False)
+
+    assert out["results"]
+    assert out["graph"] == {"entities": [], "relationships": []}
+    assert out["meta"]["seed_strategy"] == "none"
+
+
+async def test_deep_search_namespace_controla_so_grafo(session):
+    doc = await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "tenant-b")
+    await age.upsert_entity(session, "Hermes", "agente", "tenant-b")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "tenant-b")
+    await session.commit()
+
+    emb = FakeEmbedder({"brain": _vec(0.11)})
+    out = await deep_search(session, emb, None, "brain", namespace="tenant-b", depth=1)
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert {result["namespace"] for result in out["results"]} == {"curated"}
+    assert out["graph"]["relationships"] == [
+        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+    ]

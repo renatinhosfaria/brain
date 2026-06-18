@@ -30,6 +30,8 @@ async def search(
 
 
 def _dedupe_entities(entities: list[dict], max_entities: int) -> list[dict]:
+    if isinstance(max_entities, bool) or not isinstance(max_entities, int) or max_entities < 1:
+        return []
     seen: set[str] = set()
     result: list[dict] = []
     for entity in entities:
