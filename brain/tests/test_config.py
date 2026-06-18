@@ -99,3 +99,8 @@ def test_env_example_documenta_curadoria_e_webhook_hermes():
         'python -c "from cryptography.fernet import Fernet; '
         'print(Fernet.generate_key().decode())"'
     ) in env_example
+    assert (
+        "BRAIN_AUTH_TOKEN is a migration fallback only when BRAIN_CURATOR_TOKEN is unset"
+        in env_example
+    )
+    assert "not a parallel Hermes curator credential" in env_example
