@@ -7,6 +7,7 @@ from brain.config import get_settings
 from brain.indexing.embeddings import Embedder
 from brain.extraction.llm import LLMClient
 from brain.ingestion import pipeline
+from brain import outbox
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
@@ -34,10 +35,23 @@ async def handle_job(session, embedder, llm, settings, job) -> None:
         raise ValueError(f"tipo de job desconhecido: {job.type}")
 
 
-async def run_once(session_factory, queue, embedder, llm, settings, worker_id="worker") -> bool:
+async def run_once(
+    session_factory,
+    queue,
+    embedder,
+    llm,
+    settings,
+    worker_id="worker",
+    outbox_client=None,
+) -> bool:
     job = await queue.claim_next(worker_id)
     if job is None:
-        return False
+        return await outbox.deliver_once(
+            session_factory,
+            settings,
+            worker_id=worker_id,
+            client=outbox_client,
+        )
     try:
         async with session_factory() as session:
             await handle_job(session, embedder, llm, settings, job)
