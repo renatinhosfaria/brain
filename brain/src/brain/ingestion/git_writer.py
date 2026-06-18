@@ -103,6 +103,16 @@ def render_curated_note(*, frontmatter: dict | None = None, content: str) -> str
     return render_frontmatter(frontmatter or {}) + content.rstrip() + "\n"
 
 
+def parse_frontmatter(markdown: str) -> dict:
+    if not markdown.startswith("---\n"):
+        return {}
+    end = markdown.find("\n---", 4)
+    if end == -1:
+        return {}
+    data = yaml.safe_load(markdown[4:end]) or {}
+    return data if isinstance(data, dict) else {}
+
+
 def _redact_token_values(value: Any, token: str | None) -> Any:
     if isinstance(value, dict):
         redacted = {}

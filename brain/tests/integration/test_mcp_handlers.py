@@ -270,6 +270,42 @@ async def test_create_note_recupera_arquivo_existente_sem_documento_apos_falha_i
     assert doc.raw_content == written_text
 
 
+async def test_create_note_recuperacao_usa_frontmatter_existente_para_metadata(deps):
+    deps.embedder = FailingEmbedder()
+    with pytest.raises(RuntimeError, match="embed failed"):
+        await _as_curator(
+            handlers.create_note,
+            deps,
+            "projetos/frontmatter.md",
+            "# Frontmatter\n\nConteudo original.",
+            metadata={"owner": "original", "attempt": 1},
+            source_agent_note_ids=["agent-original"],
+        )
+
+    note_path = Path(deps.settings.repo_cache_path) / "projetos/frontmatter.md"
+    written_text = note_path.read_text(encoding="utf-8")
+    assert "owner: original" in written_text
+    async with deps.session_factory() as s:
+        assert await repo.get_document(s, repo_path="projetos/frontmatter.md") is None
+
+    deps.embedder = FakeEmbedder()
+    recovered = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/frontmatter.md",
+        "# Frontmatter\n\nConteudo de retry.",
+        metadata={"owner": "retry", "attempt": 2},
+        source_agent_note_ids=["agent-retry"],
+    )
+    got = await _as_client(handlers.get_note, deps, recovered["id"])
+
+    assert recovered["content"] == written_text
+    assert recovered["metadata"] == {"owner": "original", "attempt": 1}
+    assert recovered["source_agent_note_ids"] == ["agent-original"]
+    assert got["metadata"] == {"owner": "original", "attempt": 1}
+    assert got["source_agent_note_ids"] == ["agent-original"]
+
+
 async def test_create_note_commit_falha_restaura_worktree_e_retry_nao_indexa_uncommitted(
     deps, monkeypatch
 ):

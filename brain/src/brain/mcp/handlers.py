@@ -391,12 +391,14 @@ async def create_note(
         async with deps.session_factory() as s:
             if await repo.get_document(s, repo_path=repo_path) is not None:
                 raise ValueError(f"curated note already exists: {repo_path}")
+        existing_content = note_path.read_text(encoding="utf-8")
+        existing_frontmatter = git_writer.parse_frontmatter(existing_content)
         recovered = await _index_curated_note(
             deps,
             repo_path=repo_path,
-            content=note_path.read_text(encoding="utf-8"),
-            metadata=metadata,
-            source_agent_note_ids=source_agent_note_ids,
+            content=existing_content,
+            metadata=existing_frontmatter.get("metadata"),
+            source_agent_note_ids=existing_frontmatter.get("source_agent_note_ids"),
         )
         _push_curated_note_if_enabled(deps)
         return recovered
