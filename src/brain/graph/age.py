@@ -97,6 +97,7 @@ def _entity_payload(node: dict, *, seed: str, depth: int) -> dict:
     return {
         "name": props.get("name"),
         "type": props.get("type"),
+        "namespace": props.get("namespace"),
         "seed": seed,
         "depth": depth,
     }
@@ -110,6 +111,37 @@ def _dedupe_strings(values: Iterable[str]) -> list[str]:
         if normalized and normalized not in seen:
             seen.add(normalized)
             result.append(normalized)
+    return result
+
+
+def _normalize_seed_entries(
+    seeds: list[str] | list[dict],
+    namespace: str | None,
+) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict] = []
+    for seed in seeds:
+        if isinstance(seed, dict):
+            name = str(seed.get("name") or "").strip()
+            seed_namespace = seed.get("namespace")
+            seed_namespace = (
+                str(seed_namespace).strip() if seed_namespace is not None else ""
+            )
+        else:
+            name = str(seed or "").strip()
+            seed_namespace = namespace or ""
+
+        if not name or not seed_namespace:
+            continue
+        if namespace is not None and seed_namespace != namespace:
+            continue
+
+        key = (name, seed_namespace)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"name": name, "namespace": seed_namespace})
+    result.sort(key=lambda item: (item["namespace"], item["name"]))
     return result
 
 
@@ -171,7 +203,7 @@ async def get_entity(session: AsyncSession, name: str, namespace: str) -> dict |
 async def search_entities(
     session: AsyncSession,
     query: str,
-    namespace: str,
+    namespace: str | None,
     limit: int | None = None,
 ) -> list[dict]:
     await _prepare(session)
@@ -180,16 +212,24 @@ async def search_entities(
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit deve ser um inteiro positivo")
         limit_clause = f"LIMIT {limit} "
+    namespace_match = (
+        f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
+        if namespace is not None
+        else "MATCH (n:Entity) "
+    )
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
-        f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
+        f"{namespace_match}"
         f"WHERE toLower(n.name) CONTAINS toLower({_lit(query)}) "
-        f"RETURN n.name, n.type "
-        f"ORDER BY toLower(n.name), n.name, n.type "
-        f"{limit_clause}$cy$) AS (name agtype, type agtype)"
+        f"RETURN n.name, n.type, n.namespace "
+        f"ORDER BY toLower(n.name), n.namespace, n.name, n.type "
+        f"{limit_clause}$cy$) AS (name agtype, type agtype, namespace agtype)"
     )
     rows = (await session.execute(text(q))).all()
-    return [{"name": _unwrap(n), "type": _unwrap(t)} for n, t in rows]
+    return [
+        {"name": _unwrap(n), "type": _unwrap(t), "namespace": _unwrap(ns)}
+        for n, t, ns in rows
+    ]
 
 
 async def get_related(
@@ -209,8 +249,8 @@ async def get_related(
 
 async def get_relationship_paths(
     session: AsyncSession,
-    seeds: list[str],
-    namespace: str,
+    seeds: list[str] | list[dict],
+    namespace: str | None = None,
     depth: int = 1,
     rel_types: list[str] | None = None,
     limit: int = 50,
@@ -219,15 +259,19 @@ async def get_relationship_paths(
     bounded_depth = max(1, int(depth))
     bounded_limit = max(1, int(limit))
     allowed_types = set(_dedupe_strings(rel_types or []))
-    seed_names = sorted(_dedupe_strings(seeds))
+    seed_entries = _normalize_seed_entries(seeds, namespace)
     relationships: list[dict] = []
-    relationship_keys: set[tuple[str, str, str, str, int]] = set()
-    relationship_entities: dict[tuple[str, str, str, str, int], tuple[dict, dict]] = {}
+    relationship_keys: set[tuple[str, str, str, str, str, int]] = set()
+    relationship_entities: dict[
+        tuple[str, str, str, str, str, int], tuple[dict, dict]
+    ] = {}
 
     allowed_types_literal = _lit(sorted(allowed_types))
     should_stop = False
 
-    for seed in seed_names:
+    for seed_entry in seed_entries:
+        seed = seed_entry["name"]
+        seed_namespace = seed_entry["namespace"]
         if should_stop:
             break
         for path_depth in range(1, bounded_depth + 1):
@@ -239,11 +283,13 @@ async def get_relationship_paths(
             edge_vars = [f"r{idx}" for idx in range(path_depth)]
             intermediate_nodes = [f"v{idx}" for idx in range(path_depth - 1)]
             parts = [
-                f"(s:Entity {{name: {_lit(seed)}, namespace: {_lit(namespace)}}})",
+                f"(s:Entity {{name: {_lit(seed)}, namespace: {_lit(seed_namespace)}}})",
             ]
             for idx, edge in enumerate(edge_vars):
                 target = "n" if idx == path_depth - 1 else intermediate_nodes[idx]
-                parts.append(f"-[{edge}:REL]-({target}:Entity {{namespace: {_lit(namespace)}}})")
+                parts.append(
+                    f"-[{edge}:REL]-({target}:Entity {{namespace: {_lit(seed_namespace)}}})"
+                )
             pattern = f"{''.join(parts)}"
             rel_type_filters = (
                 [f"{edge}.type IN {allowed_types_literal}" for edge in edge_vars]
@@ -275,7 +321,7 @@ async def get_relationship_paths(
                     break
                 nodes = _parse_agtype_entity_list(nodes_value)
                 rels = _parse_agtype_entity_list(rels_value)
-                if any(_props(node).get("namespace") != namespace for node in nodes):
+                if any(_props(node).get("namespace") != seed_namespace for node in nodes):
                     continue
                 node_by_id = {node.get("id"): node for node in nodes}
                 node_payload_by_id: dict[object, dict] = {}
@@ -285,7 +331,11 @@ async def get_relationship_paths(
                     if node_id not in node_index_by_id:
                         node_index_by_id[node_id] = idx
 
-                    payload = _entity_payload(node, seed=seed, depth=node_index_by_id.get(node_id, len(nodes)))
+                    payload = _entity_payload(
+                        node,
+                        seed=seed,
+                        depth=node_index_by_id.get(node_id, len(nodes)),
+                    )
                     name = payload["name"]
                     if name:
                         node_payload_by_id[node_id] = payload
@@ -305,8 +355,12 @@ async def get_relationship_paths(
                         path_ok = False
                         break
 
-                    from_node = node_by_id.get(rel.get("start_id")) or node_by_id.get(rel.get("startid"))
-                    to_node = node_by_id.get(rel.get("end_id")) or node_by_id.get(rel.get("endid"))
+                    from_node = node_by_id.get(rel.get("start_id")) or node_by_id.get(
+                        rel.get("startid")
+                    )
+                    to_node = node_by_id.get(rel.get("end_id")) or node_by_id.get(
+                        rel.get("endid")
+                    )
                     if from_node is None or to_node is None:
                         path_ok = False
                         break
@@ -333,11 +387,21 @@ async def get_relationship_paths(
                 if not path_ok:
                     continue
 
-                for hop, from_name, to_name, rel_type, rel_start_id, rel_startid, rel_end_id, rel_endid in parsed_rels:
+                for (
+                    hop,
+                    from_name,
+                    to_name,
+                    rel_type,
+                    rel_start_id,
+                    rel_startid,
+                    rel_end_id,
+                    rel_endid,
+                ) in parsed_rels:
                     payload = {
                         "from": from_name,
                         "to": to_name,
                         "type": rel_type,
+                        "namespace": seed_namespace,
                         "seed": seed,
                         "depth": hop,
                     }
@@ -345,6 +409,7 @@ async def get_relationship_paths(
                         payload["from"],
                         payload["to"],
                         payload["type"],
+                        payload["namespace"],
                         payload["seed"],
                         payload["depth"],
                     )
@@ -382,7 +447,16 @@ async def get_relationship_paths(
             if should_stop:
                 break
 
-    relationships.sort(key=lambda r: (r["seed"], r["depth"], r["from"], r["to"], r["type"]))
+    relationships.sort(
+        key=lambda r: (
+            r["namespace"],
+            r["seed"],
+            r["depth"],
+            r["from"],
+            r["to"],
+            r["type"],
+        )
+    )
     limited_relationships = relationships[:bounded_limit]
 
     entities_by_key: dict[tuple[str, str], dict] = {}
@@ -391,6 +465,7 @@ async def get_relationship_paths(
             rel["from"],
             rel["to"],
             rel["type"],
+            rel["namespace"],
             rel["seed"],
             rel["depth"],
         )
@@ -398,18 +473,19 @@ async def get_relationship_paths(
         if relation_entities is None:
             continue
         for entity in relation_entities:
-            existing = entities_by_key.get((entity["name"], namespace))
+            entity_namespace = entity.get("namespace")
+            existing = entities_by_key.get((entity["name"], entity_namespace))
             if existing is None:
-                entities_by_key[(entity["name"], namespace)] = entity
+                entities_by_key[(entity["name"], entity_namespace)] = entity
                 continue
 
             if entity["depth"] < existing["depth"]:
-                entities_by_key[(entity["name"], namespace)] = entity
+                entities_by_key[(entity["name"], entity_namespace)] = entity
             elif entity["depth"] == existing["depth"] and entity["seed"] < existing["seed"]:
-                entities_by_key[(entity["name"], namespace)] = entity
+                entities_by_key[(entity["name"], entity_namespace)] = entity
 
     entities = list(entities_by_key.values())
-    entities.sort(key=lambda e: (e["seed"], e["depth"], e["name"]))
+    entities.sort(key=lambda e: (e["namespace"], e["seed"], e["depth"], e["name"]))
     return {"entities": entities, "relationships": limited_relationships}
 
 

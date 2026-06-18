@@ -47,6 +47,32 @@ async def test_search_entities(session):
     assert any(e["name"] == "Goiânia" for e in found)
 
 
+async def test_search_entities_sem_namespace_retorna_todos_com_namespace(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "brain", "projeto", "trabalho")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await session.commit()
+
+    found = await age.search_entities(session, "brain", None)
+
+    assert found == [
+        {"name": "brain", "type": "projeto", "namespace": "curated"},
+        {"name": "brain", "type": "projeto", "namespace": "trabalho"},
+    ]
+
+
+async def test_search_entities_sem_namespace_respeita_limit_global(session):
+    await age.upsert_entity(session, "Brain A", "projeto", "curated")
+    await age.upsert_entity(session, "Brain B", "projeto", "trabalho")
+    await age.upsert_entity(session, "Brain C", "projeto", "pessoal")
+    await session.commit()
+
+    found = await age.search_entities(session, "Brain", None, limit=2)
+
+    assert len(found) == 2
+    assert all("namespace" in entity for entity in found)
+
+
 async def test_delete_entity(session):
     await age.upsert_entity(session, "Temp", "conceito", "pessoal")
     await age.delete_entity(session, "Temp", "pessoal")
@@ -74,13 +100,32 @@ async def test_get_relationship_paths_retorna_entidades_relacoes_direcao_e_depth
 
     out = await age.get_relationship_paths(session, ["brain"], "curated", depth=2)
 
-    assert {"name": "brain", "type": "projeto", "seed": "brain", "depth": 0} in out["entities"]
-    assert {"name": "Hermes", "type": "agente", "seed": "brain", "depth": 1} in out["entities"]
-    assert {"name": "Vault", "type": "conceito", "seed": "brain", "depth": 1} in out["entities"]
+    assert {
+        "name": "brain",
+        "type": "projeto",
+        "namespace": "curated",
+        "seed": "brain",
+        "depth": 0,
+    } in out["entities"]
+    assert {
+        "name": "Hermes",
+        "type": "agente",
+        "namespace": "curated",
+        "seed": "brain",
+        "depth": 1,
+    } in out["entities"]
+    assert {
+        "name": "Vault",
+        "type": "conceito",
+        "namespace": "curated",
+        "seed": "brain",
+        "depth": 1,
+    } in out["entities"]
     assert {
         "from": "Hermes",
         "to": "brain",
         "type": "curates",
+        "namespace": "curated",
         "seed": "brain",
         "depth": 1,
     } in out["relationships"]
@@ -88,9 +133,92 @@ async def test_get_relationship_paths_retorna_entidades_relacoes_direcao_e_depth
         "from": "brain",
         "to": "Vault",
         "type": "stores",
+        "namespace": "curated",
         "seed": "brain",
         "depth": 1,
     } in out["relationships"]
+
+
+async def test_get_relationship_paths_global_retorna_lista_unica_com_namespace(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+
+    await age.upsert_entity(session, "brain", "projeto", "trabalho")
+    await age.upsert_entity(session, "Renato", "pessoa", "trabalho")
+    await age.upsert_relation(session, "Renato", "brain", "owns", "trabalho")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        [
+            {"name": "brain", "namespace": "curated"},
+            {"name": "brain", "namespace": "trabalho"},
+        ],
+        None,
+        depth=1,
+    )
+
+    assert out["relationships"] == [
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        },
+        {
+            "from": "Renato",
+            "to": "brain",
+            "type": "owns",
+            "namespace": "trabalho",
+            "seed": "brain",
+            "depth": 1,
+        },
+    ]
+    assert {
+        (entity["name"], entity["namespace"])
+        for entity in out["entities"]
+    } == {
+        ("brain", "curated"),
+        ("Hermes", "curated"),
+        ("brain", "trabalho"),
+        ("Renato", "trabalho"),
+    }
+
+
+async def test_get_relationship_paths_namespace_expresso_descarta_seed_de_outro_namespace(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+
+    await age.upsert_entity(session, "brain", "projeto", "trabalho")
+    await age.upsert_entity(session, "Renato", "pessoa", "trabalho")
+    await age.upsert_relation(session, "Renato", "brain", "owns", "trabalho")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        [
+            {"name": "brain", "namespace": "curated"},
+            {"name": "brain", "namespace": "trabalho"},
+        ],
+        "curated",
+        depth=1,
+    )
+
+    assert out["relationships"] == [
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        }
+    ]
+    assert {entity["namespace"] for entity in out["entities"]} == {"curated"}
 
 
 async def test_get_relationship_paths_filtra_rel_types(session):
@@ -216,7 +344,14 @@ async def test_get_relationship_paths_nao_atravessa_relacao_cross_namespace(sess
         {rel["type"] for rel in out["relationships"]}
     )
     assert out["relationships"] == [
-        {"from": "brain", "to": "Vault", "type": "stores", "seed": "brain", "depth": 1}
+        {
+            "from": "brain",
+            "to": "Vault",
+            "type": "stores",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        }
     ]
 
 
@@ -255,9 +390,27 @@ async def test_get_relationship_paths_deep_depth_de_nodes(session):
 
     out = await age.get_relationship_paths(session, ["seed"], "curated", depth=2)
 
-    assert {"name": "seed", "type": "projeto", "seed": "seed", "depth": 0} in out["entities"]
-    assert {"name": "A", "type": "conceito", "seed": "seed", "depth": 1} in out["entities"]
-    assert {"name": "B", "type": "conceito", "seed": "seed", "depth": 2} in out["entities"]
+    assert {
+        "name": "seed",
+        "type": "projeto",
+        "namespace": "curated",
+        "seed": "seed",
+        "depth": 0,
+    } in out["entities"]
+    assert {
+        "name": "A",
+        "type": "conceito",
+        "namespace": "curated",
+        "seed": "seed",
+        "depth": 1,
+    } in out["entities"]
+    assert {
+        "name": "B",
+        "type": "conceito",
+        "namespace": "curated",
+        "seed": "seed",
+        "depth": 2,
+    } in out["entities"]
 
 
 async def test_get_relationship_paths_limit_com_rel_types_aplica_filtro_antes_do_limit(session):
@@ -278,7 +431,14 @@ async def test_get_relationship_paths_limit_com_rel_types_aplica_filtro_antes_do
     )
 
     assert out["relationships"] == [
-        {"from": "seed", "to": "Beta", "type": "keep", "seed": "seed", "depth": 1}
+        {
+            "from": "seed",
+            "to": "Beta",
+            "type": "keep",
+            "namespace": "curated",
+            "seed": "seed",
+            "depth": 1,
+        }
     ]
 
 
@@ -303,6 +463,7 @@ async def test_get_relationship_paths_ordena_empate_de_tipo_de_relacao(session):
             "from": "brain",
             "to": "Hermes",
             "type": "alpha",
+            "namespace": "curated",
             "seed": "brain",
             "depth": 1,
         }
@@ -330,7 +491,28 @@ async def test_get_relationship_paths_ordena_empate_por_intermediario(session):
     )
 
     assert out["relationships"] == [
-        {"from": "brain", "to": "Alpha", "type": "rel", "seed": "brain", "depth": 1},
-        {"from": "brain", "to": "Beta", "type": "rel", "seed": "brain", "depth": 1},
-        {"from": "Alpha", "to": "Omega", "type": "rel", "seed": "brain", "depth": 2},
+        {
+            "from": "brain",
+            "to": "Alpha",
+            "type": "rel",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        },
+        {
+            "from": "brain",
+            "to": "Beta",
+            "type": "rel",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        },
+        {
+            "from": "Alpha",
+            "to": "Omega",
+            "type": "rel",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 2,
+        },
     ]
