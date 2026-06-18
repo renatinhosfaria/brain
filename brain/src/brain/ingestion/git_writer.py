@@ -408,3 +408,7 @@ def _push_with_retry(dest: Path, retries: int) -> None:
             last_error = e
             _git(["pull", "--rebase"], dest)
     raise RuntimeError(f"push falhou após {retries} tentativas: {last_error}")
+
+
+def push_repo(dest: str | Path, *, retries: int = 3) -> None:
+    _push_with_retry(Path(dest), retries)

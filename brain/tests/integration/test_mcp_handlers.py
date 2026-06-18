@@ -13,7 +13,7 @@ from brain.mcp import handlers
 from brain.mcp.handlers import Deps
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.storage.db import make_engine, make_session_factory
-from brain.storage.models import Base, OutboxEvent
+from brain.storage.models import AgentNote, Base, OutboxEvent
 from brain.storage import repositories as repo
 
 
@@ -406,6 +406,59 @@ async def test_submit_agent_note_falha_quando_client_esta_inativo(deps):
             deps,
             content="Conteudo bruto.",
         )
+
+
+async def test_submit_agent_note_persiste_db_e_outbox_quando_push_falha(deps, monkeypatch):
+    await _create_client_as_curator(deps)
+    deps.settings.git_push_enabled = True
+
+    def fail_push(*args, **kwargs):
+        raise RuntimeError("push failed after local commit")
+
+    monkeypatch.setattr(handlers.git_writer, "push_repo", fail_push, raising=False)
+    monkeypatch.setattr(handlers.git_writer, "_push_with_retry", fail_push)
+
+    with pytest.raises(RuntimeError, match="push failed after local commit"):
+        await _as_client(
+            handlers.submit_agent_note,
+            deps,
+            title="Push posterior",
+            content="Conteudo que deve continuar rastreavel.",
+        )
+
+    async with deps.session_factory() as s:
+        notes = list((await s.execute(select(AgentNote))).scalars().all())
+        events = list((await s.execute(select(OutboxEvent))).scalars().all())
+
+    assert len(notes) == 1
+    assert notes[0].status == "pending"
+    assert notes[0].client_slug == "chatgpt-web"
+    assert notes[0].repo_path.startswith("_agents/chatgpt-web/")
+    assert len(events) == 1
+    assert events[0].type == "agent_note.created"
+    assert events[0].payload["agent_note"]["id"] == str(notes[0].id)
+    assert events[0].payload["agent_note"]["repo_path"] == notes[0].repo_path
+
+
+async def test_submit_agent_note_rollback_db_quando_git_write_falha(deps, monkeypatch):
+    await _create_client_as_curator(deps)
+
+    def fail_write(*args, **kwargs):
+        raise RuntimeError("git write failed")
+
+    monkeypatch.setattr(handlers.git_writer, "write_agent_note", fail_write)
+
+    with pytest.raises(RuntimeError, match="git write failed"):
+        await _as_client(
+            handlers.submit_agent_note,
+            deps,
+            title="Falha antes do commit git",
+            content="Nao deve deixar nota pendente.",
+        )
+
+    async with deps.session_factory() as s:
+        assert list((await s.execute(select(AgentNote))).scalars().all()) == []
+        assert list((await s.execute(select(OutboxEvent))).scalars().all()) == []
 
 
 async def test_create_agent_client_duplicado_nao_retorna_token_novo_nem_altera_hash(

@@ -172,6 +172,7 @@ async def submit_agent_note(
     if not content and not messages:
         raise ValueError("content or messages required")
 
+    result: dict
     async with deps.session_factory() as s:
         try:
             client = await repo.get_agent_client(s, slug=principal.slug)
@@ -205,7 +206,7 @@ async def submit_agent_note(
                 metadata=metadata,
                 author_name=deps.settings.git_author_name,
                 author_email=deps.settings.git_author_email,
-                push=deps.settings.git_push_enabled,
+                push=False,
             )
             note.repo_path = repo_path
             await s.flush()
@@ -227,7 +228,7 @@ async def submit_agent_note(
             event.payload = {"event_id": str(event.id), **event_payload}
             await s.flush()
             await s.commit()
-            return {
+            result = {
                 "note_id": note_id,
                 "repo_path": repo_path,
                 "status": note.status,
@@ -236,6 +237,10 @@ async def submit_agent_note(
         except Exception:
             await s.rollback()
             raise
+
+    if deps.settings.git_push_enabled:
+        git_writer.push_repo(deps.settings.repo_cache_path)
+    return result
 
 
 async def get_memory(deps: Deps, id: str) -> dict | None:
