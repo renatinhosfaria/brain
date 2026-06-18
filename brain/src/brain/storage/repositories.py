@@ -85,6 +85,15 @@ async def get_document(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def get_curated_document(
+    session, *, id: uuid.UUID | None = None, repo_path: str | None = None
+) -> Document | None:
+    doc = await get_document(session, id=id, repo_path=repo_path)
+    if doc is None or doc.namespace != "curated" or doc.repo_path.startswith("_agents/"):
+        return None
+    return doc
+
+
 async def list_documents(session, namespace: str | None = None) -> list[Document]:
     stmt = select(Document)
     if namespace:

@@ -17,6 +17,42 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         return await handlers.search(deps, query, namespace, limit, include_graph)
 
     @mcp.tool()
+    async def create_note(
+        path: str,
+        content: str,
+        metadata: dict | None = None,
+        source_agent_note_ids: list[str] | None = None,
+    ) -> dict:
+        return await handlers.create_note(deps, path, content, metadata, source_agent_note_ids)
+
+    @mcp.tool()
+    async def update_note(
+        id_or_path: str,
+        content: str,
+        metadata: dict | None = None,
+        source_agent_note_ids: list[str] | None = None,
+    ) -> dict:
+        return await handlers.update_note(
+            deps,
+            id_or_path,
+            content,
+            metadata,
+            source_agent_note_ids,
+        )
+
+    @mcp.tool()
+    async def get_note(id_or_path: str) -> dict | None:
+        return await handlers.get_note(deps, id_or_path)
+
+    @mcp.tool()
+    async def list_vault_tree(
+        prefix: str | None = None,
+        include_agents: bool = False,
+        max_depth: int | None = None,
+    ) -> dict:
+        return await handlers.list_vault_tree(deps, prefix, include_agents, max_depth)
+
+    @mcp.tool()
     async def submit_agent_note(
         title: str | None = None,
         content: str | None = None,

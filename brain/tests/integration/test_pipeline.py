@@ -1,4 +1,5 @@
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy import text
 
 from brain.config import Settings
@@ -6,7 +7,7 @@ from brain.graph import age
 from brain.ingestion import pipeline
 from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
-from brain.storage.models import Base
+from brain.storage.models import Base, Chunk
 
 
 def _settings() -> Settings:
@@ -56,6 +57,30 @@ async def test_index_document_cria_doc_chunks_e_entidades(session):
     assert doc is not None and doc.title == "Nota"
     ent = await age.get_entity(session, "brain", "t")
     assert ent is not None
+
+
+async def test_index_document_sem_llm_indexa_doc_e_chunks_sem_entidades(session):
+    created = await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        _settings(),
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        content="# Brain\n\nconteudo sobre brain",
+        commit_sha=None,
+    )
+
+    assert created is True
+    doc = await repo.get_document(session, repo_path="projetos/brain.md")
+    chunks = list((await session.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars())
+    ent = await age.get_entity(session, "brain", "curated")
+
+    assert doc is not None
+    assert doc.namespace == "curated"
+    assert doc.title == "Brain"
+    assert chunks
+    assert ent is None
 
 
 async def test_index_document_idempotente(session):

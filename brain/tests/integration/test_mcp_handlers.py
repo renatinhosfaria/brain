@@ -14,7 +14,7 @@ from brain.mcp import handlers
 from brain.mcp.handlers import Deps
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.storage.db import make_engine, make_session_factory
-from brain.storage.models import AgentNote, Base, OutboxEvent
+from brain.storage.models import AgentNote, Base, Chunk, OutboxEvent
 from brain.storage import repositories as repo
 
 
@@ -121,6 +121,139 @@ async def test_memoria_crud_via_handlers(deps):
 async def test_reindex_enfileira(deps):
     out = await _as_curator(handlers.reindex, deps, "a.md", "t")
     assert "job_id" in out
+
+
+async def test_create_note_grava_arquivo_cria_pais_indexa_e_retorna_id_path(deps):
+    out = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/brain.md",
+        "# Brain\n\nConteudo curado.",
+        metadata={"owner": "Hermes"},
+        source_agent_note_ids=["agent-note-1"],
+    )
+
+    assert out["path"] == "projetos/brain.md"
+    assert out["repo_path"] == "projetos/brain.md"
+    assert out["id"]
+
+    note_path = Path(deps.settings.repo_cache_path) / "projetos" / "brain.md"
+    assert note_path.exists()
+    text = note_path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "type: curated_note" in text
+    assert "# Brain\n\nConteudo curado." in text
+
+    async with deps.session_factory() as s:
+        doc = await repo.get_document(s, repo_path="projetos/brain.md")
+        chunks = list((await s.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars())
+
+    assert str(doc.id) == out["id"]
+    assert doc.namespace == "curated"
+    assert doc.title == "Brain"
+    assert doc.meta["metadata"] == {"owner": "Hermes"}
+    assert doc.meta["source_agent_note_ids"] == ["agent-note-1"]
+    assert len(chunks) >= 1
+
+
+async def test_create_note_rejeita_agents(deps):
+    with pytest.raises(ValueError, match="_agents"):
+        await _as_curator(
+            handlers.create_note,
+            deps,
+            "_agents/chatgpt-web/raw.md",
+            "# Raw\n\nNao pode.",
+        )
+
+
+async def test_create_note_falha_quando_path_existe(deps):
+    await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nPrimeiro.")
+
+    with pytest.raises(ValueError, match="already exists|ja existe|existe"):
+        await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nSegundo.")
+
+
+async def test_update_note_substitui_markdown_inteiro_e_reindexa(deps):
+    created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo.")
+
+    updated = await _as_curator(
+        handlers.update_note,
+        deps,
+        created["id"],
+        "# Brain Atualizado\n\nNovo conteudo.",
+        metadata={"reviewed": True},
+    )
+
+    assert updated["id"] == created["id"]
+    assert updated["path"] == "projetos/brain.md"
+    text = (Path(deps.settings.repo_cache_path) / "projetos/brain.md").read_text(encoding="utf-8")
+    assert "# Brain Atualizado\n\nNovo conteudo." in text
+    assert "Antigo" not in text
+
+    async with deps.session_factory() as s:
+        doc = await repo.get_document(s, repo_path="projetos/brain.md")
+        chunks = list((await s.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars())
+
+    assert str(doc.id) == created["id"]
+    assert doc.title == "Brain Atualizado"
+    assert doc.raw_content == text
+    assert doc.meta["metadata"] == {"reviewed": True}
+    assert any("Novo conteudo." in chunk.text for chunk in chunks)
+    assert all("Antigo" not in chunk.text for chunk in chunks)
+
+
+async def test_get_note_retorna_apenas_curated_notes(deps):
+    created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nCurado.")
+    async with deps.session_factory() as s:
+        raw = await repo.upsert_document(
+            s,
+            namespace="_agents",
+            repo_path="_agents/chatgpt-web/raw.md",
+            title="Raw",
+            raw_content="# Raw\n\nBruto.",
+            content_hash="raw",
+            commit_sha=None,
+        )
+        raw_id = str(raw.id)
+        await s.commit()
+
+    got_by_id = await _as_client(handlers.get_note, deps, created["id"])
+    got_by_path = await _as_client(handlers.get_note, deps, "projetos/brain.md")
+    raw_by_id = await _as_client(handlers.get_note, deps, raw_id)
+
+    assert got_by_id["id"] == created["id"]
+    assert got_by_id["path"] == "projetos/brain.md"
+    assert got_by_id["content"].startswith("---\n")
+    assert "# Brain\n\nCurado." in got_by_id["content"]
+    assert got_by_path["id"] == created["id"]
+    assert raw_by_id is None
+
+
+async def test_get_note_agents_path_eh_forbidden_ou_not_found(deps):
+    with pytest.raises(ValueError, match="_agents"):
+        await _as_client(handlers.get_note, deps, "_agents/chatgpt-web/raw.md")
+
+
+async def test_list_vault_tree_lista_dirs_e_notas_excluindo_agents_por_padrao(deps):
+    await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nCurado.")
+    await _as_curator(handlers.create_note, deps, "areas/trabalho.md", "# Trabalho\n\nCurado.")
+    agents_dir = Path(deps.settings.repo_cache_path) / "_agents" / "chatgpt-web"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "raw.md").write_text("# Raw\n\nBruto.", encoding="utf-8")
+
+    tree = await _as_curator(handlers.list_vault_tree, deps)
+    entries = {(item["type"], item["path"]) for item in tree["items"]}
+
+    assert ("directory", "projetos") in entries
+    assert ("note", "projetos/brain.md") in entries
+    assert ("directory", "areas") in entries
+    assert ("note", "areas/trabalho.md") in entries
+    assert all(not item["path"].startswith("_agents") for item in tree["items"])
+
+    agents_tree = await _as_curator(handlers.list_vault_tree, deps, include_agents=True)
+    assert ("directory", "_agents") in {
+        (item["type"], item["path"]) for item in agents_tree["items"]
+    }
 
 
 async def test_curator_cria_agent_client_e_recebe_token_uma_vez(deps):
@@ -247,6 +380,9 @@ def _curator_only_call(case: str, deps):
         "get_document": ("get_document", (deps, memory_id), {}),
         "list_documents": ("list_documents", (deps,), {}),
         "reindex": ("reindex", (deps, "a.md", "t"), {}),
+        "create_note": ("create_note", (deps, "projetos/brain.md", "# Brain"), {}),
+        "update_note": ("update_note", (deps, memory_id, "# Brain"), {}),
+        "list_vault_tree": ("list_vault_tree", (deps,), {}),
         "create_agent_client": ("create_agent_client", (deps, "Codex"), {}),
         "list_agent_clients": ("list_agent_clients", (deps,), {}),
         "get_agent_client": ("get_agent_client", (deps, "chatgpt-web"), {}),
@@ -293,6 +429,9 @@ def _curator_only_call(case: str, deps):
         "get_document",
         "list_documents",
         "reindex",
+        "create_note",
+        "update_note",
+        "list_vault_tree",
         "create_agent_client",
         "list_agent_clients",
         "get_agent_client",

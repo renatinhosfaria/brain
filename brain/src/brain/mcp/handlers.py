@@ -2,6 +2,7 @@ import base64
 import binascii
 import datetime as dt
 import json
+import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from brain import auth
 from brain.graph import age
 from brain.ingestion import git_writer
+from brain.ingestion import pipeline
 from brain.queue.base import JobType
 from brain.search.retriever import search as _search
 from brain.storage import repositories as repo
@@ -138,6 +140,43 @@ def _doc_dict(d) -> dict | None:
     }
 
 
+def _curated_note_meta(
+    metadata: dict | None,
+    source_agent_note_ids: list[str] | None,
+) -> dict:
+    return {
+        "metadata": metadata or {},
+        "source_agent_note_ids": source_agent_note_ids or [],
+    }
+
+
+def _curated_frontmatter(
+    metadata: dict | None,
+    source_agent_note_ids: list[str] | None,
+) -> dict:
+    meta = _curated_note_meta(metadata, source_agent_note_ids)
+    return {
+        "type": "curated_note",
+        "metadata": meta["metadata"] or None,
+        "source_agent_note_ids": meta["source_agent_note_ids"] or None,
+    }
+
+
+def _curated_note_dict(d) -> dict | None:
+    if d is None:
+        return None
+    meta = d.meta or {}
+    return {
+        "id": str(d.id),
+        "path": d.repo_path,
+        "repo_path": d.repo_path,
+        "title": d.title,
+        "content": d.raw_content,
+        "metadata": meta.get("metadata") or {},
+        "source_agent_note_ids": meta.get("source_agent_note_ids") or [],
+    }
+
+
 def _agent_note_dict(note, *, content: str | None = None) -> dict | None:
     if note is None:
         return None
@@ -188,6 +227,78 @@ def _parse_note_cursor(cursor: str | None) -> tuple[dt.datetime, uuid.UUID] | No
         return dt.datetime.fromisoformat(payload["created_at"]), uuid.UUID(payload["id"])
     except (binascii.Error, KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError("invalid cursor") from exc
+
+
+def _current_commit_sha(repo_cache_path: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_cache_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _normalize_repo_prefix(prefix: str | None, *, include_agents: bool) -> str:
+    if prefix is None:
+        return ""
+    raw = str(prefix).replace("\\", "/")
+    if raw.startswith("/") or raw.startswith(":"):
+        raise ValueError("prefix deve ser relativo")
+    if len(raw) >= 3 and raw[1:3] == ":/":
+        raise ValueError("prefix deve ser relativo")
+
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise ValueError("prefix nao pode conter '..'")
+        parts.append(part)
+
+    rel = "/".join(parts)
+    if not include_agents and (rel == "_agents" or rel.startswith("_agents/")):
+        raise ValueError("_agents paths are not available in curated vault tree")
+    return rel
+
+
+async def _get_curated_document_by_id_or_path(session, id_or_path: str):
+    try:
+        return await repo.get_curated_document(session, id=uuid.UUID(id_or_path))
+    except ValueError:
+        path = git_writer.validate_curated_note_path(id_or_path)
+        return await repo.get_curated_document(session, repo_path=path)
+
+
+async def _index_curated_note(
+    deps: Deps,
+    *,
+    repo_path: str,
+    content: str,
+    metadata: dict | None,
+    source_agent_note_ids: list[str] | None,
+) -> dict:
+    meta = _curated_note_meta(metadata, source_agent_note_ids)
+    async with deps.session_factory() as s:
+        await pipeline.index_document(
+            s,
+            deps.embedder,
+            deps.llm,
+            deps.settings,
+            namespace="curated",
+            repo_path=repo_path,
+            content=content,
+            commit_sha=_current_commit_sha(deps.settings.repo_cache_path),
+            meta=meta,
+        )
+        doc = await repo.get_curated_document(s, repo_path=repo_path)
+        if doc is None:
+            raise ValueError(f"curated note not found after index: {repo_path}")
+        return _curated_note_dict(doc)
 
 
 def _validate_agent_note_transition(note, *, action: str, allowed_statuses: set[str]) -> None:
@@ -258,6 +369,136 @@ async def search(deps: Deps, query: str, namespace: str | None = None,
     async with deps.session_factory() as s:
         return await _search(s, deps.embedder, query, namespace=namespace,
                              limit=limit, include_graph=include_graph)
+
+
+# ---------- Notas curadas ----------
+async def create_note(
+    deps: Deps,
+    path: str,
+    content: str,
+    metadata: dict | None = None,
+    source_agent_note_ids: list[str] | None = None,
+) -> dict:
+    _require_curator()
+    repo_path = git_writer.validate_curated_note_path(path)
+    note_path = _repo_note_path(deps.settings.repo_cache_path, repo_path)
+    if note_path.exists():
+        raise ValueError(f"curated note already exists: {repo_path}")
+
+    async with deps.session_factory() as s:
+        if await repo.get_document(s, repo_path=repo_path) is not None:
+            raise ValueError(f"curated note already exists: {repo_path}")
+
+    written_path = git_writer.write_curated_note(
+        deps.settings.repo_cache_path,
+        repo_path,
+        frontmatter=_curated_frontmatter(metadata, source_agent_note_ids),
+        content=content,
+        author_name=deps.settings.git_author_name,
+        author_email=deps.settings.git_author_email,
+        push=deps.settings.git_push_enabled,
+    )
+    written_content = _repo_note_path(deps.settings.repo_cache_path, written_path).read_text(
+        encoding="utf-8"
+    )
+    return await _index_curated_note(
+        deps,
+        repo_path=written_path,
+        content=written_content,
+        metadata=metadata,
+        source_agent_note_ids=source_agent_note_ids,
+    )
+
+
+async def update_note(
+    deps: Deps,
+    id_or_path: str,
+    content: str,
+    metadata: dict | None = None,
+    source_agent_note_ids: list[str] | None = None,
+) -> dict:
+    _require_curator()
+    async with deps.session_factory() as s:
+        doc = await _get_curated_document_by_id_or_path(s, id_or_path)
+        if doc is None:
+            raise ValueError(f"curated note not found: {id_or_path}")
+        repo_path = doc.repo_path
+
+    written_path = git_writer.write_curated_note(
+        deps.settings.repo_cache_path,
+        repo_path,
+        frontmatter=_curated_frontmatter(metadata, source_agent_note_ids),
+        content=content,
+        author_name=deps.settings.git_author_name,
+        author_email=deps.settings.git_author_email,
+        push=deps.settings.git_push_enabled,
+    )
+    written_content = _repo_note_path(deps.settings.repo_cache_path, written_path).read_text(
+        encoding="utf-8"
+    )
+    return await _index_curated_note(
+        deps,
+        repo_path=written_path,
+        content=written_content,
+        metadata=metadata,
+        source_agent_note_ids=source_agent_note_ids,
+    )
+
+
+async def get_note(deps: Deps, id_or_path: str) -> dict | None:
+    _require_client_or_curator()
+    async with deps.session_factory() as s:
+        doc = await _get_curated_document_by_id_or_path(s, id_or_path)
+        return _curated_note_dict(doc)
+
+
+async def list_vault_tree(
+    deps: Deps,
+    prefix: str | None = None,
+    include_agents: bool = False,
+    max_depth: int | None = None,
+) -> dict:
+    _require_curator()
+    if max_depth is not None and max_depth < 1:
+        raise ValueError("max_depth must be positive")
+
+    repo_root = Path(deps.settings.repo_cache_path).resolve()
+    rel_prefix = _normalize_repo_prefix(prefix, include_agents=include_agents)
+    base = (repo_root / rel_prefix).resolve()
+    try:
+        base.relative_to(repo_root)
+    except ValueError as exc:
+        raise ValueError("prefix deve ficar dentro do repositorio") from exc
+    if not base.exists():
+        return {"items": []}
+
+    def should_skip(rel: str) -> bool:
+        return (
+            rel == ".git"
+            or rel.startswith(".git/")
+            or (not include_agents and (rel == "_agents" or rel.startswith("_agents/")))
+        )
+
+    candidates = [base] if base.is_file() else list(base.rglob("*"))
+    items = []
+    for candidate in sorted(candidates, key=lambda p: p.relative_to(repo_root).as_posix()):
+        rel = candidate.relative_to(repo_root).as_posix()
+        if should_skip(rel):
+            continue
+        if candidate == base and not rel_prefix:
+            continue
+        relative_to_base = candidate.relative_to(base).as_posix()
+        if relative_to_base == ".":
+            depth = 1
+        else:
+            depth = len(relative_to_base.split("/"))
+        if max_depth is not None and depth > max_depth:
+            continue
+        if candidate.is_dir():
+            items.append({"type": "directory", "path": rel})
+        elif candidate.suffix == ".md":
+            items.append({"type": "note", "path": rel})
+    return {"items": items}
 
 
 async def submit_agent_note(
