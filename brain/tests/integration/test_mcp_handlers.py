@@ -12,6 +12,7 @@ from brain import auth
 from brain.config import Settings
 from brain.mcp import handlers
 from brain.mcp.handlers import Deps
+from brain.mcp.server import create_mcp_server
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.storage.db import make_engine, make_session_factory
 from brain.storage.models import AgentNote, Base, Chunk, OutboxEvent
@@ -474,6 +475,66 @@ async def test_get_note_agents_path_eh_forbidden_ou_not_found(deps):
         await _as_client(handlers.get_note, deps, "_agents/chatgpt-web/raw.md")
 
 
+async def test_search_curadas_filtra_prefixo_e_get_note_abre_resultado(deps):
+    projeto = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/brain.md",
+        "# Brain\n\nConhecimento curado de projeto.",
+    )
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "areas/trabalho.md",
+        "# Trabalho\n\nConhecimento curado de area.",
+    )
+    async with deps.session_factory() as s:
+        raw = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="_agents/chatgpt-web/raw.md",
+            title="Raw",
+            raw_content="# Raw\n\nBruto.",
+            content_hash="raw",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            raw.id,
+            [{"ordinal": 0, "text": "conteudo bruto de agente", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await repo.add_memory(
+            s,
+            namespace="curated",
+            content="memoria legada",
+            embedding=[0.2] * 2000,
+        )
+        await s.commit()
+
+    client_out = await _as_client(
+        handlers.search,
+        deps,
+        "brain",
+        limit=10,
+        filters={"path_prefix": "projetos/"},
+    )
+    curator_out = await _as_curator(handlers.search, deps, "brain", limit=10)
+
+    assert {r["path"] for r in client_out["results"]} == {"projetos/brain.md"}
+    assert client_out["results"][0]["id"] == projeto["id"]
+    assert {r["source"] for r in client_out["results"]} == {"document"}
+    assert all(not r["path"].startswith("_agents/") for r in curator_out["results"])
+    assert all(r["namespace"] == "curated" for r in curator_out["results"])
+
+    result = client_out["results"][0]
+    got_by_path = await _as_client(handlers.get_note, deps, result["path"])
+    got_by_id = await _as_client(handlers.get_note, deps, result["id"])
+
+    assert got_by_path["id"] == projeto["id"]
+    assert got_by_id["path"] == "projetos/brain.md"
+
+
 async def test_list_vault_tree_lista_dirs_e_notas_excluindo_agents_por_padrao(deps):
     await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nCurado.")
     await _as_curator(handlers.create_note, deps, "areas/trabalho.md", "# Trabalho\n\nCurado.")
@@ -705,6 +766,15 @@ async def test_search_permite_principal_client(deps):
     out = await _as_client(handlers.search, deps, "qualquer coisa")
 
     assert out == {"results": [], "graph": []}
+
+
+async def test_mcp_search_public_schema_usa_filters(deps):
+    mcp = create_mcp_server(deps)
+    tools = await mcp.list_tools()
+    search_tool = next(tool for tool in tools if tool.name == "search")
+
+    assert set(search_tool.inputSchema["properties"]) == {"query", "limit", "filters"}
+    assert search_tool.inputSchema["required"] == ["query"]
 
 
 async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):

@@ -191,24 +191,62 @@ async def merge_memories(
 
 
 # ---------- Busca vetorial ----------
+def _normalize_search_path_prefix(filters: dict | None) -> str | None:
+    if not filters or not filters.get("path_prefix"):
+        return None
+
+    raw = str(filters["path_prefix"]).replace("\\", "/")
+    if raw.startswith("/") or raw.startswith(":"):
+        raise ValueError("path_prefix deve ser relativo")
+    if len(raw) >= 3 and raw[1:3] == ":/":
+        raise ValueError("path_prefix deve ser relativo")
+
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise ValueError("path_prefix nao pode conter '..'")
+        parts.append(part)
+
+    rel = "/".join(parts)
+    if raw.endswith("/") and rel:
+        rel = f"{rel}/"
+    blocked = rel.rstrip("/")
+    if blocked == "_agents" or blocked.startswith("_agents/"):
+        raise ValueError("path_prefix nao pode apontar para _agents/")
+    return rel or None
+
+
 async def search_chunks(
-    session, query_embedding: list[float], namespace: str | None, limit: int
+    session,
+    query_embedding: list[float],
+    namespace: str | None,
+    limit: int,
+    filters: dict | None = None,
 ) -> list[dict]:
+    path_prefix = _normalize_search_path_prefix(filters)
     dist = Chunk.embedding.cosine_distance(query_embedding).label("distance")
     stmt = (
-        select(Chunk.text, dist, Document.repo_path, Document.namespace)
+        select(Chunk.text, dist, Document.id, Document.repo_path, Document.namespace)
         .join(Document, Chunk.document_id == Document.id)
+        .where(and_(Document.repo_path != "_agents", ~Document.repo_path.startswith("_agents/")))
     )
     if namespace:
         stmt = stmt.where(Document.namespace == namespace)
+    if path_prefix:
+        stmt = stmt.where(Document.repo_path.startswith(path_prefix))
     stmt = stmt.order_by(dist).limit(limit)
     rows = (await session.execute(stmt)).all()
     return [
         {
+            "id": str(r.id),
             "text": r.text,
             "score": 1.0 - float(r.distance),
             "source": "document",
             "ref": r.repo_path,
+            "path": r.repo_path,
+            "repo_path": r.repo_path,
             "namespace": r.namespace,
         }
         for r in rows

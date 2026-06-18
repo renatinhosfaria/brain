@@ -12,9 +12,8 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         return await handlers.remember(deps, namespace, messages, metadata)
 
     @mcp.tool()
-    async def search(query: str, namespace: str | None = None,
-                     limit: int = 10, include_graph: bool = False) -> dict:
-        return await handlers.search(deps, query, namespace, limit, include_graph)
+    async def search(query: str, limit: int = 10, filters: dict | None = None) -> dict:
+        return await handlers.search(deps, query, limit=limit, filters=filters)
 
     @mcp.tool()
     async def create_note(

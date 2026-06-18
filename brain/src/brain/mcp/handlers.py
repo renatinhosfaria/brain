@@ -368,12 +368,34 @@ async def remember(deps: Deps, namespace: str, messages: list[dict], metadata: d
     return {"note_path": rel, "job_ids": [str(job_facts), str(job_index)]}
 
 
-async def search(deps: Deps, query: str, namespace: str | None = None,
-                 limit: int = 10, include_graph: bool = False) -> dict:
+async def search(
+    deps: Deps,
+    query: str,
+    limit: int | str | None = 10,
+    filters: dict | int | None = None,
+    namespace: str | bool | None = None,
+    include_graph: bool = False,
+) -> dict:
     _require_client_or_curator()
+    if isinstance(limit, str) or isinstance(namespace, bool):
+        legacy_namespace = limit if isinstance(limit, str) else None
+        legacy_limit = filters if isinstance(filters, int) else 10
+        include_graph = namespace if isinstance(namespace, bool) else include_graph
+        limit = legacy_limit
+        filters = None
+        namespace = legacy_namespace
+    resolved_limit = 10 if limit is None else limit
+
     async with deps.session_factory() as s:
-        return await _search(s, deps.embedder, query, namespace=namespace,
-                             limit=limit, include_graph=include_graph)
+        return await _search(
+            s,
+            deps.embedder,
+            query,
+            limit=resolved_limit,
+            filters=filters if isinstance(filters, dict) else None,
+            namespace=namespace if isinstance(namespace, str) else None,
+            include_graph=include_graph,
+        )
 
 
 # ---------- Notas curadas ----------

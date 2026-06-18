@@ -7,14 +7,14 @@ async def search(
     embedder,
     query: str,
     *,
-    namespace: str | None = None,
     limit: int = 10,
+    filters: dict | None = None,
+    namespace: str | None = None,
     include_graph: bool = False,
 ) -> dict:
     (qvec,) = await embedder.embed([query])
-    chunk_hits = await repo.search_chunks(session, qvec, namespace, limit)
-    mem_hits = await repo.search_memories(session, qvec, namespace, limit)
-    results = sorted(chunk_hits + mem_hits, key=lambda r: r["score"], reverse=True)[:limit]
+    chunk_hits = await repo.search_chunks(session, qvec, "curated", limit, filters=filters)
+    results = sorted(chunk_hits, key=lambda r: r["score"], reverse=True)[:limit]
 
     graph: list[dict] = []
     if include_graph and namespace:
