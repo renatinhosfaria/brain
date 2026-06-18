@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from brain import auth
 from brain.config import Settings
@@ -46,6 +46,13 @@ async def deps(async_dsn, tmp_path):
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     sf = make_session_factory(engine)
+    async with sf() as s:
+        await handlers.age.ensure_graph(s)
+        await handlers.age._prepare(s)
+        await s.execute(
+            text("SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)")
+        )
+        await s.commit()
     vault = tmp_path / "vault"
     _init_repo(vault)
     settings = Settings(
@@ -1141,6 +1148,172 @@ async def test_search_handler_limita_limit_muito_alto(deps):
     assert {r["namespace"] for r in out["results"]} == {"curated"}
 
 
+async def test_deep_search_permite_principal_client_e_retorna_grafo_estruturado(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-brain",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "curated")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "curated")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "curated")
+        await s.commit()
+
+    out = await _as_client(handlers.deep_search, deps, "brain")
+
+    assert out["query"] == "brain"
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["graph"]["relationships"] == [
+        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+    ]
+    entities = {entity["name"]: entity for entity in out["graph"]["entities"]}
+    assert entities["brain"]["matched_by"] == "substring"
+    assert entities["Hermes"]["matched_by"] == "relationship"
+    assert out["meta"]["seed_strategy"] == "substring"
+    assert out["meta"]["depth"] == 1
+    assert out["meta"]["max_entities"] == 3
+
+
+async def test_deep_search_rejeita_principal_invalido(deps):
+    with pytest.raises(PermissionError, match="client or curator required"):
+        await _as_principal(
+            auth.Principal("service", "svc", "Service"),
+            handlers.deep_search,
+            deps,
+            "brain",
+        )
+
+
+async def test_deep_search_rejeita_namespace_customizado_para_client(deps):
+    with pytest.raises(PermissionError, match="curator required for non-curated namespace"):
+        await _as_client(handlers.deep_search, deps, "brain", namespace="tenant-b")
+
+
+async def test_deep_search_permite_namespace_customizado_para_curator(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-tenant.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-tenant",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "tenant-b")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "tenant-b")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "tenant-b")
+        await s.commit()
+
+    out = await _as_curator(handlers.deep_search, deps, "brain", namespace="tenant-b")
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["graph"]["relationships"] == [
+        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+    ]
+
+
+@pytest.mark.parametrize("depth", [False, True, 0, 4, "1", 1.5])
+async def test_deep_search_rejeita_depth_invalido_no_handler(deps, depth):
+    with pytest.raises(ValueError, match="depth"):
+        await _as_client(handlers.deep_search, deps, "brain", depth=depth)
+
+
+@pytest.mark.parametrize("max_entities", [False, True, 0, 4, "3", 1.5])
+async def test_deep_search_rejeita_max_entities_invalido_no_handler(deps, max_entities):
+    with pytest.raises(ValueError, match="max_entities"):
+        await _as_client(handlers.deep_search, deps, "brain", max_entities=max_entities)
+
+
+async def test_deep_search_rel_types_vazio_vira_none_no_meta(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-rel.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-rel",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "curated")
+        await s.commit()
+
+    out = await _as_client(handlers.deep_search, deps, "brain", rel_types=[])
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["meta"]["rel_types"] is None
+
+
+async def test_deep_search_rejeita_rel_types_string_no_handler(deps):
+    with pytest.raises(ValueError, match="rel_types"):
+        await _as_client(handlers.deep_search, deps, "brain", rel_types="curates")
+
+
+async def test_deep_search_rejeita_rel_types_com_item_nao_string_no_handler(deps):
+    with pytest.raises(ValueError, match="rel_types"):
+        await _as_client(handlers.deep_search, deps, "brain", rel_types=["curates", 123])
+
+
+async def test_deep_search_normaliza_rel_types_no_handler(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-rel-normalized.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-rel-normalized",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "curated")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "curated")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "curated")
+        await s.commit()
+
+    out = await _as_client(
+        handlers.deep_search,
+        deps,
+        "brain",
+        rel_types=[" curates ", "curates", "", " supports "],
+    )
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["meta"]["rel_types"] == ["curates", "supports"]
+    assert out["graph"]["relationships"] == [
+        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+    ]
+
+
 async def test_mcp_search_public_schema_usa_filters(deps):
     mcp = create_mcp_server(deps)
     tools = await mcp.list_tools()
@@ -1150,11 +1323,28 @@ async def test_mcp_search_public_schema_usa_filters(deps):
     assert search_tool.inputSchema["required"] == ["query"]
 
 
+async def test_mcp_deep_search_public_schema(deps):
+    mcp = create_mcp_server(deps)
+    tools = await mcp.list_tools()
+    deep_search_tool = next(tool for tool in tools if tool.name == "deep_search")
+
+    assert set(deep_search_tool.inputSchema["properties"]) == {
+        "query",
+        "limit",
+        "depth",
+        "max_entities",
+        "rel_types",
+        "filters",
+        "namespace",
+    }
+    assert deep_search_tool.inputSchema["required"] == ["query"]
+
+
 async def test_mcp_public_tools_remove_superficie_antiga_de_memoria(deps):
     mcp = create_mcp_server(deps)
     tool_names = {tool.name for tool in await mcp.list_tools()}
 
-    assert {"search", "get_note", "submit_agent_note"} <= tool_names
+    assert {"search", "deep_search", "get_note", "submit_agent_note"} <= tool_names
     assert {
         "remember",
         "get_memory",

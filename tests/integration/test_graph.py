@@ -62,3 +62,275 @@ async def test_merge_entities_move_relacoes(session):
     assert await age.get_entity(session, "TS", "trabalho") is None
     related = await age.get_related(session, "Renato", "trabalho")
     assert any(e["name"] == "TypeScript" for e in related)
+
+
+async def test_get_relationship_paths_retorna_entidades_relacoes_direcao_e_depth(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_entity(session, "Vault", "conceito", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+    await age.upsert_relation(session, "brain", "Vault", "stores", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["brain"], "curated", depth=2)
+
+    assert {"name": "brain", "type": "projeto", "seed": "brain", "depth": 0} in out["entities"]
+    assert {"name": "Hermes", "type": "agente", "seed": "brain", "depth": 1} in out["entities"]
+    assert {"name": "Vault", "type": "conceito", "seed": "brain", "depth": 1} in out["entities"]
+    assert {
+        "from": "Hermes",
+        "to": "brain",
+        "type": "curates",
+        "seed": "brain",
+        "depth": 1,
+    } in out["relationships"]
+    assert {
+        "from": "brain",
+        "to": "Vault",
+        "type": "stores",
+        "seed": "brain",
+        "depth": 1,
+    } in out["relationships"]
+
+
+async def test_get_relationship_paths_filtra_rel_types(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_entity(session, "Vault", "conceito", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+    await age.upsert_relation(session, "brain", "Vault", "stores", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain"],
+        "curated",
+        depth=2,
+        rel_types=["stores"],
+    )
+
+    assert {rel["type"] for rel in out["relationships"]} == {"stores"}
+    assert {entity["name"] for entity in out["entities"]} == {"brain", "Vault"}
+
+
+async def test_get_relationship_paths_deduplica_e_respeita_limit(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    for idx in range(3):
+        name = f"Entidade {idx}"
+        await age.upsert_entity(session, name, "conceito", "curated")
+        await age.upsert_relation(session, "brain", name, "relates_to", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain", "brain"],
+        "curated",
+        depth=1,
+        limit=2,
+    )
+
+    assert [(rel["to"], rel["depth"]) for rel in out["relationships"]] == [
+        ("Entidade 0", 1),
+        ("Entidade 1", 1),
+    ]
+    assert len(out["relationships"]) == 2
+    assert len(out["entities"]) == 3
+    assert {e["name"] for e in out["entities"]} == {"brain", "Entidade 0", "Entidade 1"}
+
+
+async def test_get_relationship_paths_limita_entidades_pelas_relacoes_finais(session):
+    await age.upsert_entity(session, "A", "projeto", "curated")
+    await age.upsert_entity(session, "B", "projeto", "curated")
+    await age.upsert_entity(session, "X", "conceito", "curated")
+    await age.upsert_relation(session, "A", "X", "mentions", "curated")
+    await age.upsert_relation(session, "B", "X", "mentions", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["B", "A"], "curated", depth=1, limit=1)
+
+    assert len(out["relationships"]) == 1
+    surviving_rel = out["relationships"][0]
+    entity_x = [e for e in out["entities"] if e["name"] == "X"][0]
+    assert entity_x["seed"] == surviving_rel["seed"]
+    entity_names = {entity["name"] for entity in out["entities"]}
+    assert entity_names == {surviving_rel["from"], surviving_rel["to"]}
+
+
+async def test_get_relationship_paths_deduplica_entidade_por_nome_no_namespace(session):
+    await age.upsert_entity(session, "A", "projeto", "curated")
+    await age.upsert_entity(session, "B", "projeto", "curated")
+    await age.upsert_entity(session, "X", "conceito", "curated")
+    await age.upsert_relation(session, "A", "X", "mentions", "curated")
+    await age.upsert_relation(session, "B", "X", "mentions", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["A", "B"], "curated", depth=1)
+
+    xs = [e for e in out["entities"] if e["name"] == "X"]
+    assert len(xs) == 1
+    assert xs[0]["depth"] == 1
+    assert xs[0]["seed"] == "A"
+
+
+async def test_get_relationship_paths_nao_atravessa_relacao_cross_namespace(session):
+    from sqlalchemy import text
+
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Vault", "conceito", "curated")
+    await age.upsert_entity(session, "Tenant Secret", "conceito", "tenant-b")
+    await age.upsert_entity(session, "Public Leak", "conceito", "curated")
+    await age.upsert_relation(session, "brain", "Vault", "stores", "curated")
+    await age._prepare(session)
+    leaked_to = (
+        await session.execute(
+            text(
+                f"SELECT * FROM cypher('brain', $cy$ "
+                f"MATCH (a:Entity {{name: {age._lit('brain')}, namespace: {age._lit('curated')}}}), "
+                f"(b:Entity {{name: {age._lit('Tenant Secret')}, namespace: {age._lit('tenant-b')}}}) "
+                f"MERGE (a)-[r:REL {{type: {age._lit('leaks_to')}}}]->(b) "
+                f"RETURN r.type $cy$) AS (type agtype)"
+            )
+        )
+    ).first()
+    leaked_back = (
+        await session.execute(
+            text(
+                f"SELECT * FROM cypher('brain', $cy$ "
+                f"MATCH (a:Entity {{name: {age._lit('Tenant Secret')}, namespace: {age._lit('tenant-b')}}}), "
+                f"(b:Entity {{name: {age._lit('Public Leak')}, namespace: {age._lit('curated')}}}) "
+                f"MERGE (a)-[r:REL {{type: {age._lit('leaks_back')}}}]->(b) "
+                f"RETURN r.type $cy$) AS (type agtype)"
+            )
+        )
+    ).first()
+    assert leaked_to is not None
+    assert leaked_back is not None
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["brain"], "curated", depth=2)
+
+    assert {"Tenant Secret", "Public Leak"}.isdisjoint(
+        {entity["name"] for entity in out["entities"]}
+    )
+    assert {"leaks_to", "leaks_back"}.isdisjoint(
+        {rel["type"] for rel in out["relationships"]}
+    )
+    assert out["relationships"] == [
+        {"from": "brain", "to": "Vault", "type": "stores", "seed": "brain", "depth": 1}
+    ]
+
+
+async def test_get_relationship_paths_rel_types_descarta_path_com_aresta_fora(session):
+    await age.upsert_entity(session, "seed", "projeto", "curated")
+    await age.upsert_entity(session, "intermediaria", "conceito", "curated")
+    await age.upsert_entity(session, "alvo", "conceito", "curated")
+    await age.upsert_entity(session, "destino", "conceito", "curated")
+
+    await age.upsert_relation(session, "seed", "intermediaria", "drop", "curated")
+    await age.upsert_relation(session, "intermediaria", "alvo", "keep", "curated")
+    await age.upsert_relation(session, "seed", "destino", "keep", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["seed"],
+        "curated",
+        depth=2,
+        rel_types=["keep"],
+    )
+
+    assert {rel["type"] for rel in out["relationships"]} == {"keep"}
+    assert "intermediaria" not in {entity["name"] for entity in out["entities"]}
+    assert "alvo" not in {entity["name"] for entity in out["entities"]}
+    assert "destino" in {entity["name"] for entity in out["entities"]}
+
+
+async def test_get_relationship_paths_deep_depth_de_nodes(session):
+    await age.upsert_entity(session, "seed", "projeto", "curated")
+    await age.upsert_entity(session, "A", "conceito", "curated")
+    await age.upsert_entity(session, "B", "conceito", "curated")
+    await age.upsert_relation(session, "seed", "A", "next", "curated")
+    await age.upsert_relation(session, "A", "B", "next", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["seed"], "curated", depth=2)
+
+    assert {"name": "seed", "type": "projeto", "seed": "seed", "depth": 0} in out["entities"]
+    assert {"name": "A", "type": "conceito", "seed": "seed", "depth": 1} in out["entities"]
+    assert {"name": "B", "type": "conceito", "seed": "seed", "depth": 2} in out["entities"]
+
+
+async def test_get_relationship_paths_limit_com_rel_types_aplica_filtro_antes_do_limit(session):
+    await age.upsert_entity(session, "seed", "projeto", "curated")
+    await age.upsert_entity(session, "Alpha", "conceito", "curated")
+    await age.upsert_entity(session, "Beta", "conceito", "curated")
+    await age.upsert_relation(session, "seed", "Alpha", "drop", "curated")
+    await age.upsert_relation(session, "seed", "Beta", "keep", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["seed"],
+        "curated",
+        depth=1,
+        rel_types=["keep"],
+        limit=1,
+    )
+
+    assert out["relationships"] == [
+        {"from": "seed", "to": "Beta", "type": "keep", "seed": "seed", "depth": 1}
+    ]
+
+
+async def test_get_relationship_paths_ordena_empate_de_tipo_de_relacao(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "brain", "Hermes", "zeta", "curated")
+    await age.upsert_relation(session, "brain", "Hermes", "alpha", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain"],
+        "curated",
+        depth=1,
+        rel_types=["alpha", "zeta"],
+        limit=1,
+    )
+
+    assert out["relationships"] == [
+        {
+            "from": "brain",
+            "to": "Hermes",
+            "type": "alpha",
+            "seed": "brain",
+            "depth": 1,
+        }
+    ]
+
+
+async def test_get_relationship_paths_ordena_empate_por_intermediario(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Alpha", "conceito", "curated")
+    await age.upsert_entity(session, "Beta", "conceito", "curated")
+    await age.upsert_entity(session, "Omega", "conceito", "curated")
+    await age.upsert_relation(session, "brain", "Alpha", "rel", "curated")
+    await age.upsert_relation(session, "Alpha", "Omega", "rel", "curated")
+    await age.upsert_relation(session, "brain", "Beta", "rel", "curated")
+    await age.upsert_relation(session, "Beta", "Omega", "rel", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain"],
+        "curated",
+        depth=2,
+        rel_types=["rel"],
+        limit=3,
+    )
+
+    assert out["relationships"] == [
+        {"from": "brain", "to": "Alpha", "type": "rel", "seed": "brain", "depth": 1},
+        {"from": "brain", "to": "Beta", "type": "rel", "seed": "brain", "depth": 1},
+        {"from": "Alpha", "to": "Omega", "type": "rel", "seed": "brain", "depth": 2},
+    ]
