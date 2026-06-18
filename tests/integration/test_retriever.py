@@ -25,8 +25,10 @@ class FakeLLM:
     def __init__(self, payload=None, error=None):
         self.payload = payload or {"entities": []}
         self.error = error
+        self.calls = 0
 
     async def complete_json(self, system, user):
+        self.calls += 1
         if self.error is not None:
             raise self.error
         return self.payload
@@ -364,7 +366,8 @@ async def test_deep_search_fallback_llm_falha_retorna_warning(session):
     assert out["meta"]["warnings"] == ["query entity fallback failed: llm indisponivel"]
 
 
-async def test_deep_search_max_entities_invalido_nao_expande_grafo(session):
+@pytest.mark.parametrize("max_entities", [False, True, 0, -1, "2", 1.5])
+async def test_deep_search_max_entities_invalido_nao_expande_grafo(session, max_entities):
     await _add_document_chunk(
         session,
         namespace="curated",
@@ -377,12 +380,16 @@ async def test_deep_search_max_entities_invalido_nao_expande_grafo(session):
     await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
     await session.commit()
 
-    emb = FakeEmbedder({"brain": _vec(0.11)})
-    out = await deep_search(session, emb, None, "brain", max_entities=False)
+    emb = FakeEmbedder({"consulta abstrata": _vec(0.11)})
+    llm = FakeLLM({"entities": [{"name": "brain"}]})
+    out = await deep_search(session, emb, llm, "consulta abstrata", max_entities=max_entities)
 
     assert out["results"]
     assert out["graph"] == {"entities": [], "relationships": []}
+    assert out["meta"]["max_entities"] == 0
     assert out["meta"]["seed_strategy"] == "none"
+    assert out["meta"]["warnings"] == []
+    assert llm.calls == 0
 
 
 async def test_deep_search_namespace_controla_so_grafo(session):

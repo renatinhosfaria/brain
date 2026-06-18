@@ -30,7 +30,8 @@ async def search(
 
 
 def _dedupe_entities(entities: list[dict], max_entities: int) -> list[dict]:
-    if isinstance(max_entities, bool) or not isinstance(max_entities, int) or max_entities < 1:
+    max_entities = _valid_max_entities(max_entities)
+    if max_entities == 0:
         return []
     seen: set[str] = set()
     result: list[dict] = []
@@ -46,6 +47,12 @@ def _dedupe_entities(entities: list[dict], max_entities: int) -> list[dict]:
         if len(result) >= max_entities:
             break
     return result
+
+
+def _valid_max_entities(value) -> int:  # noqa: ANN001
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 0
+    return value
 
 
 async def _resolve_seed_entities(
@@ -95,6 +102,7 @@ async def deep_search(
     namespace: str = "curated",
 ) -> dict:
     limit = repo.normalize_search_limit(limit)
+    resolved_max_entities = _valid_max_entities(max_entities)
     source_filter = (filters or {}).get("source")
     if source_filter not in (None, "document", "curated", "note"):
         return {
@@ -103,7 +111,7 @@ async def deep_search(
             "graph": {"entities": [], "relationships": []},
             "meta": {
                 "depth": depth,
-                "max_entities": max_entities,
+                "max_entities": resolved_max_entities,
                 "seed_strategy": "none",
                 "rel_types": rel_types,
                 "warnings": [],
@@ -114,15 +122,34 @@ async def deep_search(
     chunk_hits = await repo.search_chunks(session, qvec, "curated", limit, filters=filters)
     results = sorted(chunk_hits, key=lambda r: r["score"], reverse=True)[:limit]
 
+    if resolved_max_entities == 0:
+        return {
+            "query": query,
+            "results": results,
+            "graph": {"entities": [], "relationships": []},
+            "meta": {
+                "depth": depth,
+                "max_entities": resolved_max_entities,
+                "seed_strategy": "none",
+                "rel_types": rel_types,
+                "warnings": [],
+            },
+        }
+
     warnings: list[str] = []
-    seeds, seed_strategy = await _resolve_seed_entities(session, query, namespace, max_entities)
+    seeds, seed_strategy = await _resolve_seed_entities(
+        session,
+        query,
+        namespace,
+        resolved_max_entities,
+    )
     if not seeds:
         llm_seeds, llm_warnings = await _resolve_llm_entities(
             session,
             llm,
             query,
             namespace,
-            max_entities,
+            resolved_max_entities,
         )
         warnings.extend(llm_warnings)
         if llm_seeds:
@@ -152,7 +179,7 @@ async def deep_search(
         "graph": graph,
         "meta": {
             "depth": depth,
-            "max_entities": max_entities,
+            "max_entities": resolved_max_entities,
             "seed_strategy": seed_strategy,
             "rel_types": rel_types,
             "warnings": warnings,
