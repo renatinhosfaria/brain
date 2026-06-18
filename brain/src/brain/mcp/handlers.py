@@ -301,6 +301,11 @@ async def _index_curated_note(
         return _curated_note_dict(doc)
 
 
+def _push_curated_note_if_enabled(deps: Deps) -> None:
+    if deps.settings.git_push_enabled:
+        git_writer.push_repo(deps.settings.repo_cache_path)
+
+
 def _validate_agent_note_transition(note, *, action: str, allowed_statuses: set[str]) -> None:
     terminal_statuses = {"curated", "rejected", "failed"}
     if note.status in terminal_statuses:
@@ -383,7 +388,18 @@ async def create_note(
     repo_path = git_writer.validate_curated_note_path(path)
     note_path = _repo_note_path(deps.settings.repo_cache_path, repo_path)
     if note_path.exists():
-        raise ValueError(f"curated note already exists: {repo_path}")
+        async with deps.session_factory() as s:
+            if await repo.get_document(s, repo_path=repo_path) is not None:
+                raise ValueError(f"curated note already exists: {repo_path}")
+        recovered = await _index_curated_note(
+            deps,
+            repo_path=repo_path,
+            content=note_path.read_text(encoding="utf-8"),
+            metadata=metadata,
+            source_agent_note_ids=source_agent_note_ids,
+        )
+        _push_curated_note_if_enabled(deps)
+        return recovered
 
     async with deps.session_factory() as s:
         if await repo.get_document(s, repo_path=repo_path) is not None:
@@ -396,18 +412,21 @@ async def create_note(
         content=content,
         author_name=deps.settings.git_author_name,
         author_email=deps.settings.git_author_email,
-        push=deps.settings.git_push_enabled,
+        push=False,
+        expected_exists=False,
     )
     written_content = _repo_note_path(deps.settings.repo_cache_path, written_path).read_text(
         encoding="utf-8"
     )
-    return await _index_curated_note(
+    out = await _index_curated_note(
         deps,
         repo_path=written_path,
         content=written_content,
         metadata=metadata,
         source_agent_note_ids=source_agent_note_ids,
     )
+    _push_curated_note_if_enabled(deps)
+    return out
 
 
 async def update_note(
@@ -431,18 +450,21 @@ async def update_note(
         content=content,
         author_name=deps.settings.git_author_name,
         author_email=deps.settings.git_author_email,
-        push=deps.settings.git_push_enabled,
+        push=False,
+        expected_exists=True,
     )
     written_content = _repo_note_path(deps.settings.repo_cache_path, written_path).read_text(
         encoding="utf-8"
     )
-    return await _index_curated_note(
+    out = await _index_curated_note(
         deps,
         repo_path=written_path,
         content=written_content,
         metadata=metadata,
         source_agent_note_ids=source_agent_note_ids,
     )
+    _push_curated_note_if_enabled(deps)
+    return out
 
 
 async def get_note(deps: Deps, id_or_path: str) -> dict | None:

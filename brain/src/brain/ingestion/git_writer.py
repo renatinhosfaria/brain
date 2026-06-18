@@ -1,5 +1,6 @@
 import re
 import subprocess
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,8 @@ import yaml
 
 
 _AGENT_TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}(\d{0,6})?$")
+_CURATED_NOTE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_CURATED_NOTE_LOCKS_GUARD = threading.Lock()
 
 
 def slugify(text: str, *, fallback: str = "note") -> str:
@@ -94,6 +97,10 @@ def render_messages_markdown(messages: list[dict]) -> str:
 
 def render_markdown(messages: list[dict]) -> str:
     return render_messages_markdown(messages)
+
+
+def render_curated_note(*, frontmatter: dict | None = None, content: str) -> str:
+    return render_frontmatter(frontmatter or {}) + content.rstrip() + "\n"
 
 
 def _redact_token_values(value: Any, token: str | None) -> Any:
@@ -341,27 +348,39 @@ def write_curated_note(
     author_email: str,
     push: bool = False,
     retries: int = 3,
+    expected_exists: bool | None = None,
 ) -> str:
     dest = Path(dest)
     rel = validate_curated_note_path(path)
     note_path = _safe_repo_path(dest, rel)
-    is_update = note_path.exists()
-    note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(
-        render_frontmatter(frontmatter or {}) + content.rstrip() + "\n",
-        encoding="utf-8",
-    )
+    lock_key = (str(dest.resolve()), rel)
+    with _CURATED_NOTE_LOCKS_GUARD:
+        lock = _CURATED_NOTE_LOCKS.setdefault(lock_key, threading.Lock())
 
-    operation = "update" if is_update else "create"
-    _commit_path(
-        dest=dest,
-        rel=rel,
-        message=f"note: {operation} {rel}",
-        author_name=author_name,
-        author_email=author_email,
-        push=push,
-        retries=retries,
-    )
+    with lock:
+        exists = note_path.exists()
+        if expected_exists is False and exists:
+            raise ValueError(f"curated note already exists: {rel}")
+        if expected_exists is True and not exists:
+            raise ValueError(f"curated note does not exist: {rel}")
+
+        rendered = render_curated_note(frontmatter=frontmatter, content=content)
+        if exists and note_path.read_text(encoding="utf-8") == rendered:
+            return rel
+
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(rendered, encoding="utf-8")
+
+        operation = "update" if exists else "create"
+        _commit_path(
+            dest=dest,
+            rel=rel,
+            message=f"note: {operation} {rel}",
+            author_name=author_name,
+            author_email=author_email,
+            push=push,
+            retries=retries,
+        )
     return rel
 
 

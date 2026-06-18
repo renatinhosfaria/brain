@@ -20,6 +20,26 @@ async def index_document(
     h = content_hash(content)
     existing = await repo.get_document(session, repo_path=repo_path)
     if existing and existing.content_hash == h:
+        next_meta = existing.meta if meta is None else meta
+        title = _title(content)
+        if (
+            existing.namespace != namespace
+            or existing.title != title
+            or existing.raw_content != content
+            or existing.commit_sha != commit_sha
+            or existing.meta != next_meta
+        ):
+            await repo.upsert_document(
+                session,
+                namespace=namespace,
+                repo_path=repo_path,
+                title=title,
+                raw_content=content,
+                content_hash=h,
+                commit_sha=commit_sha,
+                meta=meta,
+            )
+            await session.commit()
         return False
 
     doc = await repo.upsert_document(

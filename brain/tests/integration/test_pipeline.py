@@ -89,6 +89,42 @@ async def test_index_document_idempotente(session):
     assert await pipeline.index_document(session, FakeEmbedder(), FakeLLM(), _settings(), **args) is False
 
 
+async def test_index_document_mesmo_conteudo_atualiza_meta_commit_e_preserva_chunks(session):
+    args = dict(namespace="t", repo_path="a.md", content="# X\ncorpo")
+    assert await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        FakeLLM(),
+        _settings(),
+        **args,
+        commit_sha="old",
+        meta={"version": 1},
+    ) is True
+    doc = await repo.get_document(session, repo_path="a.md")
+    before_chunks = list(
+        (await session.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars()
+    )
+
+    changed = await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        FakeLLM(),
+        _settings(),
+        **args,
+        commit_sha="new",
+        meta={"version": 2},
+    )
+    after_doc = await repo.get_document(session, repo_path="a.md")
+    after_chunks = list(
+        (await session.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars()
+    )
+
+    assert changed is False
+    assert after_doc.commit_sha == "new"
+    assert after_doc.meta == {"version": 2}
+    assert [chunk.id for chunk in after_chunks] == [chunk.id for chunk in before_chunks]
+
+
 async def test_extract_and_store_facts(session):
     facts = await pipeline.extract_and_store_facts(
         session, FakeEmbedder(), FakeLLM(), namespace="p",

@@ -314,6 +314,59 @@ def test_write_curated_note_cria_pais_automaticamente_e_commita_create_update(tm
     assert subject == "note: update projetos/brain/resumo.md"
 
 
+def test_write_curated_note_expected_exists_controla_create_update(tmp_path):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+
+    git_writer.write_curated_note(
+        repo,
+        "projetos/brain.md",
+        frontmatter={"type": "curated_note"},
+        content="# Brain\n\nPrimeiro.",
+        author_name="brain-bot",
+        author_email="brain-bot@example.com",
+        push=False,
+        expected_exists=False,
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        git_writer.write_curated_note(
+            repo,
+            "projetos/brain.md",
+            frontmatter={"type": "curated_note"},
+            content="# Brain\n\nSegundo.",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+            expected_exists=False,
+        )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        git_writer.write_curated_note(
+            repo,
+            "projetos/inexistente.md",
+            frontmatter={"type": "curated_note"},
+            content="# Inexistente",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+            expected_exists=True,
+        )
+
+    git_writer.write_curated_note(
+        repo,
+        "projetos/brain.md",
+        frontmatter={"type": "curated_note"},
+        content="# Brain\n\nAtualizado.",
+        author_name="brain-bot",
+        author_email="brain-bot@example.com",
+        push=False,
+        expected_exists=True,
+    )
+
+    assert "Atualizado." in (repo / "projetos/brain.md").read_text(encoding="utf-8")
+
+
 def test_write_conversation_cria_arquivo_e_commit(tmp_path):
     repo = tmp_path / "vault"
     _init_repo(repo)

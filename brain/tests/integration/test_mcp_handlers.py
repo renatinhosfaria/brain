@@ -27,6 +27,11 @@ class FakeEmbedder:
         return [[0.2] * 2000 for _ in texts]
 
 
+class FailingEmbedder:
+    async def embed(self, texts):
+        raise RuntimeError("embed failed")
+
+
 def _init_repo(path):
     path.mkdir(parents=True, exist_ok=True)
     for args in (["init"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
@@ -173,6 +178,98 @@ async def test_create_note_falha_quando_path_existe(deps):
         await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nSegundo.")
 
 
+async def test_create_note_concorrente_mesmo_path_so_uma_sucede(deps, monkeypatch):
+    original_get_document = repo.get_document
+    both_prechecked = asyncio.Event()
+    precheck_calls = 0
+
+    async def gated_get_document(session, *, id=None, repo_path=None):
+        nonlocal precheck_calls
+        if id is None and repo_path == "projetos/race.md" and precheck_calls < 2:
+            precheck_calls += 1
+            if precheck_calls == 2:
+                both_prechecked.set()
+            await both_prechecked.wait()
+            return None
+        return await original_get_document(session, id=id, repo_path=repo_path)
+
+    monkeypatch.setattr(repo, "get_document", gated_get_document)
+
+    results = await asyncio.gather(
+        _as_curator(
+            handlers.create_note,
+            deps,
+            "projetos/race.md",
+            "# Race\n\nConteudo vencedor A.",
+        ),
+        _as_curator(
+            handlers.create_note,
+            deps,
+            "projetos/race.md",
+            "# Race\n\nConteudo vencedor B.",
+        ),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if isinstance(result, dict)]
+    failures = [result for result in results if isinstance(result, ValueError)]
+    text = (Path(deps.settings.repo_cache_path) / "projetos/race.md").read_text(encoding="utf-8")
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert text.count("Conteudo vencedor") == 1
+    assert successes[0]["content"] == text
+    async with deps.session_factory() as s:
+        doc = await original_get_document(s, repo_path="projetos/race.md")
+    assert doc.raw_content == text
+
+
+async def test_create_note_recupera_arquivo_existente_sem_documento_apos_falha_indexacao(
+    deps, monkeypatch
+):
+    deps.settings.git_push_enabled = True
+    push_calls = []
+    monkeypatch.setattr(handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args))
+    monkeypatch.setattr(
+        handlers.git_writer,
+        "_push_with_retry",
+        lambda *args, **kwargs: push_calls.append(args),
+    )
+
+    deps.embedder = FailingEmbedder()
+    with pytest.raises(RuntimeError, match="embed failed"):
+        await _as_curator(
+            handlers.create_note,
+            deps,
+            "projetos/recovery.md",
+            "# Recovery\n\nConteudo gravado antes da falha.",
+            metadata={"attempt": 1},
+        )
+
+    note_path = Path(deps.settings.repo_cache_path) / "projetos/recovery.md"
+    assert note_path.exists()
+    written_text = note_path.read_text(encoding="utf-8")
+    assert push_calls == []
+    async with deps.session_factory() as s:
+        assert await repo.get_document(s, repo_path="projetos/recovery.md") is None
+
+    deps.embedder = FakeEmbedder()
+    recovered = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/recovery.md",
+        "# Recovery\n\nConteudo de retry nao deve sobrescrever.",
+        metadata={"attempt": 1},
+    )
+
+    assert recovered["path"] == "projetos/recovery.md"
+    assert recovered["content"] == written_text
+    assert "Conteudo de retry" not in note_path.read_text(encoding="utf-8")
+    async with deps.session_factory() as s:
+        doc = await repo.get_document(s, repo_path="projetos/recovery.md")
+    assert doc.raw_content == written_text
+
+
 async def test_update_note_substitui_markdown_inteiro_e_reindexa(deps):
     created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo.")
 
@@ -200,6 +297,55 @@ async def test_update_note_substitui_markdown_inteiro_e_reindexa(deps):
     assert doc.meta["metadata"] == {"reviewed": True}
     assert any("Novo conteudo." in chunk.text for chunk in chunks)
     assert all("Antigo" not in chunk.text for chunk in chunks)
+
+
+async def test_update_note_falha_indexacao_mantem_get_note_db_e_retry_reconcilia(
+    deps, monkeypatch
+):
+    created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo.")
+    deps.settings.git_push_enabled = True
+    push_calls = []
+    monkeypatch.setattr(handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args))
+    monkeypatch.setattr(
+        handlers.git_writer,
+        "_push_with_retry",
+        lambda *args, **kwargs: push_calls.append(args),
+    )
+
+    deps.embedder = FailingEmbedder()
+    with pytest.raises(RuntimeError, match="embed failed"):
+        await _as_curator(
+            handlers.update_note,
+            deps,
+            created["id"],
+            "# Brain\n\nNovo conteudo falhou.",
+            metadata={"attempt": 1},
+        )
+
+    note_path = Path(deps.settings.repo_cache_path) / "projetos/brain.md"
+    file_text = note_path.read_text(encoding="utf-8")
+    stale = await _as_client(handlers.get_note, deps, created["id"])
+
+    assert "Novo conteudo falhou." in file_text
+    assert "Antigo." in stale["content"]
+    assert "Novo conteudo falhou." not in stale["content"]
+    assert push_calls == []
+
+    deps.embedder = FakeEmbedder()
+    updated = await _as_curator(
+        handlers.update_note,
+        deps,
+        created["id"],
+        "# Brain\n\nNovo conteudo falhou.",
+        metadata={"attempt": 1},
+    )
+
+    assert updated["id"] == created["id"]
+    assert updated["content"] == file_text
+    async with deps.session_factory() as s:
+        doc = await repo.get_document(s, repo_path="projetos/brain.md")
+    assert doc.raw_content == file_text
+    assert doc.meta["metadata"] == {"attempt": 1}
 
 
 async def test_get_note_retorna_apenas_curated_notes(deps):
