@@ -232,3 +232,30 @@ async def test_get_relationship_paths_limit_com_rel_types_aplica_filtro_antes_do
     assert out["relationships"] == [
         {"from": "seed", "to": "Beta", "type": "keep", "seed": "seed", "depth": 1}
     ]
+
+
+async def test_get_relationship_paths_ordena_empate_de_tipo_de_relacao(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "brain", "Hermes", "zeta", "curated")
+    await age.upsert_relation(session, "brain", "Hermes", "alpha", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain"],
+        "curated",
+        depth=1,
+        rel_types=["alpha", "zeta"],
+        limit=1,
+    )
+
+    assert out["relationships"] == [
+        {
+            "from": "brain",
+            "to": "Hermes",
+            "type": "alpha",
+            "seed": "brain",
+            "depth": 1,
+        }
+    ]

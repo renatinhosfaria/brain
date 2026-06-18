@@ -241,13 +241,14 @@ async def get_relationship_paths(
             where_clause = ""
             if rel_type_filters:
                 where_clause = "WHERE " + " AND ".join(rel_type_filters) + " "
+            order_by_expr = ", ".join(["n.name"] + [f"{edge}.type" for edge in edge_vars])
 
             q = (
                 f"SELECT * FROM cypher('brain', $cy$ "
                 f"MATCH p = {pattern} "
                 f"{where_clause}"
                 f"WITH p, n "
-                f"ORDER BY n.name "
+                f"ORDER BY {order_by_expr} "
                 f"LIMIT {remaining} "
                 f"RETURN nodes(p), relationships(p) $cy$) AS (nodes agtype, rels agtype)"
             )
