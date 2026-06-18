@@ -74,7 +74,7 @@ Authorization: Bearer <TOKEN_DO_CLIENTE>
 Use `reveal_agent_client_token` para recuperar um token existente e
 `rotate_agent_client_token` para trocar o segredo de um cliente.
 
-## Ferramentas MCP
+## Ferramentas MCP de inbox e curadoria
 
 Clientes de agente têm acesso limitado:
 - `search`: busca semântica apenas em notas curadas.
@@ -92,6 +92,12 @@ Hermes tem acesso de curadoria:
   `include_agents=true` para inspeção operacional.
 - Links: `list_unresolved_links` e `resolve_note_link`.
 
+Esta lista destaca o fluxo de inbox e curadoria. Ferramentas técnicas de
+documentos, reindexação e grafo de entidades, como `get_document`,
+`list_documents`, `reindex`, `get_entity`, `search_entities`, `get_related`,
+`update_entity`, `merge_entities` e `delete_entity`, continuam expostas apenas
+ao curador para compatibilidade e operações.
+
 ## Notas brutas e notas curadas
 
 Notas brutas de clientes ficam em `_agents/{slug}/...` e representam inbox de
@@ -106,6 +112,12 @@ cria um evento `agent_note.created` no outbox e faz push se
 `GIT_PUSH_ENABLED=true`. O evento é apenas uma referência: id da nota, slug do
 cliente e caminho do arquivo. O conteúdo continua no vault/Postgres e não é
 enviado no webhook.
+
+`_agents/` não é uma barreira de confidencialidade. Notas brutas podem conter
+contexto sensível; mesmo sem indexação e sem exposição para clientes, elas são
+commits no vault e podem ser enviadas para `REPO_URL` quando
+`GIT_PUSH_ENABLED=true`. Mantenha o repositório do vault privado e restrito aos
+operadores que podem ver esse inbox.
 
 ## Webhook para Hermes
 
