@@ -207,15 +207,23 @@ async def get_relationship_paths(
     bounded_depth = max(1, int(depth))
     bounded_limit = max(1, int(limit))
     allowed_types = set(_dedupe_strings(rel_types or []))
-    seed_names = _dedupe_strings(seeds)
+    seed_names = sorted(_dedupe_strings(seeds))
     relationships: list[dict] = []
     relationship_keys: set[tuple[str, str, str, str, int]] = set()
     relationship_entities: dict[tuple[str, str, str, str, int], tuple[dict, dict]] = {}
 
     allowed_types_literal = _lit(sorted(allowed_types))
+    should_stop = False
 
     for seed in seed_names:
+        if should_stop:
+            break
         for path_depth in range(1, bounded_depth + 1):
+            remaining = bounded_limit - len(relationships)
+            if remaining <= 0:
+                should_stop = True
+                break
+
             edge_vars = [f"r{idx}" for idx in range(path_depth)]
             intermediate_nodes = [f"v{idx}" for idx in range(path_depth - 1)]
             parts = [
@@ -240,11 +248,13 @@ async def get_relationship_paths(
                 f"{where_clause}"
                 f"WITH p, n "
                 f"ORDER BY n.name "
-                f"LIMIT {bounded_limit} "
+                f"LIMIT {remaining} "
                 f"RETURN nodes(p), relationships(p) $cy$) AS (nodes agtype, rels agtype)"
             )
             rows = (await session.execute(text(q))).all()
             for nodes_value, rels_value in rows:
+                if should_stop:
+                    break
                 nodes = _parse_agtype_entity_list(nodes_value)
                 rels = _parse_agtype_entity_list(rels_value)
                 node_by_id = {node.get("id"): node for node in nodes}
@@ -269,6 +279,8 @@ async def get_relationship_paths(
                 for hop, rel in enumerate(rels, start=1):
                     rel_props = _props(rel)
                     rel_type = rel_props.get("type") or rel.get("label")
+                    # Defensivo: o filtro também é revalidado em Python para não depender
+                    # de um predicado Cypher por completo.
                     if allowed_types and rel_type not in allowed_types:
                         path_ok = False
                         break
@@ -342,6 +354,13 @@ async def get_relationship_paths(
                     if from_payload is None or to_payload is None:
                         continue
                     relationship_entities[key] = (from_payload, to_payload)
+                    if len(relationships) >= bounded_limit:
+                        should_stop = True
+                        break
+                if should_stop:
+                    break
+            if should_stop:
+                break
 
     relationships.sort(key=lambda r: (r["seed"], r["depth"], r["from"], r["to"], r["type"]))
     limited_relationships = relationships[:bounded_limit]

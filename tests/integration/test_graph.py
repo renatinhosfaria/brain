@@ -152,6 +152,8 @@ async def test_get_relationship_paths_limita_entidades_pelas_relacoes_finais(ses
     surviving_rel = out["relationships"][0]
     entity_x = [e for e in out["entities"] if e["name"] == "X"][0]
     assert entity_x["seed"] == surviving_rel["seed"]
+    entity_names = {entity["name"] for entity in out["entities"]}
+    assert entity_names == {surviving_rel["from"], surviving_rel["to"]}
 
 
 async def test_get_relationship_paths_deduplica_entidade_por_nome_no_namespace(session):
