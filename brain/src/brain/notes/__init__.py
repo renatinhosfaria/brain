@@ -1,2 +1,1 @@
 """Note parsing helpers."""
-
