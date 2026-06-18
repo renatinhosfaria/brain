@@ -384,6 +384,40 @@ def test_write_agent_note_mantem_commit_local_quando_push_falha(tmp_path, monkey
     assert _git(["status", "--short"], repo).stdout == ""
 
 
+def test_push_with_retry_limpa_worktree_quando_rebase_conflita(tmp_path):
+    remote = tmp_path / "remote.git"
+    local = tmp_path / "local"
+    other = tmp_path / "other"
+    _git(["init", "--bare", "--initial-branch=main", str(remote)], tmp_path)
+    _git(["clone", str(remote), str(local)], tmp_path)
+    _git(["config", "user.email", "local@t"], local)
+    _git(["config", "user.name", "local"], local)
+
+    (local / "note.md").write_text("base\n", encoding="utf-8")
+    _git(["add", "note.md"], local)
+    _git(["commit", "-m", "base"], local)
+    _git(["push", "-u", "origin", "main"], local)
+
+    _git(["clone", str(remote), str(other)], tmp_path)
+    _git(["config", "user.email", "other@t"], other)
+    _git(["config", "user.name", "other"], other)
+
+    (local / "note.md").write_text("local\n", encoding="utf-8")
+    _git(["commit", "-am", "local change"], local)
+    local_head = _git(["rev-parse", "HEAD"], local).stdout.strip()
+
+    (other / "note.md").write_text("remote\n", encoding="utf-8")
+    _git(["commit", "-am", "remote change"], other)
+    _git(["push"], other)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        git_writer._push_with_retry(local, retries=1)
+
+    assert _git(["status", "--short"], local).stdout == ""
+    assert _git(["rev-parse", "HEAD"], local).stdout.strip() == local_head
+    assert _git(["log", "--format=%s", "-1"], local).stdout.strip() == "local change"
+
+
 @pytest.mark.parametrize(
     "path",
     [

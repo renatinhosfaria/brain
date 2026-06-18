@@ -220,6 +220,12 @@ def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
+def _git_stdout(args: list[str], cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout
+
+
 def _unstage_path(dest: Path, rel: str) -> None:
     result = subprocess.run(
         ["git", "restore", "--staged", "--", rel],
@@ -523,7 +529,28 @@ def _push_with_retry(dest: Path, retries: int) -> None:
             return
         except subprocess.CalledProcessError as e:  # non-fast-forward etc.
             last_error = e
-            _git(["pull", "--rebase"], dest)
+            local_head = _git_stdout(["rev-parse", "HEAD"], dest).strip()
+            was_clean = _git_stdout(["status", "--short"], dest) == ""
+            try:
+                _git(["pull", "--rebase"], dest)
+            except subprocess.CalledProcessError:
+                subprocess.run(
+                    ["git", "rebase", "--abort"],
+                    cwd=dest,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    cwd=dest,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if was_clean:
+                    _git(["reset", "--hard", local_head], dest)
+                raise
     raise RuntimeError(f"push falhou após {retries} tentativas: {last_error}")
 
 
