@@ -138,6 +138,22 @@ async def test_get_relationship_paths_deduplica_e_respeita_limit(session):
     assert {e["name"] for e in out["entities"]} == {"brain", "Entidade 0", "Entidade 1"}
 
 
+async def test_get_relationship_paths_limita_entidades_pelas_relacoes_finais(session):
+    await age.upsert_entity(session, "A", "projeto", "curated")
+    await age.upsert_entity(session, "B", "projeto", "curated")
+    await age.upsert_entity(session, "X", "conceito", "curated")
+    await age.upsert_relation(session, "A", "X", "mentions", "curated")
+    await age.upsert_relation(session, "B", "X", "mentions", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["B", "A"], "curated", depth=1, limit=1)
+
+    assert len(out["relationships"]) == 1
+    surviving_rel = out["relationships"][0]
+    entity_x = [e for e in out["entities"] if e["name"] == "X"][0]
+    assert entity_x["seed"] == surviving_rel["seed"]
+
+
 async def test_get_relationship_paths_deduplica_entidade_por_nome_no_namespace(session):
     await age.upsert_entity(session, "A", "projeto", "curated")
     await age.upsert_entity(session, "B", "projeto", "curated")
