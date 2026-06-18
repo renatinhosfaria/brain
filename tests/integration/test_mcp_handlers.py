@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from brain import auth
 from brain.config import Settings
@@ -46,6 +46,13 @@ async def deps(async_dsn, tmp_path):
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     sf = make_session_factory(engine)
+    async with sf() as s:
+        await handlers.age.ensure_graph(s)
+        await handlers.age._prepare(s)
+        await s.execute(
+            text("SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)")
+        )
+        await s.commit()
     vault = tmp_path / "vault"
     _init_repo(vault)
     settings = Settings(
