@@ -65,6 +65,25 @@ def _bounded_int(value, *, name: str, min_value: int, max_value: int) -> int:  #
     return value
 
 
+def _normalize_rel_types(rel_types) -> list[str] | None:  # noqa: ANN001
+    if rel_types is None:
+        return None
+    if not isinstance(rel_types, list):
+        raise ValueError("rel_types deve ser uma lista de strings")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for rel_type in rel_types:
+        if not isinstance(rel_type, str):
+            raise ValueError("rel_types deve ser uma lista de strings")
+        value = rel_type.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized or None
+
+
 def _require_token_encryption_key(settings) -> str:
     key = settings.brain_token_encryption_key
     if not key:
@@ -542,7 +561,7 @@ async def deep_search(
         min_value=1,
         max_value=3,
     )
-    resolved_rel_types = None if rel_types == [] else rel_types
+    resolved_rel_types = _normalize_rel_types(rel_types)
     resolved_namespace = namespace if isinstance(namespace, str) else "curated"
     if principal.type == "client" and resolved_namespace != "curated":
         raise PermissionError("curator required for non-curated namespace")

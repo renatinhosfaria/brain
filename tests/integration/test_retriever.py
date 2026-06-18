@@ -2,6 +2,7 @@ import pytest
 import pytest_asyncio
 
 from brain.graph import age
+from brain.search import retriever
 from brain.search.retriever import deep_search, search
 from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
@@ -131,6 +132,37 @@ async def test_search_nao_retorna_memorias_ou_agents(session):
 
     emb = FakeEmbedder({"consulta": _vec(0.11)})
     out = await search(session, emb, "consulta", limit=10)
+
+    assert [r["text"] for r in out["results"]] == ["nota curada visivel"]
+    assert {r["source"] for r in out["results"]} == {"document"}
+    assert all(not r["repo_path"].startswith("_agents/") for r in out["results"])
+
+
+async def test_deep_search_nao_retorna_memorias_ou_agents_em_resultados_textuais(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada visivel",
+        seed=0.30,
+    )
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="_agents/chatgpt-web/raw.md",
+        text="nota bruta de agente",
+        seed=0.10,
+    )
+    await repo.add_memory(
+        session,
+        namespace="curated",
+        content="memoria legada proxima",
+        embedding=_vec(0.11),
+    )
+    await session.commit()
+
+    emb = FakeEmbedder({"consulta": _vec(0.11)})
+    out = await deep_search(session, emb, FakeLLM({"entities": []}), "consulta", limit=10)
 
     assert [r["text"] for r in out["results"]] == ["nota curada visivel"]
     assert {r["source"] for r in out["results"]} == {"document"}
@@ -291,6 +323,80 @@ async def test_deep_search_combina_chunks_e_grafo_por_fast_path(session):
     assert entities["brain"]["matched_by"] == "substring"
     assert entities["Hermes"]["matched_by"] == "relationship"
     assert out["meta"]["seed_strategy"] == "substring"
+
+
+async def test_resolve_seed_entities_passa_limit_para_busca_direta(monkeypatch):
+    calls = []
+
+    async def fake_search_entities(session, query, namespace, limit=None):
+        calls.append((query, namespace, limit))
+        return [
+            {"name": "Brain Zeta", "type": "projeto"},
+            {"name": "Brain Alpha", "type": "projeto"},
+            {"name": "Brain Beta", "type": "projeto"},
+        ]
+
+    monkeypatch.setattr(retriever.age, "search_entities", fake_search_entities)
+
+    seeds, strategy = await retriever._resolve_seed_entities(None, "brain", "curated", 2)
+
+    assert calls == [("brain", "curated", 2)]
+    assert strategy == "substring"
+    assert [seed["name"] for seed in seeds] == ["Brain Zeta", "Brain Alpha"]
+
+
+async def test_deep_search_seleciona_seeds_diretos_em_ordem_deterministica_e_limitada(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    for seed_name, target_name in [
+        ("Brain Zeta", "Target Zeta"),
+        ("Brain Alpha", "Target Alpha"),
+        ("Brain Beta", "Target Beta"),
+    ]:
+        await age.upsert_entity(session, seed_name, "projeto", "curated")
+        await age.upsert_entity(session, target_name, "conceito", "curated")
+        await age.upsert_relation(session, seed_name, target_name, "mentions", "curated")
+    await session.commit()
+
+    emb = FakeEmbedder({"Brain": _vec(0.11)})
+    out = await deep_search(session, emb, None, "Brain", depth=1, max_entities=2)
+
+    matched_seed_names = {
+        entity["name"]
+        for entity in out["graph"]["entities"]
+        if entity.get("matched_by") == "substring"
+    }
+    assert matched_seed_names == {"Brain Alpha", "Brain Beta"}
+    assert {rel["seed"] for rel in out["graph"]["relationships"]} == {
+        "Brain Alpha",
+        "Brain Beta",
+    }
+
+
+async def test_deep_search_propaga_falha_de_travessia_do_grafo(session, monkeypatch):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await session.commit()
+
+    async def fail_get_relationship_paths(*args, **kwargs):
+        raise RuntimeError("age traversal failed")
+
+    monkeypatch.setattr(retriever.age, "get_relationship_paths", fail_get_relationship_paths)
+
+    emb = FakeEmbedder({"brain": _vec(0.11)})
+    with pytest.raises(RuntimeError, match="age traversal failed"):
+        await deep_search(session, emb, None, "brain", depth=1)
 
 
 async def test_deep_search_usa_fallback_llm_quando_substring_nao_encontra_seed(session):

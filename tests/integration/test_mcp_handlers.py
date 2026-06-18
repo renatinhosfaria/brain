@@ -1267,6 +1267,52 @@ async def test_deep_search_rel_types_vazio_vira_none_no_meta(deps):
     assert out["meta"]["rel_types"] is None
 
 
+async def test_deep_search_rejeita_rel_types_string_no_handler(deps):
+    with pytest.raises(ValueError, match="rel_types"):
+        await _as_client(handlers.deep_search, deps, "brain", rel_types="curates")
+
+
+async def test_deep_search_rejeita_rel_types_com_item_nao_string_no_handler(deps):
+    with pytest.raises(ValueError, match="rel_types"):
+        await _as_client(handlers.deep_search, deps, "brain", rel_types=["curates", 123])
+
+
+async def test_deep_search_normaliza_rel_types_no_handler(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-rel-normalized.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-rel-normalized",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "curated")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "curated")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "curated")
+        await s.commit()
+
+    out = await _as_client(
+        handlers.deep_search,
+        deps,
+        "brain",
+        rel_types=[" curates ", "curates", "", " supports "],
+    )
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["meta"]["rel_types"] == ["curates", "supports"]
+    assert out["graph"]["relationships"] == [
+        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+    ]
+
+
 async def test_mcp_search_public_schema_usa_filters(deps):
     mcp = create_mcp_server(deps)
     tools = await mcp.list_tools()

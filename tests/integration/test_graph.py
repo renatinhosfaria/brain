@@ -172,6 +172,54 @@ async def test_get_relationship_paths_deduplica_entidade_por_nome_no_namespace(s
     assert xs[0]["seed"] == "A"
 
 
+async def test_get_relationship_paths_nao_atravessa_relacao_cross_namespace(session):
+    from sqlalchemy import text
+
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Vault", "conceito", "curated")
+    await age.upsert_entity(session, "Tenant Secret", "conceito", "tenant-b")
+    await age.upsert_entity(session, "Public Leak", "conceito", "curated")
+    await age.upsert_relation(session, "brain", "Vault", "stores", "curated")
+    await age._prepare(session)
+    leaked_to = (
+        await session.execute(
+            text(
+                f"SELECT * FROM cypher('brain', $cy$ "
+                f"MATCH (a:Entity {{name: {age._lit('brain')}, namespace: {age._lit('curated')}}}), "
+                f"(b:Entity {{name: {age._lit('Tenant Secret')}, namespace: {age._lit('tenant-b')}}}) "
+                f"MERGE (a)-[r:REL {{type: {age._lit('leaks_to')}}}]->(b) "
+                f"RETURN r.type $cy$) AS (type agtype)"
+            )
+        )
+    ).first()
+    leaked_back = (
+        await session.execute(
+            text(
+                f"SELECT * FROM cypher('brain', $cy$ "
+                f"MATCH (a:Entity {{name: {age._lit('Tenant Secret')}, namespace: {age._lit('tenant-b')}}}), "
+                f"(b:Entity {{name: {age._lit('Public Leak')}, namespace: {age._lit('curated')}}}) "
+                f"MERGE (a)-[r:REL {{type: {age._lit('leaks_back')}}}]->(b) "
+                f"RETURN r.type $cy$) AS (type agtype)"
+            )
+        )
+    ).first()
+    assert leaked_to is not None
+    assert leaked_back is not None
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["brain"], "curated", depth=2)
+
+    assert {"Tenant Secret", "Public Leak"}.isdisjoint(
+        {entity["name"] for entity in out["entities"]}
+    )
+    assert {"leaks_to", "leaks_back"}.isdisjoint(
+        {rel["type"] for rel in out["relationships"]}
+    )
+    assert out["relationships"] == [
+        {"from": "brain", "to": "Vault", "type": "stores", "seed": "brain", "depth": 1}
+    ]
+
+
 async def test_get_relationship_paths_rel_types_descarta_path_com_aresta_fora(session):
     await age.upsert_entity(session, "seed", "projeto", "curated")
     await age.upsert_entity(session, "intermediaria", "conceito", "curated")

@@ -61,7 +61,10 @@ async def _resolve_seed_entities(
     namespace: str,
     max_entities: int,
 ) -> tuple[list[dict], str]:
-    direct = _dedupe_entities(await age.search_entities(session, query, namespace), max_entities)
+    direct = _dedupe_entities(
+        await age.search_entities(session, query, namespace, limit=max_entities),
+        max_entities,
+    )
     if direct:
         return direct, "substring"
     return [], "none"
@@ -81,7 +84,10 @@ async def _resolve_llm_entities(
 
     resolved: list[dict] = []
     for candidate in candidates:
-        resolved.extend(await age.search_entities(session, candidate, namespace))
+        remaining = max_entities - len(_dedupe_entities(resolved, max_entities))
+        if remaining <= 0:
+            break
+        resolved.extend(await age.search_entities(session, candidate, namespace, limit=remaining))
         deduped = _dedupe_entities(resolved, max_entities)
         if len(deduped) >= max_entities:
             return deduped, []

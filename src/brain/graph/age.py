@@ -168,13 +168,25 @@ async def get_entity(session: AsyncSession, name: str, namespace: str) -> dict |
     return {"name": _unwrap(row[0]), "type": _unwrap(row[1]), "props": _unwrap(row[2])}
 
 
-async def search_entities(session: AsyncSession, query: str, namespace: str) -> list[dict]:
+async def search_entities(
+    session: AsyncSession,
+    query: str,
+    namespace: str,
+    limit: int | None = None,
+) -> list[dict]:
     await _prepare(session)
+    limit_clause = ""
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit deve ser um inteiro positivo")
+        limit_clause = f"LIMIT {limit} "
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
         f"WHERE toLower(n.name) CONTAINS toLower({_lit(query)}) "
-        f"RETURN n.name, n.type $cy$) AS (name agtype, type agtype)"
+        f"RETURN n.name, n.type "
+        f"ORDER BY toLower(n.name), n.name, n.type "
+        f"{limit_clause}$cy$) AS (name agtype, type agtype)"
     )
     rows = (await session.execute(text(q))).all()
     return [{"name": _unwrap(n), "type": _unwrap(t)} for n, t in rows]
@@ -231,7 +243,7 @@ async def get_relationship_paths(
             ]
             for idx, edge in enumerate(edge_vars):
                 target = "n" if idx == path_depth - 1 else intermediate_nodes[idx]
-                parts.append(f"-[{edge}:REL]-({target}:Entity)")
+                parts.append(f"-[{edge}:REL]-({target}:Entity {{namespace: {_lit(namespace)}}})")
             pattern = f"{''.join(parts)}"
             rel_type_filters = (
                 [f"{edge}.type IN {allowed_types_literal}" for edge in edge_vars]
@@ -263,6 +275,8 @@ async def get_relationship_paths(
                     break
                 nodes = _parse_agtype_entity_list(nodes_value)
                 rels = _parse_agtype_entity_list(rels_value)
+                if any(_props(node).get("namespace") != namespace for node in nodes):
+                    continue
                 node_by_id = {node.get("id"): node for node in nodes}
                 node_payload_by_id: dict[object, dict] = {}
                 node_index_by_id: dict[object, int] = {}
