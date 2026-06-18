@@ -112,6 +112,9 @@ Use `reveal_agent_client_token` para recuperar um token existente e
 
 Clientes de agente têm acesso limitado:
 - `search`: busca semântica apenas em notas curadas.
+- `deep_search`: busca semântica em notas curadas com contexto relacional do
+  grafo. Quando `namespace` é omitido, consulta o grafo em todos os namespaces;
+  quando informado, limita apenas o grafo àquele namespace.
 - `get_note`: lê uma nota curada por id ou caminho.
 - `submit_agent_note`: envia uma nota bruta em Markdown ou `messages`.
 
@@ -127,10 +130,12 @@ Hermes tem acesso de curadoria:
 - Links: `list_unresolved_links` e `resolve_note_link`.
 
 Esta lista destaca o fluxo de inbox e curadoria. Ferramentas técnicas de
-documentos, reindexação e grafo de entidades, como `get_document`,
+documentos, reindexação e administração do grafo, como `get_document`,
 `list_documents`, `reindex`, `get_entity`, `search_entities`, `get_related`,
 `update_entity`, `merge_entities` e `delete_entity`, continuam expostas apenas
-ao curador para compatibilidade e operações.
+ao curador para compatibilidade e operações. Clientes consultam o grafo pela
+interface estruturada de leitura do `deep_search`, não por essas ferramentas
+administrativas.
 
 ## Notas brutas e notas curadas
 
