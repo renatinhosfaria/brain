@@ -797,6 +797,62 @@ async def test_search_preserva_namespace_limit_graph_posicionais_legados(deps):
     assert any(g["name"] == "Hermes" for g in out["graph"])
 
 
+async def test_search_preserva_namespace_none_limit_posicionais_legados(deps):
+    async with deps.session_factory() as s:
+        for idx in range(12):
+            doc = await repo.upsert_document(
+                s,
+                namespace="curated",
+                repo_path=f"projetos/legacy-none-{idx:02d}.md",
+                title=None,
+                raw_content=f"nota curada {idx}",
+                content_hash=f"legacy-none-{idx}",
+                commit_sha=None,
+            )
+            await repo.replace_chunks(
+                s,
+                doc.id,
+                [{"ordinal": 0, "text": f"nota curada {idx}", "token_count": 1}],
+                [[0.2] * 2000],
+            )
+        await s.commit()
+
+    out = await _as_client(handlers.search, deps, "brain", None, 10)
+
+    assert len(out["results"]) == 10
+
+
+async def test_search_preserva_namespace_none_limit_graph_posicionais_legados(deps):
+    async with deps.session_factory() as s:
+        await handlers.age.upsert_entity(s, "brain", "projeto", "legacy_ns")
+        await handlers.age.upsert_entity(s, "Hermes", "pessoa", "legacy_ns")
+        await handlers.age.upsert_relation(s, "brain", "Hermes", "owned_by", "legacy_ns")
+        await s.commit()
+
+    out = await _as_curator(handlers.search, deps, "brain", None, 10, True)
+
+    assert out["graph"] == []
+
+
+async def test_search_public_posicional_limit_filters_funciona(deps):
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/brain.md",
+        "# Brain\n\nConhecimento de projeto.",
+    )
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "areas/brain.md",
+        "# Brain\n\nConhecimento de area.",
+    )
+
+    out = await _as_client(handlers.search, deps, "brain", 10, {"path_prefix": "projetos/"})
+
+    assert {r["path"] for r in out["results"]} == {"projetos/brain.md"}
+
+
 @pytest.mark.parametrize("limit", [0, -1, True, False, "10", 1.5])
 async def test_search_rejeita_limit_invalido_no_handler(deps, limit):
     with pytest.raises(ValueError, match="limit"):
