@@ -208,3 +208,25 @@ async def test_get_relationship_paths_deep_depth_de_nodes(session):
     assert {"name": "seed", "type": "projeto", "seed": "seed", "depth": 0} in out["entities"]
     assert {"name": "A", "type": "conceito", "seed": "seed", "depth": 1} in out["entities"]
     assert {"name": "B", "type": "conceito", "seed": "seed", "depth": 2} in out["entities"]
+
+
+async def test_get_relationship_paths_limit_com_rel_types_aplica_filtro_antes_do_limit(session):
+    await age.upsert_entity(session, "seed", "projeto", "curated")
+    await age.upsert_entity(session, "Alpha", "conceito", "curated")
+    await age.upsert_entity(session, "Beta", "conceito", "curated")
+    await age.upsert_relation(session, "seed", "Alpha", "drop", "curated")
+    await age.upsert_relation(session, "seed", "Beta", "keep", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["seed"],
+        "curated",
+        depth=1,
+        rel_types=["keep"],
+        limit=1,
+    )
+
+    assert out["relationships"] == [
+        {"from": "seed", "to": "Beta", "type": "keep", "seed": "seed", "depth": 1}
+    ]
