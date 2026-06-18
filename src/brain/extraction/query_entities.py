@@ -13,21 +13,28 @@ def _entity_name(item) -> str | None:  # noqa: ANN001
     if isinstance(item, str):
         value = item
     elif isinstance(item, dict):
-        value = item.get("name") or item.get("entity")
+        value = item.get("name")
+        if value is None:
+            value = item.get("entity")
     else:
+        return None
+    if value is None:
         return None
     value = str(value).strip()
     return value or None
 
 
 async def extract_query_entities(llm, query: str, max_entities: int) -> list[str]:  # noqa: ANN001
-    if llm is None:
+    if llm is None or max_entities <= 0:
         return []
 
     data = await llm.complete_json(_system_prompt(max_entities), query)
+    items = data.get("entities") or []
+    if not isinstance(items, list):
+        items = []
     seen: set[str] = set()
     result: list[str] = []
-    for item in data.get("entities", []):
+    for item in items:
         name = _entity_name(item)
         if name is None:
             continue
