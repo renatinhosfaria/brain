@@ -453,6 +453,28 @@ async def test_create_note_extrai_links_e_resolve_paths_curados_existentes(deps)
     assert unresolved["items"][0]["source_path"] == "projetos/source.md"
 
 
+async def test_create_note_nao_persiste_links_malformados(deps):
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/source.md",
+        "# Source\n\n[[|Alias]] [[#Heading]] [[   ]] [[MCP]]",
+    )
+
+    async with deps.session_factory() as s:
+        links = list(
+            (
+                await s.execute(
+                    select(NoteLink)
+                    .where(NoteLink.source_path == "projetos/source.md")
+                    .order_by(NoteLink.created_at, NoteLink.id)
+                )
+            ).scalars()
+        )
+
+    assert [(link.target, link.raw) for link in links] == [("MCP", "[[MCP]]")]
+
+
 async def test_update_note_substitui_links_indexados(deps):
     await _as_curator(
         handlers.create_note,
@@ -490,6 +512,64 @@ async def test_update_note_substitui_links_indexados(deps):
     ]
     unresolved = await _as_curator(handlers.list_unresolved_links, deps)
     assert [item["target"] for item in unresolved["items"]] == []
+
+
+async def test_update_note_rollback_db_quando_replace_links_falha(deps, monkeypatch):
+    created = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/atomic.md",
+        "# Atomic\n\nConteudo antigo [[MCP]].",
+    )
+    async with deps.session_factory() as s:
+        before_doc = await repo.get_document(s, repo_path="projetos/atomic.md")
+        before_chunks = list(
+            (await s.execute(select(Chunk).where(Chunk.document_id == before_doc.id))).scalars()
+        )
+        before_links = list(
+            (
+                await s.execute(
+                    select(NoteLink)
+                    .where(NoteLink.source_path == "projetos/atomic.md")
+                    .order_by(NoteLink.created_at, NoteLink.id)
+                )
+            ).scalars()
+        )
+
+    async def fail_replace_note_links(*args, **kwargs):
+        raise RuntimeError("replace links failed")
+
+    monkeypatch.setattr(repo, "replace_note_links", fail_replace_note_links)
+
+    with pytest.raises(RuntimeError, match="replace links failed"):
+        await _as_curator(
+            handlers.update_note,
+            deps,
+            created["id"],
+            "# Atomic\n\nConteudo novo [[Outro]].",
+        )
+
+    async with deps.session_factory() as s:
+        after_doc = await repo.get_document(s, repo_path="projetos/atomic.md")
+        after_chunks = list(
+            (await s.execute(select(Chunk).where(Chunk.document_id == after_doc.id))).scalars()
+        )
+        after_links = list(
+            (
+                await s.execute(
+                    select(NoteLink)
+                    .where(NoteLink.source_path == "projetos/atomic.md")
+                    .order_by(NoteLink.created_at, NoteLink.id)
+                )
+            ).scalars()
+        )
+
+    assert after_doc.raw_content == before_doc.raw_content
+    assert after_doc.content_hash == before_doc.content_hash
+    assert [chunk.text for chunk in after_chunks] == [chunk.text for chunk in before_chunks]
+    assert [(link.target, link.raw, link.status) for link in after_links] == [
+        (link.target, link.raw, link.status) for link in before_links
+    ]
 
 
 async def test_resolve_note_link_exige_alvo_curado_existente_e_nao_agents(deps):

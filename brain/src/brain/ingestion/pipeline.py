@@ -14,7 +14,17 @@ def _title(content: str) -> str | None:
 
 
 async def index_document(
-    session, embedder, llm, settings, *, namespace, repo_path, content, commit_sha, meta=None
+    session,
+    embedder,
+    llm,
+    settings,
+    *,
+    namespace,
+    repo_path,
+    content,
+    commit_sha,
+    meta=None,
+    commit: bool = True,
 ) -> bool:
     """Indexa um documento. Retorna False se foi no-op (conteúdo inalterado)."""
     h = content_hash(content)
@@ -39,7 +49,8 @@ async def index_document(
                 commit_sha=commit_sha,
                 meta=meta,
             )
-            await session.commit()
+            if commit:
+                await session.commit()
         return False
 
     doc = await repo.upsert_document(
@@ -63,7 +74,8 @@ async def index_document(
             await age.upsert_entity(session, e["name"], e["type"], namespace, {"source_doc": repo_path})
         for r in ents["relations"]:
             await age.upsert_relation(session, r["source"], r["target"], r["type"], namespace)
-    await session.commit()
+    if commit:
+        await session.commit()
     return True
 
 

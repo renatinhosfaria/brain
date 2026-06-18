@@ -17,3 +17,17 @@ def test_extract_obsidian_links_parses_target_alias_anchor_and_raw():
             "raw": "[[Hermes#Curadoria]]",
         },
     ]
+
+
+def test_extract_obsidian_links_trims_fields_and_skips_empty_targets():
+    assert extract_obsidian_links(
+        "[[|Alias]] [[#Heading]] [[   ]] [[ MCP | protocolo ]] [[ Hermes # Curadoria ]]"
+    ) == [
+        {"target": "MCP", "alias": "protocolo", "anchor": None, "raw": "[[ MCP | protocolo ]]"},
+        {
+            "target": "Hermes",
+            "alias": None,
+            "anchor": "Curadoria",
+            "raw": "[[ Hermes # Curadoria ]]",
+        },
+    ]

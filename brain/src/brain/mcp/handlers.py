@@ -361,29 +361,34 @@ async def _index_curated_note(
 ) -> dict:
     meta = _curated_note_meta(metadata, source_agent_note_ids)
     async with deps.session_factory() as s:
-        await pipeline.index_document(
-            s,
-            deps.embedder,
-            deps.llm,
-            deps.settings,
-            namespace="curated",
-            repo_path=repo_path,
-            content=content,
-            commit_sha=_current_commit_sha(deps.settings.repo_cache_path),
-            meta=meta,
-        )
-        doc = await repo.get_curated_document(s, repo_path=repo_path)
-        if doc is None:
-            raise ValueError(f"curated note not found after index: {repo_path}")
-        await _replace_curated_note_links(
-            s,
-            document_id=doc.id,
-            repo_path=repo_path,
-            content=content,
-        )
-        out = _curated_note_dict(doc)
-        await s.commit()
-        return out
+        try:
+            await pipeline.index_document(
+                s,
+                deps.embedder,
+                deps.llm,
+                deps.settings,
+                namespace="curated",
+                repo_path=repo_path,
+                content=content,
+                commit_sha=_current_commit_sha(deps.settings.repo_cache_path),
+                meta=meta,
+                commit=False,
+            )
+            doc = await repo.get_curated_document(s, repo_path=repo_path)
+            if doc is None:
+                raise ValueError(f"curated note not found after index: {repo_path}")
+            await _replace_curated_note_links(
+                s,
+                document_id=doc.id,
+                repo_path=repo_path,
+                content=content,
+            )
+            out = _curated_note_dict(doc)
+            await s.commit()
+            return out
+        except Exception:
+            await s.rollback()
+            raise
 
 
 def _push_curated_note_if_enabled(deps: Deps) -> None:
