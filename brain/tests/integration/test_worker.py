@@ -1,6 +1,7 @@
 import datetime as dt
 
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
@@ -233,6 +234,129 @@ async def test_worker_outbox_sem_url_mantem_evento_pending(ctx):
         event_id = event.id
 
     assert await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings) is False
+
+    stored = await _get_outbox_event(sf, event_id)
+    assert stored.status == "pending"
+    assert stored.attempts == 0
+    assert stored.locked_at is None
+    assert stored.locked_by is None
+
+
+async def test_worker_outbox_erro_inesperado_reagenda_e_limpa_lock(ctx):
+    sf, queue, settings, _ = ctx
+    settings = settings.model_copy(
+        update={
+            "hermes_webhook_url": "https://hermes.test/events",
+            "hermes_webhook_secret": "segredo",
+            "outbox_max_attempts": 3,
+        }
+    )
+    async with sf() as s:
+        event = await repo.create_outbox_event(
+            s,
+            type="agent_note.created",
+            payload={"note_id": "note-1"},
+        )
+        await s.commit()
+        event_id = event.id
+
+    def handler(request):
+        raise RuntimeError("cliente quebrou")
+
+    before_dispatch = dt.datetime.now(dt.UTC)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert await run_once(
+            sf,
+            queue,
+            FakeEmbedder(),
+            FakeLLM(),
+            settings,
+            outbox_client=client,
+        ) is True
+
+    stored = await _get_outbox_event(sf, event_id)
+    assert stored.status == "retrying"
+    assert stored.attempts == 1
+    assert stored.last_error == "Hermes webhook delivery error: cliente quebrou"
+    assert stored.run_after is not None
+    assert stored.run_after > before_dispatch
+    assert stored.locked_at is None
+    assert stored.locked_by is None
+
+
+async def test_worker_outbox_reclama_running_stale(ctx):
+    sf, queue, settings, _ = ctx
+    settings = settings.model_copy(
+        update={
+            "hermes_webhook_url": "https://hermes.test/events",
+            "hermes_webhook_secret": "segredo",
+            "job_stale_seconds": 300,
+        }
+    )
+    async with sf() as s:
+        event = await repo.create_outbox_event(
+            s,
+            type="agent_note.created",
+            payload={"note_id": "note-1"},
+        )
+        old_lock_time = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=301)
+        claimed = await repo.claim_next_outbox_event(
+            s,
+            old_lock_time,
+            worker_id="old-worker",
+        )
+        assert claimed.id == event.id
+        await s.commit()
+        event_id = event.id
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(204))
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert await run_once(
+            sf,
+            queue,
+            FakeEmbedder(),
+            FakeLLM(),
+            settings,
+            worker_id="new-worker",
+            outbox_client=client,
+        ) is True
+
+    stored = await _get_outbox_event(sf, event_id)
+    assert stored.status == "delivered"
+    assert stored.attempts == 2
+    assert stored.locked_at is None
+    assert stored.locked_by is None
+
+
+@pytest.mark.parametrize("secret", [None, ""])
+async def test_worker_outbox_sem_secret_mantem_evento_pending(ctx, secret):
+    sf, queue, settings, _ = ctx
+    settings = settings.model_copy(
+        update={
+            "hermes_webhook_url": "https://hermes.test/events",
+            "hermes_webhook_secret": secret,
+        }
+    )
+    async with sf() as s:
+        event = await repo.create_outbox_event(
+            s,
+            type="agent_note.created",
+            payload={"note_id": "note-1"},
+        )
+        await s.commit()
+        event_id = event.id
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(204))
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert await run_once(
+            sf,
+            queue,
+            FakeEmbedder(),
+            FakeLLM(),
+            settings,
+            outbox_client=client,
+        ) is False
 
     stored = await _get_outbox_event(sf, event_id)
     assert stored.status == "pending"
