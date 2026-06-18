@@ -137,6 +137,12 @@ async def deep_search(
             rel_types=rel_types,
             limit=50,
         )
+        seed_names = {seed["name"] for seed in seeds}
+        for entity in graph["entities"]:
+            if entity["depth"] == 0 and entity["name"] in seed_names:
+                entity["matched_by"] = seed_strategy
+            else:
+                entity["matched_by"] = "relationship"
 
     return {
         "query": query,

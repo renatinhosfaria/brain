@@ -285,6 +285,9 @@ async def test_deep_search_combina_chunks_e_grafo_por_fast_path(session):
     assert out["graph"]["relationships"] == [
         {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
     ]
+    entities = {entity["name"]: entity for entity in out["graph"]["entities"]}
+    assert entities["brain"]["matched_by"] == "substring"
+    assert entities["Hermes"]["matched_by"] == "relationship"
     assert out["meta"]["seed_strategy"] == "substring"
 
 
@@ -314,6 +317,9 @@ async def test_deep_search_usa_fallback_llm_quando_substring_nao_encontra_seed(s
 
     assert out["meta"]["seed_strategy"] == "llm"
     assert [rel["type"] for rel in out["graph"]["relationships"]] == ["curates"]
+    entities = {entity["name"]: entity for entity in out["graph"]["entities"]}
+    assert entities["brain"]["matched_by"] == "llm"
+    assert entities["Hermes"]["matched_by"] == "relationship"
 
 
 async def test_deep_search_sem_seeds_retorna_chunks_e_grafo_vazio(session):
