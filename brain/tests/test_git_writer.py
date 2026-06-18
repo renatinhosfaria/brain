@@ -367,6 +367,70 @@ def test_write_curated_note_expected_exists_controla_create_update(tmp_path):
     assert "Atualizado." in (repo / "projetos/brain.md").read_text(encoding="utf-8")
 
 
+def test_write_curated_note_rollback_create_quando_commit_falha(tmp_path, monkeypatch):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+
+    def fail_after_stage(*, dest, rel, **kwargs):
+        git_writer._git(["add", "--", rel], dest)
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(git_writer, "_commit_path", fail_after_stage)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        git_writer.write_curated_note(
+            repo,
+            "projetos/brain.md",
+            frontmatter={"type": "curated_note"},
+            content="# Brain\n\nNao deve sobrar.",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+            expected_exists=False,
+        )
+
+    assert not (repo / "projetos/brain.md").exists()
+    assert not (repo / "projetos").exists()
+    assert _git(["status", "--short"], repo).stdout == ""
+
+
+def test_write_curated_note_rollback_update_quando_commit_falha(tmp_path, monkeypatch):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+    rel = git_writer.write_curated_note(
+        repo,
+        "projetos/brain.md",
+        frontmatter={"type": "curated_note"},
+        content="# Brain\n\nOriginal.",
+        author_name="brain-bot",
+        author_email="brain-bot@example.com",
+        push=False,
+        expected_exists=False,
+    )
+    original_text = (repo / rel).read_text(encoding="utf-8")
+
+    def fail_after_stage(*, dest, rel, **kwargs):
+        git_writer._git(["add", "--", rel], dest)
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(git_writer, "_commit_path", fail_after_stage)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        git_writer.write_curated_note(
+            repo,
+            rel,
+            frontmatter={"type": "curated_note"},
+            content="# Brain\n\nAtualizado sem commit.",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+            expected_exists=True,
+        )
+
+    assert (repo / rel).read_text(encoding="utf-8") == original_text
+    assert _git(["status", "--short"], repo).stdout == ""
+
+
 def test_write_conversation_cria_arquivo_e_commit(tmp_path):
     repo = tmp_path / "vault"
     _init_repo(repo)

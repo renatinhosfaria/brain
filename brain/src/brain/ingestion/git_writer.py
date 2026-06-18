@@ -210,6 +210,52 @@ def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
+def _unstage_path(dest: Path, rel: str) -> None:
+    result = subprocess.run(
+        ["git", "restore", "--staged", "--", rel],
+        cwd=dest,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return
+    subprocess.run(
+        ["git", "rm", "--cached", "--ignore-unmatch", "--", rel],
+        cwd=dest,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _remove_empty_parent_dirs(dest: Path, note_path: Path) -> None:
+    root = dest.resolve()
+    current = note_path.parent.resolve()
+    while current != root and root in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
+def _rollback_curated_note_write(
+    *,
+    dest: Path,
+    rel: str,
+    note_path: Path,
+    existed: bool,
+    previous_content: str | None,
+) -> None:
+    _unstage_path(dest, rel)
+    if existed:
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(previous_content or "", encoding="utf-8")
+    elif note_path.exists():
+        note_path.unlink()
+        _remove_empty_parent_dirs(dest, note_path)
+
+
 def _commit_path(
     *,
     dest: Path,
@@ -364,23 +410,34 @@ def write_curated_note(
         if expected_exists is True and not exists:
             raise ValueError(f"curated note does not exist: {rel}")
 
+        previous_content = note_path.read_text(encoding="utf-8") if exists else None
         rendered = render_curated_note(frontmatter=frontmatter, content=content)
-        if exists and note_path.read_text(encoding="utf-8") == rendered:
+        if exists and previous_content == rendered:
             return rel
 
         note_path.parent.mkdir(parents=True, exist_ok=True)
         note_path.write_text(rendered, encoding="utf-8")
 
         operation = "update" if exists else "create"
-        _commit_path(
-            dest=dest,
-            rel=rel,
-            message=f"note: {operation} {rel}",
-            author_name=author_name,
-            author_email=author_email,
-            push=push,
-            retries=retries,
-        )
+        try:
+            _commit_path(
+                dest=dest,
+                rel=rel,
+                message=f"note: {operation} {rel}",
+                author_name=author_name,
+                author_email=author_email,
+                push=push,
+                retries=retries,
+            )
+        except Exception:
+            _rollback_curated_note_write(
+                dest=dest,
+                rel=rel,
+                note_path=note_path,
+                existed=exists,
+                previous_content=previous_content,
+            )
+            raise
     return rel
 
 

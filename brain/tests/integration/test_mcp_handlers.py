@@ -270,6 +270,64 @@ async def test_create_note_recupera_arquivo_existente_sem_documento_apos_falha_i
     assert doc.raw_content == written_text
 
 
+async def test_create_note_commit_falha_restaura_worktree_e_retry_nao_indexa_uncommitted(
+    deps, monkeypatch
+):
+    deps.settings.git_push_enabled = True
+    push_calls = []
+    monkeypatch.setattr(handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args))
+    original_commit_path = handlers.git_writer._commit_path
+    commit_calls = 0
+
+    def fail_once_after_stage(*, dest, rel, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            handlers.git_writer._git(["add", "--", rel], dest)
+            raise RuntimeError("commit failed")
+        return original_commit_path(dest=dest, rel=rel, **kwargs)
+
+    monkeypatch.setattr(handlers.git_writer, "_commit_path", fail_once_after_stage)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await _as_curator(
+            handlers.create_note,
+            deps,
+            "projetos/uncommitted.md",
+            "# Uncommitted\n\nPrimeiro corpo nao comitado.",
+        )
+
+    note_path = Path(deps.settings.repo_cache_path) / "projetos/uncommitted.md"
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=deps.settings.repo_cache_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert not note_path.exists()
+    assert status == ""
+    assert push_calls == []
+    async with deps.session_factory() as s:
+        assert await repo.get_document(s, repo_path="projetos/uncommitted.md") is None
+
+    retried = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/uncommitted.md",
+        "# Uncommitted\n\nCorpo de retry comitado.",
+    )
+
+    assert commit_calls == 2
+    assert push_calls
+    assert "Corpo de retry comitado." in retried["content"]
+    assert "Primeiro corpo nao comitado." not in retried["content"]
+    async with deps.session_factory() as s:
+        doc = await repo.get_document(s, repo_path="projetos/uncommitted.md")
+    assert doc.raw_content == retried["content"]
+
+
 async def test_update_note_substitui_markdown_inteiro_e_reindexa(deps):
     created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo.")
 
