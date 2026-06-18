@@ -170,6 +170,34 @@ def test_write_agent_client_profile_rejeita_inbox_dir_inseguro_sem_escrever_fora
     assert not outside.exists()
 
 
+def test_write_agent_client_profile_rollback_create_quando_commit_falha(tmp_path, monkeypatch):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+
+    def fail_after_stage(*, dest, rel, **kwargs):
+        git_writer._git(["add", "--", rel], dest)
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(git_writer, "_commit_path", fail_after_stage)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        git_writer.write_agent_client_profile(
+            repo,
+            inbox_dir="_agents",
+            client_slug="chatgpt-web",
+            client_name="ChatGPT Web",
+            token_prefix="brain_client_chatgpt-web",
+            token="brain_client_chatgpt-web_secret",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+        )
+
+    assert not (repo / "_agents" / "chatgpt-web" / "chatgpt-web.md").exists()
+    assert not (repo / "_agents").exists()
+    assert _git(["status", "--short"], repo).stdout == ""
+
+
 def test_write_agent_note_cria_apenas_na_pasta_do_client(tmp_path):
     repo = tmp_path / "vault"
     _init_repo(repo)
@@ -253,6 +281,36 @@ def test_write_agent_note_rejeita_timestamp_inseguro_sem_escrever_fora(tmp_path)
         )
 
     assert not outside.exists()
+
+
+def test_write_agent_note_rollback_create_quando_commit_falha(tmp_path, monkeypatch):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+
+    def fail_after_stage(*, dest, rel, **kwargs):
+        git_writer._git(["add", "--", rel], dest)
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(git_writer, "_commit_path", fail_after_stage)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        git_writer.write_agent_note(
+            repo,
+            inbox_dir="_agents",
+            client_slug="chatgpt-web",
+            client_name="ChatGPT Web",
+            note_id="agent_note_1",
+            title="Resumo",
+            content="Nao deve sobrar.",
+            timestamp="20260617T183000000000",
+            author_name="brain-bot",
+            author_email="brain-bot@example.com",
+            push=False,
+        )
+
+    assert not (repo / "_agents" / "chatgpt-web").exists()
+    assert not (repo / "_agents").exists()
+    assert _git(["status", "--short"], repo).stdout == ""
 
 
 @pytest.mark.parametrize(

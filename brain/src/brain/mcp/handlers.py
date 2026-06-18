@@ -13,6 +13,7 @@ from brain.ingestion import git_writer
 from brain.ingestion import pipeline
 from brain.notes.links import extract_obsidian_links
 from brain.queue.base import JobType
+from brain.repo_paths import normalize_repo_path
 from brain.search.retriever import search as _search
 from brain.storage import repositories as repo
 
@@ -218,7 +219,14 @@ def _note_link_dict(link) -> dict | None:
     }
 
 
-def _repo_note_path(repo_cache_path: str, repo_path: str) -> Path:
+def _repo_note_path(repo_cache_path: str, repo_path: str, *, allow_agents: bool = False) -> Path:
+    if not allow_agents:
+        _, note_path = normalize_repo_path(
+            repo_cache_path,
+            repo_path,
+            require_markdown=True,
+        )
+        return note_path
     repo_root = Path(repo_cache_path).resolve()
     note_path = (repo_root / repo_path).resolve()
     try:
@@ -788,9 +796,11 @@ async def get_agent_note(deps: Deps, note_id: str) -> dict | None:
         note = await repo.get_agent_note(s, uuid.UUID(note_id))
         if note is None:
             return None
-        content = _repo_note_path(deps.settings.repo_cache_path, note.repo_path).read_text(
-            encoding="utf-8"
-        )
+        content = _repo_note_path(
+            deps.settings.repo_cache_path,
+            note.repo_path,
+            allow_agents=True,
+        ).read_text(encoding="utf-8")
         return _agent_note_dict(note, content=content)
 
 
@@ -947,43 +957,47 @@ async def create_agent_client(
     permissions = ["search", "get_note", "submit_agent_note"]
 
     async with deps.session_factory() as s:
-        if await repo.get_agent_client(s, slug=client_slug) is not None:
-            raise ValueError(f"agent client already exists: {client_slug}")
-        client = await repo.create_agent_client(
-            s,
-            slug=client_slug,
-            name=name,
-            description=description,
-            token_prefix=token_prefix,
-            token_hash=token_hash,
-            token_encrypted=auth.encrypt_token(token, key),
-            permissions=permissions,
-            meta=_stored_client_meta(
-                metadata=metadata,
+        try:
+            if await repo.get_agent_client(s, slug=client_slug) is not None:
+                raise ValueError(f"agent client already exists: {client_slug}")
+            client = await repo.create_agent_client(
+                s,
+                slug=client_slug,
+                name=name,
+                description=description,
+                token_prefix=token_prefix,
+                token_hash=token_hash,
+                token_encrypted=auth.encrypt_token(token, key),
+                permissions=permissions,
+                meta=_stored_client_meta(
+                    metadata=metadata,
+                    capture_policy=capture_policy,
+                    recommended_instructions=recommended_instructions,
+                ),
+            )
+            if client.token_hash != token_hash:
+                raise ValueError(f"agent client already exists: {client_slug}")
+            profile_path = git_writer.write_agent_client_profile(
+                deps.settings.repo_cache_path,
+                inbox_dir=deps.settings.agent_inbox_dir,
+                client_slug=client.slug,
+                client_name=client.name,
+                token_prefix=token_prefix,
+                token=token,
+                description=description,
                 capture_policy=capture_policy,
                 recommended_instructions=recommended_instructions,
-            ),
-        )
-        if client.token_hash != token_hash:
-            raise ValueError(f"agent client already exists: {client_slug}")
-        await s.commit()
-        out = _agent_client_dict(client)
+                metadata=metadata,
+                author_name=deps.settings.git_author_name,
+                author_email=deps.settings.git_author_email,
+                push=deps.settings.git_push_enabled,
+            )
+            out = _agent_client_dict(client)
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            raise
 
-    profile_path = git_writer.write_agent_client_profile(
-        deps.settings.repo_cache_path,
-        inbox_dir=deps.settings.agent_inbox_dir,
-        client_slug=client.slug,
-        client_name=client.name,
-        token_prefix=token_prefix,
-        token=token,
-        description=description,
-        capture_policy=capture_policy,
-        recommended_instructions=recommended_instructions,
-        metadata=metadata,
-        author_name=deps.settings.git_author_name,
-        author_email=deps.settings.git_author_email,
-        push=deps.settings.git_push_enabled,
-    )
     out.update({"token": token, "profile_path": profile_path})
     return out
 
@@ -1018,41 +1032,42 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
     _require_curator()
     key = _require_token_encryption_key(deps.settings)
     async with deps.session_factory() as s:
-        client = await repo.get_agent_client(s, slug=slug)
-        if client is None:
-            raise ValueError(f"agent client not found: {slug}")
-        token = auth.generate_client_token(client.slug)
-        token_prefix = _token_prefix(token, client.slug)
-        client = await repo.update_agent_client_token(
-            s,
-            slug=client.slug,
-            token_prefix=token_prefix,
-            token_hash=auth.hash_token(token),
-            token_encrypted=auth.encrypt_token(token, key),
-        )
-        await s.refresh(client)
-        fields = _profile_fields(client)
-        await s.commit()
-        out = _agent_client_dict(client)
-        description = client.description
-        client_name = client.name
-        client_slug = client.slug
+        try:
+            client = await repo.get_agent_client(s, slug=slug)
+            if client is None:
+                raise ValueError(f"agent client not found: {slug}")
+            token = auth.generate_client_token(client.slug)
+            token_prefix = _token_prefix(token, client.slug)
+            client = await repo.update_agent_client_token(
+                s,
+                slug=client.slug,
+                token_prefix=token_prefix,
+                token_hash=auth.hash_token(token),
+                token_encrypted=auth.encrypt_token(token, key),
+            )
+            await s.refresh(client)
+            fields = _profile_fields(client)
+            profile_path = git_writer.write_agent_client_profile(
+                deps.settings.repo_cache_path,
+                inbox_dir=deps.settings.agent_inbox_dir,
+                client_slug=client.slug,
+                client_name=client.name,
+                token_prefix=token_prefix,
+                token=token,
+                description=client.description,
+                capture_policy=fields["capture_policy"],
+                recommended_instructions=fields["recommended_instructions"],
+                metadata=fields["metadata"],
+                author_name=deps.settings.git_author_name,
+                author_email=deps.settings.git_author_email,
+                push=deps.settings.git_push_enabled,
+            )
+            out = _agent_client_dict(client)
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            raise
 
-    profile_path = git_writer.write_agent_client_profile(
-        deps.settings.repo_cache_path,
-        inbox_dir=deps.settings.agent_inbox_dir,
-        client_slug=client_slug,
-        client_name=client_name,
-        token_prefix=token_prefix,
-        token=token,
-        description=description,
-        capture_policy=fields["capture_policy"],
-        recommended_instructions=fields["recommended_instructions"],
-        metadata=fields["metadata"],
-        author_name=deps.settings.git_author_name,
-        author_email=deps.settings.git_author_email,
-        push=deps.settings.git_push_enabled,
-    )
     out.update({"token": token, "profile_path": profile_path})
     return out
 

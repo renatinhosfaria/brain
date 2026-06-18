@@ -311,6 +311,8 @@ def write_agent_client_profile(
     safe_client_slug = slugify(client_slug, fallback="client")
     rel = f"{safe_inbox_dir}/{safe_client_slug}/{safe_client_slug}.md"
     path = _safe_repo_path(dest, rel)
+    existed = path.exists()
+    previous_content = path.read_text(encoding="utf-8") if existed else None
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         render_agent_client_profile(
@@ -326,15 +328,25 @@ def write_agent_client_profile(
         encoding="utf-8",
     )
 
-    _commit_path(
-        dest=dest,
-        rel=rel,
-        message=f"client: create {safe_client_slug}",
-        author_name=author_name,
-        author_email=author_email,
-        push=push,
-        retries=retries,
-    )
+    try:
+        _commit_path(
+            dest=dest,
+            rel=rel,
+            message=f"client: create {safe_client_slug}",
+            author_name=author_name,
+            author_email=author_email,
+            push=push,
+            retries=retries,
+        )
+    except Exception:
+        _rollback_curated_note_write(
+            dest=dest,
+            rel=rel,
+            note_path=path,
+            existed=existed,
+            previous_content=previous_content,
+        )
+        raise
     return rel
 
 
@@ -366,6 +378,8 @@ def write_agent_note(
     note_slug = slugify(note_id, fallback="note-id")
     rel = f"{safe_inbox_dir}/{safe_client_slug}/{yyyy}/{mm}/{dd}/{timestamp}-{file_slug}-{note_slug}.md"
     path = _safe_repo_path(dest, rel)
+    existed = path.exists()
+    previous_content = path.read_text(encoding="utf-8") if existed else None
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         render_agent_note(
@@ -382,15 +396,25 @@ def write_agent_note(
         encoding="utf-8",
     )
 
-    _commit_path(
-        dest=dest,
-        rel=rel,
-        message=f"agent-note: {safe_client_slug} {timestamp}",
-        author_name=author_name,
-        author_email=author_email,
-        push=push,
-        retries=retries,
-    )
+    try:
+        _commit_path(
+            dest=dest,
+            rel=rel,
+            message=f"agent-note: {safe_client_slug} {timestamp}",
+            author_name=author_name,
+            author_email=author_email,
+            push=push,
+            retries=retries,
+        )
+    except Exception:
+        _rollback_curated_note_write(
+            dest=dest,
+            rel=rel,
+            note_path=path,
+            existed=existed,
+            previous_content=previous_content,
+        )
+        raise
     return rel
 
 

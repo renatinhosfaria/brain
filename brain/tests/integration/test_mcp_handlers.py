@@ -172,6 +172,25 @@ async def test_create_note_rejeita_agents(deps):
         )
 
 
+async def test_create_note_rejeita_symlink_para_agents_no_recovery(deps):
+    repo_root = Path(deps.settings.repo_cache_path)
+    raw_dir = repo_root / "_agents" / "chatgpt-web"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "raw.md").write_text("# Raw\n\nNao pode indexar.", encoding="utf-8")
+    (repo_root / "alias").symlink_to(raw_dir, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="agent notes|_agents"):
+        await _as_curator(
+            handlers.create_note,
+            deps,
+            "alias/raw.md",
+            "# Curated\n\nNao deve importar.",
+        )
+
+    async with deps.session_factory() as s:
+        assert await repo.get_document(s, repo_path="alias/raw.md") is None
+
+
 async def test_create_note_falha_quando_path_existe(deps):
     await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nPrimeiro.")
 
@@ -1623,24 +1642,34 @@ async def test_submit_agent_note_persiste_db_e_outbox_quando_push_falha(deps, mo
     assert events[0].payload["agent_note"]["repo_path"] == notes[0].repo_path
 
 
-async def test_submit_agent_note_rollback_db_quando_git_write_falha(deps, monkeypatch):
+async def test_submit_agent_note_rollback_db_quando_commit_local_falha(deps, monkeypatch):
     await _create_client_as_curator(deps)
 
-    def fail_write(*args, **kwargs):
-        raise RuntimeError("git write failed")
+    def fail_after_stage(*, dest, rel, **kwargs):
+        handlers.git_writer._git(["add", "--", rel], dest)
+        raise RuntimeError("commit failed")
 
-    monkeypatch.setattr(handlers.git_writer, "write_agent_note", fail_write)
+    monkeypatch.setattr(handlers.git_writer, "_commit_path", fail_after_stage)
 
-    with pytest.raises(RuntimeError, match="git write failed"):
+    with pytest.raises(RuntimeError, match="commit failed"):
         await _submit_note_as_client(
             deps,
-            title="Falha antes do commit git",
+            title="Falha no commit git",
             content="Nao deve deixar nota pendente.",
         )
 
     async with deps.session_factory() as s:
         assert list((await s.execute(select(AgentNote))).scalars().all()) == []
         assert list((await s.execute(select(OutboxEvent))).scalars().all()) == []
+    assert not (Path(deps.settings.repo_cache_path) / "_agents" / "chatgpt-web" / "2026").exists()
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=deps.settings.repo_cache_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
 
 
 async def test_create_agent_client_duplicado_nao_retorna_token_novo_nem_altera_hash(
@@ -1680,7 +1709,7 @@ async def test_create_agent_client_duplicado_nao_retorna_token_novo_nem_altera_h
     assert created["token"].startswith("brain_client_codex_")
 
 
-async def test_create_agent_client_persiste_credencial_se_profile_git_falha(deps, monkeypatch):
+async def test_create_agent_client_rollback_credencial_se_profile_git_falha(deps, monkeypatch):
     def fail_profile_write(*args, **kwargs):
         raise RuntimeError("git write failed")
 
@@ -1691,11 +1720,10 @@ async def test_create_agent_client_persiste_credencial_se_profile_git_falha(deps
 
     async with deps.session_factory() as s:
         client = await repo.get_agent_client(s, slug="codex")
-    assert client is not None
-    assert client.token_hash
+    assert client is None
 
 
-async def test_rotate_agent_client_persiste_credencial_se_profile_git_falha(deps, monkeypatch):
+async def test_rotate_agent_client_mantem_token_se_profile_git_falha(deps, monkeypatch):
     await _create_client_as_curator(deps, slug="codex", name="Codex")
     async with deps.session_factory() as s:
         before = await repo.get_agent_client(s, slug="codex")
@@ -1711,4 +1739,4 @@ async def test_rotate_agent_client_persiste_credencial_se_profile_git_falha(deps
 
     async with deps.session_factory() as s:
         after = await repo.get_agent_client(s, slug="codex")
-    assert after.token_hash != old_hash
+    assert after.token_hash == old_hash
