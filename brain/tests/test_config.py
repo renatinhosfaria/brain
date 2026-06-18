@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from cryptography.fernet import Fernet
 
 from brain.config import Settings
@@ -75,3 +77,25 @@ def test_settings_curator_bootstrap_fields():
     assert s.brain_curator_name == "Hermes"
     assert s.brain_curator_token == "curator-token"
     assert s.brain_token_encryption_key == key
+
+
+def test_env_example_documenta_curadoria_e_webhook_hermes():
+    env_example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
+        encoding="utf-8"
+    )
+
+    for line in [
+        "BRAIN_CURATOR_SLUG=hermes",
+        "BRAIN_CURATOR_NAME=Hermes",
+        "BRAIN_CURATOR_TOKEN=...",
+        "BRAIN_TOKEN_ENCRYPTION_KEY=...",
+        "HERMES_WEBHOOK_URL=",
+        "HERMES_WEBHOOK_SECRET=",
+    ]:
+        assert line in env_example
+
+    assert "BRAIN_TOKEN_ENCRYPTION_KEY must be a Fernet key" in env_example
+    assert (
+        'python -c "from cryptography.fernet import Fernet; '
+        'print(Fernet.generate_key().decode())"'
+    ) in env_example
