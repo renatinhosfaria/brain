@@ -371,19 +371,28 @@ async def remember(deps: Deps, namespace: str, messages: list[dict], metadata: d
 async def search(
     deps: Deps,
     query: str,
-    limit: int | str | None = 10,
-    filters: dict | int | None = None,
-    namespace: str | bool | None = None,
+    *legacy_args,
+    limit: int | None = 10,
+    filters: dict | None = None,
+    namespace: str | None = None,
     include_graph: bool = False,
 ) -> dict:
     _require_client_or_curator()
-    if isinstance(limit, str) and isinstance(filters, int) and not isinstance(filters, bool):
-        legacy_namespace = limit if isinstance(limit, str) else None
-        legacy_limit = filters
-        include_graph = namespace if isinstance(namespace, bool) else include_graph
-        limit = legacy_limit
-        filters = None
-        namespace = legacy_namespace
+    if legacy_args:
+        if len(legacy_args) > 3:
+            raise TypeError("search accepts at most three positional arguments after query")
+        if isinstance(legacy_args[0], str):
+            namespace = legacy_args[0]
+            if len(legacy_args) >= 2:
+                limit = legacy_args[1]
+            if len(legacy_args) >= 3:
+                include_graph = legacy_args[2]
+        else:
+            limit = legacy_args[0]
+            if len(legacy_args) >= 2:
+                filters = legacy_args[1]
+            if len(legacy_args) >= 3:
+                raise TypeError("search positional public form is query, limit, filters")
     resolved_limit = repo.normalize_search_limit(10 if limit is None else limit)
 
     async with deps.session_factory() as s:

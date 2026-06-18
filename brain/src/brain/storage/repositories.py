@@ -244,7 +244,12 @@ async def search_chunks(
     stmt = (
         select(Chunk.text, dist, Document.id, Document.repo_path, Document.namespace)
         .join(Document, Chunk.document_id == Document.id)
-        .where(and_(Document.repo_path != "_agents", ~Document.repo_path.startswith("_agents/")))
+        .where(
+            and_(
+                Document.repo_path != "_agents",
+                ~Document.repo_path.startswith("_agents/", autoescape=True),
+            )
+        )
     )
     if namespace:
         stmt = stmt.where(Document.namespace == namespace)

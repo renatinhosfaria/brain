@@ -779,6 +779,24 @@ async def test_search_permite_principal_client(deps):
     assert out == {"results": [], "graph": []}
 
 
+async def test_search_preserva_namespace_posicional_legado(deps):
+    out = await _as_client(handlers.search, deps, "brain", "legacy_ns")
+
+    assert out == {"results": [], "graph": []}
+
+
+async def test_search_preserva_namespace_limit_graph_posicionais_legados(deps):
+    async with deps.session_factory() as s:
+        await handlers.age.upsert_entity(s, "brain", "projeto", "legacy_ns")
+        await handlers.age.upsert_entity(s, "Hermes", "pessoa", "legacy_ns")
+        await handlers.age.upsert_relation(s, "brain", "Hermes", "owned_by", "legacy_ns")
+        await s.commit()
+
+    out = await _as_curator(handlers.search, deps, "brain", "legacy_ns", 10, True)
+
+    assert any(g["name"] == "Hermes" for g in out["graph"])
+
+
 @pytest.mark.parametrize("limit", [0, -1, True, False, "10", 1.5])
 async def test_search_rejeita_limit_invalido_no_handler(deps, limit):
     with pytest.raises(ValueError, match="limit"):

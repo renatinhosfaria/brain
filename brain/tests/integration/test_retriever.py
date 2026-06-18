@@ -124,6 +124,29 @@ async def test_search_nao_retorna_memorias_ou_agents(session):
     assert all(not r["repo_path"].startswith("_agents/") for r in out["results"])
 
 
+async def test_search_exclui_agents_sem_excluir_xagents(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="_agents/foo.md",
+        text="nota bruta de agente",
+        seed=0.10,
+    )
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="xagents/foo.md",
+        text="nota curada com prefixo parecido",
+        seed=0.11,
+    )
+    await session.commit()
+
+    emb = FakeEmbedder({"consulta": _vec(0.10)})
+    out = await search(session, emb, "consulta", limit=10)
+
+    assert [r["repo_path"] for r in out["results"]] == ["xagents/foo.md"]
+
+
 async def test_search_path_prefix_limita_resultados(session):
     await _add_document_chunk(
         session,
