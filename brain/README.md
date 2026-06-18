@@ -1,10 +1,9 @@
-# brain — Provedor de Memória (MCP)
+# brain — Inbox de agentes e notas curadas (MCP)
 
-Provedor de memória pessoal exposto como servidor MCP. Indexa um repositório
-GitHub de markdown, extrai fatos de conversas, mantém um grafo de entidades e
-serve busca semântica unificada. O fluxo de inbox usa o Hermes como curador:
-clientes de agente enviam notas brutas, e o Hermes decide o que vira nota
-curada pesquisável no vault.
+Servidor MCP para um vault Markdown curado. Clientes de agente pesquisam apenas
+notas curadas, leem notas curadas por id ou caminho e enviam notas brutas para o
+inbox `_agents/`. O Hermes atua como curador: revisa o inbox, cria ou atualiza
+notas curadas e decide o que entra na busca do vault.
 
 ## Subir em produção (VPS)
 
@@ -51,8 +50,10 @@ Endpoint: https://SEU_DOMINIO/mcp
 Authorization: Bearer <BRAIN_CURATOR_TOKEN>
 ```
 
-`BRAIN_AUTH_TOKEN` ainda existe para compatibilidade de migração, mas o fluxo
-novo deve usar `BRAIN_CURATOR_TOKEN`.
+`BRAIN_AUTH_TOKEN` é apenas fallback de migração enquanto
+`BRAIN_CURATOR_TOKEN` estiver ausente. Depois que `BRAIN_CURATOR_TOKEN` é
+configurado, o Hermes deve usar esse token; `BRAIN_AUTH_TOKEN` não funciona como
+credencial paralela de curador.
 
 ## Criar e configurar clientes
 
