@@ -1204,6 +1204,12 @@ async def test_deep_search_rejeita_principal_invalido(deps):
         )
 
 
+@pytest.mark.parametrize("namespace", [[], 123, True])
+async def test_deep_search_rejeita_namespace_nao_string_no_handler(deps, namespace):
+    with pytest.raises(ValueError, match="namespace"):
+        await _as_client(handlers.deep_search, deps, "brain", namespace=namespace)
+
+
 async def test_deep_search_cliente_pode_consultar_namespace_customizado(deps):
     async with deps.session_factory() as s:
         doc = await repo.upsert_document(
@@ -1224,6 +1230,9 @@ async def test_deep_search_cliente_pode_consultar_namespace_customizado(deps):
         await handlers.age.upsert_entity(s, "brain", "projeto", "tenant-b")
         await handlers.age.upsert_entity(s, "Hermes", "agente", "tenant-b")
         await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "tenant-b")
+        await handlers.age.upsert_entity(s, "brain", "projeto", "curated")
+        await handlers.age.upsert_entity(s, "Athena", "agente", "curated")
+        await handlers.age.upsert_relation(s, "Athena", "brain", "curates", "curated")
         await s.commit()
 
     out = await _as_client(handlers.deep_search, deps, "brain", namespace="tenant-b")
@@ -1240,6 +1249,35 @@ async def test_deep_search_cliente_pode_consultar_namespace_customizado(deps):
         }
     ]
     assert out["meta"]["namespace_strategy"] == "single"
+    assert out["meta"]["namespaces"] == ["tenant-b"]
+
+
+async def test_deep_search_namespace_vazio_equivale_a_busca_global(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-empty-namespace.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-empty-namespace",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "tenant-b")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "tenant-b")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "tenant-b")
+        await s.commit()
+
+    out = await _as_client(handlers.deep_search, deps, "brain", namespace="   ")
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["meta"]["namespace_strategy"] == "all"
     assert out["meta"]["namespaces"] == ["tenant-b"]
 
 

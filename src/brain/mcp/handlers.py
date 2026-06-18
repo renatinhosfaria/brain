@@ -85,8 +85,10 @@ def _normalize_rel_types(rel_types) -> list[str] | None:  # noqa: ANN001
 
 
 def _normalize_optional_namespace(namespace) -> str | None:  # noqa: ANN001
-    if not isinstance(namespace, str):
+    if namespace is None:
         return None
+    if not isinstance(namespace, str):
+        raise ValueError("namespace deve ser uma string ou null")
     namespace = namespace.strip()
     return namespace or None
 
