@@ -155,7 +155,10 @@ async def test_webhook_ignora_alteracoes_em_agents(async_dsn, tmp_path, prepared
         "changed_files",
         lambda *a, **k: [
             ("A", "_agents"),
+            ("A", "./_agents/codex/raw.md"),
             ("A", "_agents/codex/raw.md"),
+            ("M", "_agents\\codex\\raw.md"),
+            ("M", "x/../_agents/codex/raw.md"),
             ("M", "_agents/chatgpt-web/nota.md"),
             ("A", "trabalho/nota.md"),
         ],
@@ -178,7 +181,7 @@ async def test_webhook_enfileira_markdown_curado_com_namespace_curated(
     monkeypatch.setattr(
         main.git_sync,
         "changed_files",
-        lambda *a, **k: [("A", "projetos/brain.md")],
+        lambda *a, **k: [("A", ".\\projetos\\brain.md")],
     )
     app = create_app(*build_deps(_settings(async_dsn, tmp_path)))
     body = b'{"ref":"refs/heads/main"}'

@@ -17,13 +17,10 @@ from brain.mcp.handlers import Deps
 from brain.mcp.server import create_mcp_server
 from brain.queue.base import JobType
 from brain.queue.postgres_queue import PostgresJobQueue
+from brain.repo_paths import normalize_repo_path
 from brain.storage.db import make_engine, make_session_factory
 
 log = structlog.get_logger()
-
-
-def _is_agent_repo_path(path: str) -> bool:
-    return path == "_agents" or path.startswith("_agents/")
 
 
 def verify_signature(secret: str, body: bytes, header: str | None) -> bool:
@@ -132,14 +129,19 @@ def create_app(deps: Deps, sf) -> FastAPI:
         )
         enqueued = 0
         for code, path in git_sync.changed_files(settings.repo_cache_path, before, after):
-            if _is_agent_repo_path(path):
+            try:
+                repo_path, _ = normalize_repo_path(
+                    settings.repo_cache_path, path, require_markdown=True
+                )
+            except ValueError as e:
+                log.warning("webhook_skipped_repo_path", path=path, error=str(e))
                 continue
             if code == "D":
-                await deps.queue.enqueue(JobType.DELETE_DOCUMENT.value, {"repo_path": path})
+                await deps.queue.enqueue(JobType.DELETE_DOCUMENT.value, {"repo_path": repo_path})
             else:
                 await deps.queue.enqueue(
                     JobType.INDEX_DOCUMENT.value,
-                    {"namespace": "curated", "repo_path": path, "commit_sha": after},
+                    {"namespace": "curated", "repo_path": repo_path, "commit_sha": after},
                 )
             enqueued += 1
         return {"enqueued": enqueued}

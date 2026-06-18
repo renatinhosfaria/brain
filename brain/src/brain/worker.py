@@ -1,5 +1,4 @@
 import asyncio
-from pathlib import Path
 
 import structlog
 
@@ -9,30 +8,30 @@ from brain.extraction.llm import LLMClient
 from brain.ingestion import pipeline
 from brain import outbox
 from brain.queue.postgres_queue import PostgresJobQueue
+from brain.repo_paths import normalize_repo_path
 from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
 
 log = structlog.get_logger()
 
 
-def _is_agent_repo_path(path: str) -> bool:
-    return path == "_agents" or path.startswith("_agents/")
-
-
 async def handle_job(session, embedder, llm, settings, job) -> None:
     p = job.payload
     if job.type in ("index_document", "reindex"):
-        repo_path = p["repo_path"]
-        if _is_agent_repo_path(repo_path):
-            raise ValueError("agent notes are not indexed as curated documents")
-        content = (Path(settings.repo_cache_path) / repo_path).read_text(encoding="utf-8")
+        repo_path, document_path = normalize_repo_path(
+            settings.repo_cache_path, p["repo_path"], require_markdown=True
+        )
+        content = document_path.read_text(encoding="utf-8")
         await pipeline.index_document(
             session, embedder, llm, settings,
             namespace=p["namespace"], repo_path=repo_path,
             content=content, commit_sha=p.get("commit_sha"),
         )
     elif job.type == "delete_document":
-        await repo.delete_document_by_path(session, p["repo_path"])
+        repo_path, _ = normalize_repo_path(
+            settings.repo_cache_path, p["repo_path"], require_markdown=False
+        )
+        await repo.delete_document_by_path(session, repo_path)
         await session.commit()
     elif job.type == "extract_facts":
         await pipeline.extract_and_store_facts(
