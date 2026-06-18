@@ -321,7 +321,9 @@ async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     assert set(out) == {"note_id", "repo_path", "status", "event_id"}
     assert out["status"] == "pending"
     assert out["repo_path"].startswith("_agents/chatgpt-web/")
-    assert out["repo_path"].endswith("-resumo-antes-da-compressao.md")
+    assert "-resumo-antes-da-compressao-" in out["repo_path"]
+    assert out["note_id"] in out["repo_path"]
+    assert out["repo_path"].endswith(".md")
 
     note_path = Path(deps.settings.repo_cache_path) / out["repo_path"]
     text = note_path.read_text(encoding="utf-8")
@@ -358,6 +360,42 @@ async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     assert "title" not in event.payload["agent_note"]
     assert "suggested_namespace" not in event.payload["agent_note"]
     assert "metadata" not in event.payload["agent_note"]
+
+
+async def test_submit_agent_note_mesmo_timestamp_e_titulo_cria_paths_distintos(
+    deps, monkeypatch
+):
+    await _create_client_as_curator(deps)
+    monkeypatch.setattr(handlers, "_now_stamp", lambda: "20260617T183000000000")
+
+    first = await _as_client(
+        handlers.submit_agent_note,
+        deps,
+        title="Resumo repetido",
+        content="Primeira nota.",
+    )
+    second = await _as_client(
+        handlers.submit_agent_note,
+        deps,
+        title="Resumo repetido",
+        content="Segunda nota.",
+    )
+
+    assert first["repo_path"] != second["repo_path"]
+    assert first["note_id"] in first["repo_path"]
+    assert second["note_id"] in second["repo_path"]
+    assert (Path(deps.settings.repo_cache_path) / first["repo_path"]).exists()
+    assert (Path(deps.settings.repo_cache_path) / second["repo_path"]).exists()
+
+    async with deps.session_factory() as s:
+        notes = list((await s.execute(select(AgentNote))).scalars().all())
+        events = list((await s.execute(select(OutboxEvent))).scalars().all())
+
+    assert {note.repo_path for note in notes} == {first["repo_path"], second["repo_path"]}
+    assert {event.payload["agent_note"]["repo_path"] for event in events} == {
+        first["repo_path"],
+        second["repo_path"],
+    }
 
 
 async def test_submit_agent_note_rejeita_curator(deps):

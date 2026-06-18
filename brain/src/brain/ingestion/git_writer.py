@@ -300,7 +300,8 @@ def write_agent_note(
     yyyy, mm, dd = timestamp[:4], timestamp[4:6], timestamp[6:8]
     title_source = title or content or note_id
     file_slug = slugify(title_source, fallback="note")
-    rel = f"{safe_inbox_dir}/{safe_client_slug}/{yyyy}/{mm}/{dd}/{timestamp}-{file_slug}.md"
+    note_slug = slugify(note_id, fallback="note-id")
+    rel = f"{safe_inbox_dir}/{safe_client_slug}/{yyyy}/{mm}/{dd}/{timestamp}-{file_slug}-{note_slug}.md"
     path = _safe_repo_path(dest, rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

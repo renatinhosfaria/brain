@@ -191,7 +191,7 @@ def test_write_agent_note_cria_apenas_na_pasta_do_client(tmp_path):
         push=False,
     )
 
-    assert rel == "_agents/chatgpt-web/2026/06/17/20260617T183000000000-resumo.md"
+    assert rel == "_agents/chatgpt-web/2026/06/17/20260617T183000000000-resumo-agent-note-1.md"
     text = (repo / rel).read_text(encoding="utf-8")
     assert "type: agent_note" in text
     assert "id: agent_note_1" in text
@@ -204,6 +204,32 @@ def test_write_agent_note_cria_apenas_na_pasta_do_client(tmp_path):
     assert "**user:** oi" in text
     subject = _git(["log", "-1", "--format=%s"], repo).stdout.strip()
     assert subject == "agent-note: chatgpt-web 20260617T183000000000"
+
+
+def test_write_agent_note_mesmo_timestamp_e_titulo_cria_paths_distintos(tmp_path):
+    repo = tmp_path / "vault"
+    _init_repo(repo)
+    common = {
+        "inbox_dir": "_agents",
+        "client_slug": "chatgpt-web",
+        "client_name": "ChatGPT Web",
+        "title": "Resumo",
+        "content": "Conteudo livre",
+        "timestamp": "20260617T183000000000",
+        "author_name": "brain-bot",
+        "author_email": "brain-bot@example.com",
+        "push": False,
+    }
+
+    first = git_writer.write_agent_note(repo, note_id="agent_note_1", **common)
+    second = git_writer.write_agent_note(repo, note_id="agent_note_2", **common)
+
+    assert first != second
+    assert first.endswith("20260617T183000000000-resumo-agent-note-1.md")
+    assert second.endswith("20260617T183000000000-resumo-agent-note-2.md")
+    assert (repo / first).read_text(encoding="utf-8") != (repo / second).read_text(encoding="utf-8")
+    assert "id: agent_note_1" in (repo / first).read_text(encoding="utf-8")
+    assert "id: agent_note_2" in (repo / second).read_text(encoding="utf-8")
 
 
 def test_write_agent_note_rejeita_timestamp_inseguro_sem_escrever_fora(tmp_path):
