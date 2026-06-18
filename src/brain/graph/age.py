@@ -1,4 +1,5 @@
 import json
+from collections.abc import Iterable
 import re
 
 from sqlalchemy import text
@@ -35,6 +36,81 @@ def _unwrap(agtype_value: object):
         return json.loads(s)
     except (ValueError, TypeError):
         return s
+
+
+def _split_agtype_list(raw: str) -> list[str]:
+    raw = raw.strip()
+    if not raw or raw == "[]":
+        return []
+    if raw[0] == "[" and raw[-1] == "]":
+        raw = raw[1:-1]
+
+    items: list[str] = []
+    start = 0
+    depth = 0
+    in_string = False
+    escape = False
+    for idx, ch in enumerate(raw):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            item = raw[start:idx].strip()
+            if item:
+                items.append(item)
+            start = idx + 1
+    tail = raw[start:].strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _parse_agtype_entity(value: object) -> dict:
+    raw = str(value).strip()
+    raw = re.sub(r"::(vertex|edge)$", "", raw)
+    return json.loads(raw)
+
+
+def _parse_agtype_entity_list(value: object) -> list[dict]:
+    return [_parse_agtype_entity(item) for item in _split_agtype_list(str(value))]
+
+
+def _props(entity: dict) -> dict:
+    props = entity.get("properties")
+    return props if isinstance(props, dict) else {}
+
+
+def _entity_payload(node: dict, *, seed: str, depth: int) -> dict:
+    props = _props(node)
+    return {
+        "name": props.get("name"),
+        "type": props.get("type"),
+        "seed": seed,
+        "depth": depth,
+    }
+
+
+def _dedupe_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
 
 
 async def ensure_graph(session: AsyncSession) -> None:
@@ -117,6 +193,111 @@ async def get_related(
     )
     rows = (await session.execute(text(q))).all()
     return [{"name": _unwrap(n), "type": _unwrap(t)} for n, t in rows]
+
+
+async def get_relationship_paths(
+    session: AsyncSession,
+    seeds: list[str],
+    namespace: str,
+    depth: int = 1,
+    rel_types: list[str] | None = None,
+    limit: int = 50,
+) -> dict:
+    await _prepare(session)
+    bounded_depth = max(1, int(depth))
+    bounded_limit = max(1, int(limit))
+    allowed_types = set(_dedupe_strings(rel_types or []))
+    seed_names = _dedupe_strings(seeds)
+
+    entity_by_key: dict[tuple[str, str], dict] = {}
+    relationships: list[dict] = []
+    relationship_keys: set[tuple[str, str, str, str, int]] = set()
+
+    for seed in seed_names:
+        if len(relationships) >= bounded_limit:
+            break
+        q = (
+            f"SELECT * FROM cypher('brain', $cy$ "
+            f"MATCH p = (s:Entity {{name: {_lit(seed)}, namespace: {_lit(namespace)}}})"
+            f"-[*1..{bounded_depth}]-(n:Entity) "
+            f"RETURN nodes(p), relationships(p) $cy$) AS (nodes agtype, rels agtype)"
+        )
+        rows = (await session.execute(text(q))).all()
+        for nodes_value, rels_value in rows:
+            nodes = _parse_agtype_entity_list(nodes_value)
+            rels = _parse_agtype_entity_list(rels_value)
+            node_by_id = {node.get("id"): node for node in nodes}
+
+            for hop, node in enumerate(nodes):
+                payload = _entity_payload(node, seed=seed, depth=hop)
+                name = payload["name"]
+                if not name or name != seed:
+                    continue
+                key = (str(name), seed)
+                existing = entity_by_key.get(key)
+                if existing is None or payload["depth"] < existing["depth"]:
+                    entity_by_key[key] = payload
+
+            for hop, rel in enumerate(rels, start=1):
+                rel_props = _props(rel)
+                rel_type = rel_props.get("type") or rel.get("label")
+                if allowed_types and rel_type not in allowed_types:
+                    continue
+                from_node = node_by_id.get(rel.get("start_id")) or node_by_id.get(rel.get("startid"))
+                to_node = node_by_id.get(rel.get("end_id")) or node_by_id.get(rel.get("endid"))
+                if from_node is None or to_node is None:
+                    continue
+                from_name = _props(from_node).get("name")
+                to_name = _props(to_node).get("name")
+                if not from_name or not to_name or not rel_type:
+                    continue
+                payload = {
+                    "from": from_name,
+                    "to": to_name,
+                    "type": rel_type,
+                    "seed": seed,
+                    "depth": hop,
+                }
+                key = (
+                    str(payload["from"]),
+                    str(payload["to"]),
+                    str(payload["type"]),
+                    str(payload["seed"]),
+                    int(payload["depth"]),
+                )
+                if key in relationship_keys:
+                    continue
+                relationship_keys.add(key)
+                relationships.append(payload)
+
+                for endpoint, endpoint_depth in (
+                    (from_node, hop),
+                    (to_node, hop),
+                ):
+                    entity_payload = _entity_payload(endpoint, seed=seed, depth=endpoint_depth)
+                    entity_name = entity_payload["name"]
+                    if entity_name == seed:
+                        entity_payload["depth"] = 0
+                    if entity_name:
+                        entity_key = (str(entity_name), seed)
+                        existing = entity_by_key.get(entity_key)
+                        if existing is None or entity_payload["depth"] < existing["depth"]:
+                            entity_by_key[entity_key] = entity_payload
+
+                if len(relationships) >= bounded_limit:
+                    break
+            if len(relationships) >= bounded_limit:
+                break
+
+    filtered_entity_names = {rel["from"] for rel in relationships} | {rel["to"] for rel in relationships}
+    entities = [
+        entity
+        for entity in entity_by_key.values()
+        if entity["depth"] == 0 or entity["name"] in filtered_entity_names
+    ]
+    entities.sort(key=lambda e: (e["seed"], e["depth"], e["name"]))
+    relationships.sort(key=lambda r: (r["seed"], r["depth"], r["from"], r["to"], r["type"]))
+    return {"entities": entities, "relationships": relationships}
 
 
 async def update_entity(

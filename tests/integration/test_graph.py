@@ -62,3 +62,73 @@ async def test_merge_entities_move_relacoes(session):
     assert await age.get_entity(session, "TS", "trabalho") is None
     related = await age.get_related(session, "Renato", "trabalho")
     assert any(e["name"] == "TypeScript" for e in related)
+
+
+async def test_get_relationship_paths_retorna_entidades_relacoes_direcao_e_depth(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_entity(session, "Vault", "conceito", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+    await age.upsert_relation(session, "brain", "Vault", "stores", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["brain"], "curated", depth=2)
+
+    assert {"name": "brain", "type": "projeto", "seed": "brain", "depth": 0} in out["entities"]
+    assert {"name": "Hermes", "type": "agente", "seed": "brain", "depth": 1} in out["entities"]
+    assert {"name": "Vault", "type": "conceito", "seed": "brain", "depth": 1} in out["entities"]
+    assert {
+        "from": "Hermes",
+        "to": "brain",
+        "type": "curates",
+        "seed": "brain",
+        "depth": 1,
+    } in out["relationships"]
+    assert {
+        "from": "brain",
+        "to": "Vault",
+        "type": "stores",
+        "seed": "brain",
+        "depth": 1,
+    } in out["relationships"]
+
+
+async def test_get_relationship_paths_filtra_rel_types(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_entity(session, "Vault", "conceito", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+    await age.upsert_relation(session, "brain", "Vault", "stores", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain"],
+        "curated",
+        depth=2,
+        rel_types=["stores"],
+    )
+
+    assert {rel["type"] for rel in out["relationships"]} == {"stores"}
+    assert {entity["name"] for entity in out["entities"]} == {"brain", "Vault"}
+
+
+async def test_get_relationship_paths_deduplica_e_respeita_limit(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    for idx in range(3):
+        name = f"Entidade {idx}"
+        await age.upsert_entity(session, name, "conceito", "curated")
+        await age.upsert_relation(session, "brain", name, "relates_to", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain", "brain"],
+        "curated",
+        depth=1,
+        limit=2,
+    )
+
+    assert len(out["relationships"]) == 2
+    assert len({(r["from"], r["to"], r["type"], r["seed"], r["depth"]) for r in out["relationships"]}) == 2
+    assert len({(e["name"], e["seed"], e["depth"]) for e in out["entities"]}) == len(out["entities"])
