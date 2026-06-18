@@ -153,14 +153,46 @@ async def test_search_path_prefix_limita_resultados(session):
     assert [r["repo_path"] for r in out["results"]] == ["projetos/brain.md"]
 
 
-async def test_search_rejeita_path_prefix_invalido(session):
+@pytest.mark.parametrize(
+    ("path_prefix", "match"),
+    [
+        ("../", "path_prefix"),
+        ("_agents/", "_agents"),
+        ("%", "path_prefix"),
+        ("projetos/_", "path_prefix"),
+    ],
+)
+async def test_search_rejeita_path_prefix_invalido(session, path_prefix, match):
     emb = FakeEmbedder({"consulta": _vec(0.11)})
 
-    with pytest.raises(ValueError, match="path_prefix"):
-        await search(session, emb, "consulta", filters={"path_prefix": "../"})
+    with pytest.raises(ValueError, match=match):
+        await search(session, emb, "consulta", filters={"path_prefix": path_prefix})
 
-    with pytest.raises(ValueError, match="_agents"):
-        await search(session, emb, "consulta", filters={"path_prefix": "_agents/"})
+
+@pytest.mark.parametrize("limit", [0, -1, True, False, "10", 1.5])
+async def test_search_rejeita_limit_invalido(session, limit):
+    emb = FakeEmbedder({"consulta": _vec(0.11)})
+
+    with pytest.raises(ValueError, match="limit"):
+        await search(session, emb, "consulta", limit=limit)
+
+
+async def test_search_limita_limit_muito_alto(session):
+    for idx in range(55):
+        await _add_document_chunk(
+            session,
+            namespace="curated",
+            repo_path=f"projetos/nota-{idx:02d}.md",
+            text=f"nota curada {idx}",
+            seed=0.10 + idx / 10000,
+        )
+    await session.commit()
+
+    emb = FakeEmbedder({"consulta": _vec(0.11)})
+    out = await search(session, emb, "consulta", limit=10_000)
+
+    assert len(out["results"]) == 50
+    assert {r["namespace"] for r in out["results"]} == {"curated"}
 
 
 async def test_include_graph_traz_relacionados(session):

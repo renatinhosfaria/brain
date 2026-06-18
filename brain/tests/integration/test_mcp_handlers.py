@@ -535,6 +535,17 @@ async def test_search_curadas_filtra_prefixo_e_get_note_abre_resultado(deps):
     assert got_by_id["path"] == "projetos/brain.md"
 
 
+@pytest.mark.parametrize("path_prefix", ["%", "projetos/_"])
+async def test_search_rejeita_wildcards_no_path_prefix(deps, path_prefix):
+    with pytest.raises(ValueError, match="path_prefix"):
+        await _as_client(
+            handlers.search,
+            deps,
+            "brain",
+            filters={"path_prefix": path_prefix},
+        )
+
+
 async def test_list_vault_tree_lista_dirs_e_notas_excluindo_agents_por_padrao(deps):
     await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nCurado.")
     await _as_curator(handlers.create_note, deps, "areas/trabalho.md", "# Trabalho\n\nCurado.")
@@ -766,6 +777,38 @@ async def test_search_permite_principal_client(deps):
     out = await _as_client(handlers.search, deps, "qualquer coisa")
 
     assert out == {"results": [], "graph": []}
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, False, "10", 1.5])
+async def test_search_rejeita_limit_invalido_no_handler(deps, limit):
+    with pytest.raises(ValueError, match="limit"):
+        await _as_client(handlers.search, deps, "brain", limit=limit)
+
+
+async def test_search_handler_limita_limit_muito_alto(deps):
+    async with deps.session_factory() as s:
+        for idx in range(55):
+            doc = await repo.upsert_document(
+                s,
+                namespace="curated",
+                repo_path=f"projetos/nota-{idx:02d}.md",
+                title=None,
+                raw_content=f"nota curada {idx}",
+                content_hash=f"h-{idx}",
+                commit_sha=None,
+            )
+            await repo.replace_chunks(
+                s,
+                doc.id,
+                [{"ordinal": 0, "text": f"nota curada {idx}", "token_count": 1}],
+                [[0.2] * 2000],
+            )
+        await s.commit()
+
+    out = await _as_client(handlers.search, deps, "brain", limit=10_000)
+
+    assert len(out["results"]) == 50
+    assert {r["namespace"] for r in out["results"]} == {"curated"}
 
 
 async def test_mcp_search_public_schema_usa_filters(deps):

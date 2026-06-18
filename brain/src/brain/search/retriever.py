@@ -12,6 +12,7 @@ async def search(
     namespace: str | None = None,
     include_graph: bool = False,
 ) -> dict:
+    limit = repo.normalize_search_limit(limit)
     (qvec,) = await embedder.embed([query])
     chunk_hits = await repo.search_chunks(session, qvec, "curated", limit, filters=filters)
     results = sorted(chunk_hits, key=lambda r: r["score"], reverse=True)[:limit]

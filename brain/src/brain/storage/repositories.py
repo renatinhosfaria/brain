@@ -191,6 +191,17 @@ async def merge_memories(
 
 
 # ---------- Busca vetorial ----------
+MAX_SEARCH_LIMIT = 50
+
+
+def normalize_search_limit(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("limit deve ser um inteiro positivo")
+    if limit < 1:
+        raise ValueError("limit deve ser positivo")
+    return min(limit, MAX_SEARCH_LIMIT)
+
+
 def _normalize_search_path_prefix(filters: dict | None) -> str | None:
     if not filters or not filters.get("path_prefix"):
         return None
@@ -215,6 +226,8 @@ def _normalize_search_path_prefix(filters: dict | None) -> str | None:
     blocked = rel.rstrip("/")
     if blocked == "_agents" or blocked.startswith("_agents/"):
         raise ValueError("path_prefix nao pode apontar para _agents/")
+    if "%" in rel or "_" in rel:
+        raise ValueError("path_prefix nao pode conter '%' ou '_'")
     return rel or None
 
 
@@ -225,6 +238,7 @@ async def search_chunks(
     limit: int,
     filters: dict | None = None,
 ) -> list[dict]:
+    bounded_limit = normalize_search_limit(limit)
     path_prefix = _normalize_search_path_prefix(filters)
     dist = Chunk.embedding.cosine_distance(query_embedding).label("distance")
     stmt = (
@@ -236,7 +250,7 @@ async def search_chunks(
         stmt = stmt.where(Document.namespace == namespace)
     if path_prefix:
         stmt = stmt.where(Document.repo_path.startswith(path_prefix))
-    stmt = stmt.order_by(dist).limit(limit)
+    stmt = stmt.order_by(dist).limit(bounded_limit)
     rows = (await session.execute(stmt)).all()
     return [
         {

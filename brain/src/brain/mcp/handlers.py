@@ -377,14 +377,14 @@ async def search(
     include_graph: bool = False,
 ) -> dict:
     _require_client_or_curator()
-    if isinstance(limit, str) or isinstance(namespace, bool):
+    if isinstance(limit, str) and isinstance(filters, int) and not isinstance(filters, bool):
         legacy_namespace = limit if isinstance(limit, str) else None
-        legacy_limit = filters if isinstance(filters, int) else 10
+        legacy_limit = filters
         include_graph = namespace if isinstance(namespace, bool) else include_graph
         limit = legacy_limit
         filters = None
         namespace = legacy_namespace
-    resolved_limit = 10 if limit is None else limit
+    resolved_limit = repo.normalize_search_limit(10 if limit is None else limit)
 
     async with deps.session_factory() as s:
         return await _search(
