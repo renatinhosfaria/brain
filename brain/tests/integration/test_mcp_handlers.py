@@ -15,7 +15,7 @@ from brain.mcp.handlers import Deps
 from brain.mcp.server import create_mcp_server
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.storage.db import make_engine, make_session_factory
-from brain.storage.models import AgentNote, Base, Chunk, OutboxEvent
+from brain.storage.models import AgentNote, Base, Chunk, NoteLink, OutboxEvent
 from brain.storage import repositories as repo
 
 
@@ -394,6 +394,152 @@ async def test_update_note_substitui_markdown_inteiro_e_reindexa(deps):
     assert all("Antigo" not in chunk.text for chunk in chunks)
 
 
+async def test_create_note_extrai_links_e_resolve_paths_curados_existentes(deps):
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/brain.md",
+        "# Brain\n\nNota alvo.",
+    )
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "areas/hermes.md",
+        "# Hermes\n\nNota alvo com ancora.",
+    )
+
+    source = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/source.md",
+        "# Source\n\n[[MCP]] [[projetos/brain.md|Brain]] [[areas/hermes#Curadoria]]",
+    )
+
+    async with deps.session_factory() as s:
+        links = list(
+            (
+                await s.execute(
+                    select(NoteLink)
+                    .where(NoteLink.source_path == "projetos/source.md")
+                    .order_by(NoteLink.created_at, NoteLink.id)
+                )
+            ).scalars()
+        )
+
+    by_raw = {link.raw: link for link in links}
+
+    assert set(by_raw) == {
+        "[[MCP]]",
+        "[[projetos/brain.md|Brain]]",
+        "[[areas/hermes#Curadoria]]",
+    }
+    assert {link.source_document_id for link in links} == {uuid.UUID(source["id"])}
+    assert by_raw["[[MCP]]"].target == "MCP"
+    assert by_raw["[[MCP]]"].target_path is None
+    assert by_raw["[[MCP]]"].status == "unresolved"
+    assert by_raw["[[projetos/brain.md|Brain]]"].target == "projetos/brain.md"
+    assert by_raw["[[projetos/brain.md|Brain]]"].target_path == "projetos/brain.md"
+    assert by_raw["[[projetos/brain.md|Brain]]"].alias == "Brain"
+    assert by_raw["[[projetos/brain.md|Brain]]"].status == "resolved"
+    assert by_raw["[[areas/hermes#Curadoria]]"].target == "areas/hermes"
+    assert by_raw["[[areas/hermes#Curadoria]]"].target_path == "areas/hermes.md"
+    assert by_raw["[[areas/hermes#Curadoria]]"].anchor == "Curadoria"
+    assert by_raw["[[areas/hermes#Curadoria]]"].status == "resolved"
+
+    unresolved = await _as_curator(handlers.list_unresolved_links, deps)
+
+    assert unresolved["next_cursor"] is None
+    assert [item["target"] for item in unresolved["items"]] == ["MCP"]
+    assert unresolved["items"][0]["source_path"] == "projetos/source.md"
+
+
+async def test_update_note_substitui_links_indexados(deps):
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/brain.md",
+        "# Brain\n\nNota alvo.",
+    )
+    created = await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/source.md",
+        "# Source\n\n[[MCP]]",
+    )
+
+    await _as_curator(
+        handlers.update_note,
+        deps,
+        created["id"],
+        "# Source\n\n[[projetos/brain|Brain]]",
+    )
+
+    async with deps.session_factory() as s:
+        links = list(
+            (
+                await s.execute(
+                    select(NoteLink)
+                    .where(NoteLink.source_path == "projetos/source.md")
+                    .order_by(NoteLink.created_at, NoteLink.id)
+                )
+            ).scalars()
+        )
+
+    assert [(link.target, link.target_path, link.status) for link in links] == [
+        ("projetos/brain", "projetos/brain.md", "resolved")
+    ]
+    unresolved = await _as_curator(handlers.list_unresolved_links, deps)
+    assert [item["target"] for item in unresolved["items"]] == []
+
+
+async def test_resolve_note_link_exige_alvo_curado_existente_e_nao_agents(deps):
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "projetos/source.md",
+        "# Source\n\n[[MCP]]",
+    )
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "protocolos/mcp.md",
+        "# MCP\n\nProtocolo.",
+    )
+    async with deps.session_factory() as s:
+        link = (
+            await s.execute(select(NoteLink).where(NoteLink.target == "MCP"))
+        ).scalar_one()
+        link_id = str(link.id)
+        raw = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="_agents/chatgpt-web/raw.md",
+            title="Raw",
+            raw_content="# Raw\n\nBruto.",
+            content_hash="raw",
+            commit_sha=None,
+        )
+        await s.commit()
+        raw_id = str(raw.id)
+
+    with pytest.raises(ValueError, match="curated note not found"):
+        await _as_curator(handlers.resolve_note_link, deps, link_id, "protocolos/ausente.md")
+
+    with pytest.raises(ValueError, match="_agents"):
+        await _as_curator(handlers.resolve_note_link, deps, link_id, "_agents/chatgpt-web/raw.md")
+
+    with pytest.raises(ValueError, match="curated note not found"):
+        await _as_curator(handlers.resolve_note_link, deps, link_id, raw_id)
+
+    resolved = await _as_curator(handlers.resolve_note_link, deps, link_id, "protocolos/mcp.md")
+
+    assert resolved["id"] == link_id
+    assert resolved["target_path"] == "protocolos/mcp.md"
+    assert resolved["status"] == "resolved"
+    unresolved = await _as_curator(handlers.list_unresolved_links, deps)
+    assert [item["target"] for item in unresolved["items"]] == []
+
+
 async def test_update_note_falha_indexacao_mantem_get_note_db_e_retry_reconcilia(
     deps, monkeypatch
 ):
@@ -689,6 +835,8 @@ def _curator_only_call(case: str, deps):
         "move_memory": ("move_memory", (deps, memory_id, "trabalho"), {}),
         "delete_memory": ("delete_memory", (deps, memory_id), {}),
         "merge_memories": ("merge_memories", (deps, [memory_id]), {}),
+        "list_unresolved_links": ("list_unresolved_links", (deps,), {}),
+        "resolve_note_link": ("resolve_note_link", (deps, memory_id, "projetos/brain.md"), {}),
         "get_document": ("get_document", (deps, memory_id), {}),
         "list_documents": ("list_documents", (deps,), {}),
         "reindex": ("reindex", (deps, "a.md", "t"), {}),
@@ -738,6 +886,8 @@ def _curator_only_call(case: str, deps):
         "move_memory",
         "delete_memory",
         "merge_memories",
+        "list_unresolved_links",
+        "resolve_note_link",
         "get_document",
         "list_documents",
         "reindex",
@@ -900,6 +1050,13 @@ async def test_mcp_search_public_schema_usa_filters(deps):
     assert search_tool.inputSchema["required"] == ["query"]
 
 
+async def test_mcp_registra_ferramentas_de_links(deps):
+    mcp = create_mcp_server(deps)
+    tool_names = {tool.name for tool in await mcp.list_tools()}
+
+    assert {"list_unresolved_links", "resolve_note_link"} <= tool_names
+
+
 async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     await _create_client_as_curator(deps)
 
@@ -954,6 +1111,21 @@ async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     assert "title" not in event.payload["agent_note"]
     assert "suggested_namespace" not in event.payload["agent_note"]
     assert "metadata" not in event.payload["agent_note"]
+
+
+async def test_submit_agent_note_nao_extrai_links_de_nota_bruta(deps):
+    await _create_client_as_curator(deps)
+
+    await _submit_note_as_client(
+        deps,
+        title="Nota bruta com link",
+        content="Conteudo bruto com [[MCP]] que fica fora da curadoria.",
+    )
+
+    async with deps.session_factory() as s:
+        links = list((await s.execute(select(NoteLink))).scalars())
+
+    assert links == []
 
 
 async def test_curator_lista_agent_notes_pendentes_sem_conteudo_bruto(deps):

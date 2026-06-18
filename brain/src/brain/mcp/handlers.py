@@ -11,6 +11,7 @@ from brain import auth
 from brain.graph import age
 from brain.ingestion import git_writer
 from brain.ingestion import pipeline
+from brain.notes.links import extract_obsidian_links
 from brain.queue.base import JobType
 from brain.search.retriever import search as _search
 from brain.storage import repositories as repo
@@ -200,6 +201,23 @@ def _agent_note_dict(note, *, content: str | None = None) -> dict | None:
     return out
 
 
+def _note_link_dict(link) -> dict | None:
+    if link is None:
+        return None
+    return {
+        "id": str(link.id),
+        "source_document_id": str(link.source_document_id) if link.source_document_id else None,
+        "source_path": link.source_path,
+        "target": link.target,
+        "target_path": link.target_path,
+        "alias": link.alias,
+        "anchor": link.anchor,
+        "raw": link.raw,
+        "status": link.status,
+        "created_at": _iso(link.created_at),
+    }
+
+
 def _repo_note_path(repo_cache_path: str, repo_path: str) -> Path:
     repo_root = Path(repo_cache_path).resolve()
     note_path = (repo_root / repo_path).resolve()
@@ -220,6 +238,25 @@ def _note_cursor(note) -> str:
 
 
 def _parse_note_cursor(cursor: str | None) -> tuple[dt.datetime, uuid.UUID] | None:
+    if cursor is None:
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+        return dt.datetime.fromisoformat(payload["created_at"]), uuid.UUID(payload["id"])
+    except (binascii.Error, KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid cursor") from exc
+
+
+def _link_cursor(link) -> str:
+    payload = {
+        "created_at": link.created_at.isoformat(),
+        "id": str(link.id),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _parse_link_cursor(cursor: str | None) -> tuple[dt.datetime, uuid.UUID] | None:
     if cursor is None:
         return None
     try:
@@ -274,6 +311,46 @@ async def _get_curated_document_by_id_or_path(session, id_or_path: str):
         return await repo.get_curated_document(session, repo_path=path)
 
 
+def _candidate_link_paths(target: str) -> list[str]:
+    if not target:
+        return []
+    normalized = target.replace("\\", "/")
+    if normalized.endswith(".md"):
+        return [normalized]
+    return [f"{normalized}.md"]
+
+
+async def _resolve_link_target_path(session, target: str) -> str | None:
+    for candidate in _candidate_link_paths(target):
+        try:
+            path = git_writer.validate_curated_note_path(candidate)
+        except ValueError:
+            continue
+        if await repo.get_curated_document(session, repo_path=path) is not None:
+            return path
+    return None
+
+
+async def _replace_curated_note_links(
+    session,
+    *,
+    document_id,
+    repo_path: str,
+    content: str,
+) -> None:
+    links = []
+    for link in extract_obsidian_links(content):
+        target_path = await _resolve_link_target_path(session, link["target"])
+        links.append(
+            {
+                **link,
+                "target_path": target_path,
+                "status": "resolved" if target_path else "unresolved",
+            }
+        )
+    await repo.replace_note_links(session, document_id, repo_path, links)
+
+
 async def _index_curated_note(
     deps: Deps,
     *,
@@ -298,7 +375,15 @@ async def _index_curated_note(
         doc = await repo.get_curated_document(s, repo_path=repo_path)
         if doc is None:
             raise ValueError(f"curated note not found after index: {repo_path}")
-        return _curated_note_dict(doc)
+        await _replace_curated_note_links(
+            s,
+            document_id=doc.id,
+            repo_path=repo_path,
+            content=content,
+        )
+        out = _curated_note_dict(doc)
+        await s.commit()
+        return out
 
 
 def _push_curated_note_if_enabled(deps: Deps) -> None:
@@ -555,6 +640,36 @@ async def list_vault_tree(
         elif candidate.suffix == ".md":
             items.append({"type": "note", "path": rel})
     return {"items": items}
+
+
+async def list_unresolved_links(
+    deps: Deps,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict:
+    _require_curator()
+    bounded_limit = repo.normalize_search_limit(limit)
+    after = _parse_link_cursor(cursor)
+    async with deps.session_factory() as s:
+        links = await repo.list_unresolved_links(s, limit=bounded_limit + 1, after=after)
+    page = links[:bounded_limit]
+    next_cursor = _link_cursor(page[-1]) if len(links) > bounded_limit and page else None
+    return {"items": [_note_link_dict(link) for link in page], "next_cursor": next_cursor}
+
+
+async def resolve_note_link(deps: Deps, link_id: str, target_path: str) -> dict:
+    _require_curator()
+    link_uuid = uuid.UUID(link_id)
+    async with deps.session_factory() as s:
+        target = await _get_curated_document_by_id_or_path(s, target_path)
+        if target is None:
+            raise ValueError(f"curated note not found: {target_path}")
+        link = await repo.resolve_note_link(s, link_uuid, target.repo_path)
+        if link is None:
+            raise ValueError(f"note link not found: {link_id}")
+        out = _note_link_dict(link)
+        await s.commit()
+        return out
 
 
 async def submit_agent_note(

@@ -647,13 +647,25 @@ async def replace_note_links(
     return created
 
 
-async def list_unresolved_links(session, limit: int = 50) -> list[NoteLink]:
+async def list_unresolved_links(
+    session,
+    limit: int = 50,
+    after: tuple[dt.datetime, uuid.UUID] | None = None,
+) -> list[NoteLink]:
     stmt = (
         select(NoteLink)
         .where(NoteLink.status == "unresolved")
         .order_by(NoteLink.created_at, NoteLink.id)
-        .limit(limit)
     )
+    if after is not None:
+        created_at, link_id = after
+        stmt = stmt.where(
+            or_(
+                NoteLink.created_at > created_at,
+                and_(NoteLink.created_at == created_at, NoteLink.id > link_id),
+            )
+        )
+    stmt = stmt.limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 
 

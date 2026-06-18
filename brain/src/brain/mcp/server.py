@@ -52,6 +52,14 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         return await handlers.list_vault_tree(deps, prefix, include_agents, max_depth)
 
     @mcp.tool()
+    async def list_unresolved_links(limit: int = 50, cursor: str | None = None) -> dict:
+        return await handlers.list_unresolved_links(deps, limit, cursor)
+
+    @mcp.tool()
+    async def resolve_note_link(link_id: str, target_path: str) -> dict:
+        return await handlers.resolve_note_link(deps, link_id, target_path)
+
+    @mcp.tool()
     async def submit_agent_note(
         title: str | None = None,
         content: str | None = None,
