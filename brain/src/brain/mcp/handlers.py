@@ -180,6 +180,8 @@ async def submit_agent_note(
                 raise ValueError(f"active agent client not found: {principal.slug}")
             if client.status != "active":
                 raise ValueError(f"agent client disabled: {principal.slug}")
+            if "submit_agent_note" not in (client.permissions or []):
+                raise PermissionError("submit_agent_note permission required")
 
             note = await repo.create_agent_note(
                 s,
@@ -217,11 +219,7 @@ async def submit_agent_note(
                 "agent_note": {
                     "id": note_id,
                     "client_slug": client.slug,
-                    "client_name": client.name,
                     "repo_path": repo_path,
-                    "title": title,
-                    "suggested_namespace": suggested_namespace,
-                    "metadata": metadata or {},
                 },
             }
             event = await repo.create_outbox_event(s, "agent_note.created", event_payload)

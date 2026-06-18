@@ -350,14 +350,14 @@ async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     assert event.payload["agent_note"] == {
         "id": out["note_id"],
         "client_slug": "chatgpt-web",
-        "client_name": "ChatGPT Web",
         "repo_path": out["repo_path"],
-        "title": "Resumo antes da compressao",
-        "suggested_namespace": "brain",
-        "metadata": {"model": "gpt-5.5"},
     }
     assert "content" not in event.payload
     assert "messages" not in event.payload
+    assert "client_name" not in event.payload["agent_note"]
+    assert "title" not in event.payload["agent_note"]
+    assert "suggested_namespace" not in event.payload["agent_note"]
+    assert "metadata" not in event.payload["agent_note"]
 
 
 async def test_submit_agent_note_rejeita_curator(deps):
@@ -406,6 +406,37 @@ async def test_submit_agent_note_falha_quando_client_esta_inativo(deps):
             deps,
             content="Conteudo bruto.",
         )
+
+
+async def test_submit_agent_note_rejeita_client_sem_permissao_sem_escrever(deps):
+    async with deps.session_factory() as s:
+        await repo.create_agent_client(
+            s,
+            slug="search-only",
+            name="Search Only",
+            description=None,
+            token_prefix="brain_client_search-only",
+            token_hash="hash-search-only",
+            token_encrypted="encrypted-search-only",
+            permissions=["search"],
+            meta=None,
+        )
+        await s.commit()
+
+    principal = auth.Principal("client", "search-only", "Search Only")
+    with pytest.raises(PermissionError, match="submit_agent_note permission required"):
+        await _as_principal(
+            principal,
+            handlers.submit_agent_note,
+            deps,
+            title="Nao pode",
+            content="Nao deve escrever.",
+        )
+
+    async with deps.session_factory() as s:
+        assert list((await s.execute(select(AgentNote))).scalars().all()) == []
+        assert list((await s.execute(select(OutboxEvent))).scalars().all()) == []
+    assert not (Path(deps.settings.repo_cache_path) / "_agents" / "search-only").exists()
 
 
 async def test_submit_agent_note_persiste_db_e_outbox_quando_push_falha(deps, monkeypatch):
