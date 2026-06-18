@@ -259,3 +259,30 @@ async def test_get_relationship_paths_ordena_empate_de_tipo_de_relacao(session):
             "depth": 1,
         }
     ]
+
+
+async def test_get_relationship_paths_ordena_empate_por_intermediario(session):
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Alpha", "conceito", "curated")
+    await age.upsert_entity(session, "Beta", "conceito", "curated")
+    await age.upsert_entity(session, "Omega", "conceito", "curated")
+    await age.upsert_relation(session, "brain", "Alpha", "rel", "curated")
+    await age.upsert_relation(session, "Alpha", "Omega", "rel", "curated")
+    await age.upsert_relation(session, "brain", "Beta", "rel", "curated")
+    await age.upsert_relation(session, "Beta", "Omega", "rel", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["brain"],
+        "curated",
+        depth=2,
+        rel_types=["rel"],
+        limit=3,
+    )
+
+    assert out["relationships"] == [
+        {"from": "brain", "to": "Alpha", "type": "rel", "seed": "brain", "depth": 1},
+        {"from": "brain", "to": "Beta", "type": "rel", "seed": "brain", "depth": 1},
+        {"from": "Alpha", "to": "Omega", "type": "rel", "seed": "brain", "depth": 2},
+    ]

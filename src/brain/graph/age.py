@@ -241,13 +241,18 @@ async def get_relationship_paths(
             where_clause = ""
             if rel_type_filters:
                 where_clause = "WHERE " + " AND ".join(rel_type_filters) + " "
-            order_by_expr = ", ".join(["n.name"] + [f"{edge}.type" for edge in edge_vars])
+            # Deterministic pagination before Python slicing: names (including intermediaries)
+            # and edge types are used to break ties when multiple paths share n.name.
+            node_names_expr = [f"{node}.name" for node in intermediate_nodes]
+            rel_type_expr = [f"{edge}.type" for edge in edge_vars]
+            order_by_expr = ", ".join(["n.name"] + node_names_expr + rel_type_expr)
+            with_expr = ", ".join(["p", "n"] + edge_vars + intermediate_nodes)
 
             q = (
                 f"SELECT * FROM cypher('brain', $cy$ "
                 f"MATCH p = {pattern} "
                 f"{where_clause}"
-                f"WITH p, n "
+                f"WITH {with_expr} "
                 f"ORDER BY {order_by_expr} "
                 f"LIMIT {remaining} "
                 f"RETURN nodes(p), relationships(p) $cy$) AS (nodes agtype, rels agtype)"
