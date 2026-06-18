@@ -2,7 +2,7 @@ import pytest
 import pytest_asyncio
 
 from brain.graph import age
-from brain.search.retriever import search
+from brain.search.retriever import deep_search, search
 from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
 from brain.storage.models import Base
@@ -19,6 +19,17 @@ class FakeEmbedder:
 
     async def embed(self, texts):
         return [self._m[t] for t in texts]
+
+
+class FakeLLM:
+    def __init__(self, payload=None, error=None):
+        self.payload = payload or {"entities": []}
+        self.error = error
+
+    async def complete_json(self, system, user):
+        if self.error is not None:
+            raise self.error
+        return self.payload
 
 
 async def _add_document_chunk(session, *, namespace: str, repo_path: str, text: str, seed: float):
@@ -251,3 +262,97 @@ async def test_include_graph_traz_relacionados(session):
     emb = FakeEmbedder({"brain": _vec(0.5)})
     out = await search(session, emb, "brain", namespace="t", include_graph=True)
     assert any(g["name"] == "Renato" for g in out["graph"])
+
+
+async def test_deep_search_combina_chunks_e_grafo_por_fast_path(session):
+    doc = await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+    await session.commit()
+
+    emb = FakeEmbedder({"brain": _vec(0.11)})
+    out = await deep_search(session, emb, None, "brain", limit=10, depth=1)
+
+    assert out["query"] == "brain"
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["graph"]["relationships"] == [
+        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+    ]
+    assert out["meta"]["seed_strategy"] == "substring"
+
+
+async def test_deep_search_usa_fallback_llm_quando_substring_nao_encontra_seed(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+    await session.commit()
+
+    emb = FakeEmbedder({"Como o projeto se relaciona com o curador?": _vec(0.11)})
+    llm = FakeLLM({"entities": [{"name": "brain"}]})
+    out = await deep_search(
+        session,
+        emb,
+        llm,
+        "Como o projeto se relaciona com o curador?",
+        limit=10,
+        depth=1,
+    )
+
+    assert out["meta"]["seed_strategy"] == "llm"
+    assert [rel["type"] for rel in out["graph"]["relationships"]] == ["curates"]
+
+
+async def test_deep_search_sem_seeds_retorna_chunks_e_grafo_vazio(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await session.commit()
+
+    emb = FakeEmbedder({"consulta abstrata": _vec(0.11)})
+    out = await deep_search(session, emb, FakeLLM({"entities": []}), "consulta abstrata")
+
+    assert out["results"]
+    assert out["graph"] == {"entities": [], "relationships": []}
+    assert out["meta"]["seed_strategy"] == "none"
+
+
+async def test_deep_search_fallback_llm_falha_retorna_warning(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await session.commit()
+
+    emb = FakeEmbedder({"consulta abstrata": _vec(0.11)})
+    out = await deep_search(
+        session,
+        emb,
+        FakeLLM(error=RuntimeError("llm indisponivel")),
+        "consulta abstrata",
+    )
+
+    assert out["results"]
+    assert out["graph"] == {"entities": [], "relationships": []}
+    assert out["meta"]["seed_strategy"] == "none"
+    assert out["meta"]["warnings"] == ["query entity fallback failed: llm indisponivel"]
