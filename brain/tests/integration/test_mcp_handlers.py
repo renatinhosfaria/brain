@@ -1130,6 +1130,24 @@ async def test_mcp_search_public_schema_usa_filters(deps):
     assert search_tool.inputSchema["required"] == ["query"]
 
 
+async def test_mcp_public_tools_remove_superficie_antiga_de_memoria(deps):
+    mcp = create_mcp_server(deps)
+    tool_names = {tool.name for tool in await mcp.list_tools()}
+
+    assert {"search", "get_note", "submit_agent_note"} <= tool_names
+    assert {
+        "remember",
+        "get_memory",
+        "list_memories",
+        "update_memory",
+        "move_memory",
+        "delete_memory",
+        "merge_memories",
+        "create_namespace",
+        "list_namespaces",
+    }.isdisjoint(tool_names)
+
+
 async def test_mcp_registra_ferramentas_de_links(deps):
     mcp = create_mcp_server(deps)
     tool_names = {tool.name for tool in await mcp.list_tools()}

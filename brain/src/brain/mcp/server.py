@@ -8,10 +8,6 @@ def create_mcp_server(deps: Deps) -> FastMCP:
     mcp = FastMCP("brain", stateless_http=True, streamable_http_path="/")
 
     @mcp.tool()
-    async def remember(namespace: str, messages: list[dict], metadata: dict | None = None) -> dict:
-        return await handlers.remember(deps, namespace, messages, metadata)
-
-    @mcp.tool()
     async def search(query: str, limit: int = 10, filters: dict | None = None) -> dict:
         return await handlers.search(deps, query, limit=limit, filters=filters)
 
@@ -106,30 +102,6 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         return await handlers.fail_agent_note(deps, note_id, error)
 
     @mcp.tool()
-    async def get_memory(id: str) -> dict | None:
-        return await handlers.get_memory(deps, id)
-
-    @mcp.tool()
-    async def list_memories(namespace: str | None = None) -> list[dict]:
-        return await handlers.list_memories(deps, namespace)
-
-    @mcp.tool()
-    async def update_memory(id: str, content: str | None = None) -> dict | None:
-        return await handlers.update_memory(deps, id, content)
-
-    @mcp.tool()
-    async def move_memory(id: str, namespace: str) -> dict | None:
-        return await handlers.move_memory(deps, id, namespace)
-
-    @mcp.tool()
-    async def delete_memory(id: str) -> dict:
-        return await handlers.delete_memory(deps, id)
-
-    @mcp.tool()
-    async def merge_memories(ids: list[str], into: str | None = None) -> dict:
-        return await handlers.merge_memories(deps, ids, into)
-
-    @mcp.tool()
     async def get_document(id_or_path: str) -> dict | None:
         return await handlers.get_document(deps, id_or_path)
 
@@ -203,13 +175,5 @@ def create_mcp_server(deps: Deps) -> FastMCP:
     @mcp.tool()
     async def delete_entity(name: str, namespace: str) -> dict:
         return await handlers.delete_entity(deps, name, namespace)
-
-    @mcp.tool()
-    async def create_namespace(name: str, description: str | None = None) -> dict:
-        return await handlers.create_namespace(deps, name, description)
-
-    @mcp.tool()
-    async def list_namespaces() -> list[dict]:
-        return await handlers.list_namespaces(deps)
 
     return mcp
