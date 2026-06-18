@@ -129,6 +129,7 @@ def _doc_dict(d) -> dict | None:
 
 # ---------- Memória & recall ----------
 async def remember(deps: Deps, namespace: str, messages: list[dict], metadata: dict | None = None) -> dict:
+    _require_curator()
     s = deps.settings
     rel = git_writer.write_conversation(
         s.repo_cache_path, s.conversations_dir, namespace, messages,
@@ -146,22 +147,26 @@ async def remember(deps: Deps, namespace: str, messages: list[dict], metadata: d
 
 async def search(deps: Deps, query: str, namespace: str | None = None,
                  limit: int = 10, include_graph: bool = False) -> dict:
+    _require_client_or_curator()
     async with deps.session_factory() as s:
         return await _search(s, deps.embedder, query, namespace=namespace,
                              limit=limit, include_graph=include_graph)
 
 
 async def get_memory(deps: Deps, id: str) -> dict | None:
+    _require_curator()
     async with deps.session_factory() as s:
         return _mem_dict(await repo.get_memory(s, uuid.UUID(id)))
 
 
 async def list_memories(deps: Deps, namespace: str | None = None) -> list[dict]:
+    _require_curator()
     async with deps.session_factory() as s:
         return [_mem_dict(m) for m in await repo.list_memories(s, namespace)]
 
 
 async def update_memory(deps: Deps, id: str, content: str | None = None) -> dict | None:
+    _require_curator()
     async with deps.session_factory() as s:
         embedding = None
         if content is not None:
@@ -172,6 +177,7 @@ async def update_memory(deps: Deps, id: str, content: str | None = None) -> dict
 
 
 async def move_memory(deps: Deps, id: str, namespace: str) -> dict | None:
+    _require_curator()
     async with deps.session_factory() as s:
         m = await repo.move_memory(s, uuid.UUID(id), namespace)
         await s.commit()
@@ -179,6 +185,7 @@ async def move_memory(deps: Deps, id: str, namespace: str) -> dict | None:
 
 
 async def delete_memory(deps: Deps, id: str) -> dict:
+    _require_curator()
     async with deps.session_factory() as s:
         ok = await repo.delete_memory(s, uuid.UUID(id))
         await s.commit()
@@ -186,6 +193,7 @@ async def delete_memory(deps: Deps, id: str) -> dict:
 
 
 async def merge_memories(deps: Deps, ids: list[str], into: str | None = None) -> dict:
+    _require_curator()
     async with deps.session_factory() as s:
         target = await repo.merge_memories(
             s, [uuid.UUID(i) for i in ids], uuid.UUID(into) if into else None
@@ -196,6 +204,7 @@ async def merge_memories(deps: Deps, ids: list[str], into: str | None = None) ->
 
 # ---------- Documentos ----------
 async def get_document(deps: Deps, id_or_path: str) -> dict | None:
+    _require_curator()
     async with deps.session_factory() as s:
         try:
             doc = await repo.get_document(s, id=uuid.UUID(id_or_path))
@@ -205,11 +214,13 @@ async def get_document(deps: Deps, id_or_path: str) -> dict | None:
 
 
 async def list_documents(deps: Deps, namespace: str | None = None) -> list[dict]:
+    _require_curator()
     async with deps.session_factory() as s:
         return [_doc_dict(d) for d in await repo.list_documents(s, namespace)]
 
 
 async def reindex(deps: Deps, repo_path: str, namespace: str) -> dict:
+    _require_curator()
     job_id = await deps.queue.enqueue(
         JobType.REINDEX.value, {"namespace": namespace, "repo_path": repo_path}
     )
@@ -231,6 +242,7 @@ async def create_agent_client(
     client_slug = git_writer.slugify(slug or name, fallback="client")
     token = auth.generate_client_token(client_slug)
     token_prefix = _token_prefix(token, client_slug)
+    token_hash = auth.hash_token(token)
     permissions = ["search", "get_note", "submit_agent_note"]
 
     async with deps.session_factory() as s:
@@ -242,7 +254,7 @@ async def create_agent_client(
             name=name,
             description=description,
             token_prefix=token_prefix,
-            token_hash=auth.hash_token(token),
+            token_hash=token_hash,
             token_encrypted=auth.encrypt_token(token, key),
             permissions=permissions,
             meta=_stored_client_meta(
@@ -251,25 +263,28 @@ async def create_agent_client(
                 recommended_instructions=recommended_instructions,
             ),
         )
-        profile_path = git_writer.write_agent_client_profile(
-            deps.settings.repo_cache_path,
-            inbox_dir=deps.settings.agent_inbox_dir,
-            client_slug=client.slug,
-            client_name=client.name,
-            token_prefix=token_prefix,
-            token=token,
-            description=description,
-            capture_policy=capture_policy,
-            recommended_instructions=recommended_instructions,
-            metadata=metadata,
-            author_name=deps.settings.git_author_name,
-            author_email=deps.settings.git_author_email,
-            push=deps.settings.git_push_enabled,
-        )
+        if client.token_hash != token_hash:
+            raise ValueError(f"agent client already exists: {client_slug}")
         await s.commit()
         out = _agent_client_dict(client)
-        out.update({"token": token, "profile_path": profile_path})
-        return out
+
+    profile_path = git_writer.write_agent_client_profile(
+        deps.settings.repo_cache_path,
+        inbox_dir=deps.settings.agent_inbox_dir,
+        client_slug=client.slug,
+        client_name=client.name,
+        token_prefix=token_prefix,
+        token=token,
+        description=description,
+        capture_policy=capture_policy,
+        recommended_instructions=recommended_instructions,
+        metadata=metadata,
+        author_name=deps.settings.git_author_name,
+        author_email=deps.settings.git_author_email,
+        push=deps.settings.git_push_enabled,
+    )
+    out.update({"token": token, "profile_path": profile_path})
+    return out
 
 
 async def list_agent_clients(deps: Deps) -> list[dict]:
@@ -316,25 +331,29 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
         )
         await s.refresh(client)
         fields = _profile_fields(client)
-        profile_path = git_writer.write_agent_client_profile(
-            deps.settings.repo_cache_path,
-            inbox_dir=deps.settings.agent_inbox_dir,
-            client_slug=client.slug,
-            client_name=client.name,
-            token_prefix=token_prefix,
-            token=token,
-            description=client.description,
-            capture_policy=fields["capture_policy"],
-            recommended_instructions=fields["recommended_instructions"],
-            metadata=fields["metadata"],
-            author_name=deps.settings.git_author_name,
-            author_email=deps.settings.git_author_email,
-            push=deps.settings.git_push_enabled,
-        )
         await s.commit()
         out = _agent_client_dict(client)
-        out.update({"token": token, "profile_path": profile_path})
-        return out
+        description = client.description
+        client_name = client.name
+        client_slug = client.slug
+
+    profile_path = git_writer.write_agent_client_profile(
+        deps.settings.repo_cache_path,
+        inbox_dir=deps.settings.agent_inbox_dir,
+        client_slug=client_slug,
+        client_name=client_name,
+        token_prefix=token_prefix,
+        token=token,
+        description=description,
+        capture_policy=fields["capture_policy"],
+        recommended_instructions=fields["recommended_instructions"],
+        metadata=fields["metadata"],
+        author_name=deps.settings.git_author_name,
+        author_email=deps.settings.git_author_email,
+        push=deps.settings.git_push_enabled,
+    )
+    out.update({"token": token, "profile_path": profile_path})
+    return out
 
 
 async def disable_agent_client(deps: Deps, slug: str) -> dict:
@@ -352,33 +371,39 @@ async def disable_agent_client(deps: Deps, slug: str) -> dict:
 
 # ---------- Grafo ----------
 async def get_entity(deps: Deps, name: str, namespace: str) -> dict | None:
+    _require_curator()
     async with deps.session_factory() as s:
         return await age.get_entity(s, name, namespace)
 
 
 async def search_entities(deps: Deps, query: str, namespace: str) -> list[dict]:
+    _require_curator()
     async with deps.session_factory() as s:
         return await age.search_entities(s, query, namespace)
 
 
 async def get_related(deps: Deps, entity: str, namespace: str, depth: int = 1) -> list[dict]:
+    _require_curator()
     async with deps.session_factory() as s:
         return await age.get_related(s, entity, namespace, depth)
 
 
 async def update_entity(deps: Deps, name: str, namespace: str, props: dict) -> dict:
+    _require_curator()
     async with deps.session_factory() as s:
         await age.update_entity(s, name, namespace, props)
         return {"updated": True}
 
 
 async def merge_entities(deps: Deps, sources: list[str], into: str, namespace: str) -> dict:
+    _require_curator()
     async with deps.session_factory() as s:
         await age.merge_entities(s, sources, into, namespace)
         return {"into": into}
 
 
 async def delete_entity(deps: Deps, name: str, namespace: str) -> dict:
+    _require_curator()
     async with deps.session_factory() as s:
         await age.delete_entity(s, name, namespace)
         return {"deleted": True}
@@ -386,6 +411,7 @@ async def delete_entity(deps: Deps, name: str, namespace: str) -> dict:
 
 # ---------- Namespaces ----------
 async def create_namespace(deps: Deps, name: str, description: str | None = None) -> dict:
+    _require_curator()
     async with deps.session_factory() as s:
         ns = await repo.create_namespace(s, name, description)
         await s.commit()
@@ -393,5 +419,6 @@ async def create_namespace(deps: Deps, name: str, description: str | None = None
 
 
 async def list_namespaces(deps: Deps) -> list[dict]:
+    _require_curator()
     async with deps.session_factory() as s:
         return [{"name": n.name, "description": n.description} for n in await repo.list_namespaces(s)]
