@@ -132,3 +132,59 @@ async def test_get_relationship_paths_deduplica_e_respeita_limit(session):
     assert len(out["relationships"]) == 2
     assert len({(r["from"], r["to"], r["type"], r["seed"], r["depth"]) for r in out["relationships"]}) == 2
     assert len({(e["name"], e["seed"], e["depth"]) for e in out["entities"]}) == len(out["entities"])
+
+
+async def test_get_relationship_paths_deduplica_entidade_por_nome_no_namespace(session):
+    await age.upsert_entity(session, "A", "projeto", "curated")
+    await age.upsert_entity(session, "B", "projeto", "curated")
+    await age.upsert_entity(session, "X", "conceito", "curated")
+    await age.upsert_relation(session, "A", "X", "mentions", "curated")
+    await age.upsert_relation(session, "B", "X", "mentions", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["A", "B"], "curated", depth=1)
+
+    xs = [e for e in out["entities"] if e["name"] == "X"]
+    assert len(xs) == 1
+    assert xs[0]["depth"] == 1
+    assert xs[0]["seed"] == "A"
+
+
+async def test_get_relationship_paths_rel_types_descarta_path_com_aresta_fora(session):
+    await age.upsert_entity(session, "seed", "projeto", "curated")
+    await age.upsert_entity(session, "intermediaria", "conceito", "curated")
+    await age.upsert_entity(session, "alvo", "conceito", "curated")
+    await age.upsert_entity(session, "destino", "conceito", "curated")
+
+    await age.upsert_relation(session, "seed", "intermediaria", "drop", "curated")
+    await age.upsert_relation(session, "intermediaria", "alvo", "keep", "curated")
+    await age.upsert_relation(session, "seed", "destino", "keep", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(
+        session,
+        ["seed"],
+        "curated",
+        depth=2,
+        rel_types=["keep"],
+    )
+
+    assert {rel["type"] for rel in out["relationships"]} == {"keep"}
+    assert "intermediaria" not in {entity["name"] for entity in out["entities"]}
+    assert "alvo" not in {entity["name"] for entity in out["entities"]}
+    assert "destino" in {entity["name"] for entity in out["entities"]}
+
+
+async def test_get_relationship_paths_deep_depth_de_nodes(session):
+    await age.upsert_entity(session, "seed", "projeto", "curated")
+    await age.upsert_entity(session, "A", "conceito", "curated")
+    await age.upsert_entity(session, "B", "conceito", "curated")
+    await age.upsert_relation(session, "seed", "A", "next", "curated")
+    await age.upsert_relation(session, "A", "B", "next", "curated")
+    await session.commit()
+
+    out = await age.get_relationship_paths(session, ["seed"], "curated", depth=2)
+
+    assert {"name": "seed", "type": "projeto", "seed": "seed", "depth": 0} in out["entities"]
+    assert {"name": "A", "type": "conceito", "seed": "seed", "depth": 1} in out["entities"]
+    assert {"name": "B", "type": "conceito", "seed": "seed", "depth": 2} in out["entities"]

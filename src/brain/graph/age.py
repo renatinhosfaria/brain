@@ -227,30 +227,48 @@ async def get_relationship_paths(
             nodes = _parse_agtype_entity_list(nodes_value)
             rels = _parse_agtype_entity_list(rels_value)
             node_by_id = {node.get("id"): node for node in nodes}
+            node_index_by_id: dict[object, int] = {}
+            for idx, node in enumerate(nodes):
+                node_id = node.get("id")
+                if node_id not in node_index_by_id:
+                    node_index_by_id[node_id] = idx
 
-            for hop, node in enumerate(nodes):
-                payload = _entity_payload(node, seed=seed, depth=hop)
-                name = payload["name"]
-                if not name or name != seed:
-                    continue
-                key = (str(name), seed)
-                existing = entity_by_key.get(key)
-                if existing is None or payload["depth"] < existing["depth"]:
-                    entity_by_key[key] = payload
-
+            parsed_rels: list[tuple[int, str, str, str]] = []
+            path_ok = True
             for hop, rel in enumerate(rels, start=1):
                 rel_props = _props(rel)
                 rel_type = rel_props.get("type") or rel.get("label")
                 if allowed_types and rel_type not in allowed_types:
-                    continue
+                    path_ok = False
+                    break
+
                 from_node = node_by_id.get(rel.get("start_id")) or node_by_id.get(rel.get("startid"))
                 to_node = node_by_id.get(rel.get("end_id")) or node_by_id.get(rel.get("endid"))
                 if from_node is None or to_node is None:
-                    continue
+                    path_ok = False
+                    break
+
                 from_name = _props(from_node).get("name")
                 to_name = _props(to_node).get("name")
                 if not from_name or not to_name or not rel_type:
+                    path_ok = False
+                    break
+
+                parsed_rels.append((hop, str(from_name), str(to_name), str(rel_type)))
+
+            if not path_ok:
+                continue
+
+            for node in nodes:
+                payload = _entity_payload(node, seed=seed, depth=node_index_by_id.get(node.get("id"), len(nodes)))
+                name = payload["name"]
+                if not name:
                     continue
+                existing = entity_by_key.get((name, namespace))
+                if existing is None or payload["depth"] < existing["depth"]:
+                    entity_by_key[(name, namespace)] = payload
+
+            for hop, from_name, to_name, rel_type in parsed_rels:
                 payload = {
                     "from": from_name,
                     "to": to_name,
@@ -259,30 +277,16 @@ async def get_relationship_paths(
                     "depth": hop,
                 }
                 key = (
-                    str(payload["from"]),
-                    str(payload["to"]),
-                    str(payload["type"]),
-                    str(payload["seed"]),
-                    int(payload["depth"]),
+                    payload["from"],
+                    payload["to"],
+                    payload["type"],
+                    payload["seed"],
+                    payload["depth"],
                 )
                 if key in relationship_keys:
                     continue
                 relationship_keys.add(key)
                 relationships.append(payload)
-
-                for endpoint, endpoint_depth in (
-                    (from_node, hop),
-                    (to_node, hop),
-                ):
-                    entity_payload = _entity_payload(endpoint, seed=seed, depth=endpoint_depth)
-                    entity_name = entity_payload["name"]
-                    if entity_name == seed:
-                        entity_payload["depth"] = 0
-                    if entity_name:
-                        entity_key = (str(entity_name), seed)
-                        existing = entity_by_key.get(entity_key)
-                        if existing is None or entity_payload["depth"] < existing["depth"]:
-                            entity_by_key[entity_key] = entity_payload
 
                 if len(relationships) >= bounded_limit:
                     break
@@ -295,7 +299,7 @@ async def get_relationship_paths(
         for entity in entity_by_key.values()
         if entity["depth"] == 0 or entity["name"] in filtered_entity_names
     ]
-    entities.sort(key=lambda e: (e["seed"], e["depth"], e["name"]))
+    entities.sort(key=lambda e: (e["depth"], e["seed"], e["name"]))
     relationships.sort(key=lambda r: (r["seed"], r["depth"], r["from"], r["to"], r["type"]))
     return {"entities": entities, "relationships": relationships}
 
