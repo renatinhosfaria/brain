@@ -1175,7 +1175,14 @@ async def test_deep_search_permite_principal_client_e_retorna_grafo_estruturado(
     assert out["query"] == "brain"
     assert out["results"][0]["id"] == str(doc.id)
     assert out["graph"]["relationships"] == [
-        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        }
     ]
     entities = {entity["name"]: entity for entity in out["graph"]["entities"]}
     assert entities["brain"]["matched_by"] == "substring"
@@ -1183,6 +1190,8 @@ async def test_deep_search_permite_principal_client_e_retorna_grafo_estruturado(
     assert out["meta"]["seed_strategy"] == "substring"
     assert out["meta"]["depth"] == 1
     assert out["meta"]["max_entities"] == 3
+    assert out["meta"]["namespace_strategy"] == "all"
+    assert out["meta"]["namespaces"] == ["curated"]
 
 
 async def test_deep_search_rejeita_principal_invalido(deps):
@@ -1195,9 +1204,82 @@ async def test_deep_search_rejeita_principal_invalido(deps):
         )
 
 
-async def test_deep_search_rejeita_namespace_customizado_para_client(deps):
-    with pytest.raises(PermissionError, match="curator required for non-curated namespace"):
-        await _as_client(handlers.deep_search, deps, "brain", namespace="tenant-b")
+async def test_deep_search_cliente_pode_consultar_namespace_customizado(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-client-tenant.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-client-tenant",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "tenant-b")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "tenant-b")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "tenant-b")
+        await s.commit()
+
+    out = await _as_client(handlers.deep_search, deps, "brain", namespace="tenant-b")
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["graph"]["relationships"] == [
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "tenant-b",
+            "seed": "brain",
+            "depth": 1,
+        }
+    ]
+    assert out["meta"]["namespace_strategy"] == "single"
+    assert out["meta"]["namespaces"] == ["tenant-b"]
+
+
+async def test_deep_search_cliente_sem_namespace_busca_grafo_global(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-global.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-global-client",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "tenant-b")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "tenant-b")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "tenant-b")
+        await s.commit()
+
+    out = await _as_client(handlers.deep_search, deps, "brain")
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["graph"]["relationships"] == [
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "tenant-b",
+            "seed": "brain",
+            "depth": 1,
+        }
+    ]
+    assert out["meta"]["namespace_strategy"] == "all"
+    assert out["meta"]["namespaces"] == ["tenant-b"]
 
 
 async def test_deep_search_permite_namespace_customizado_para_curator(deps):
@@ -1226,7 +1308,14 @@ async def test_deep_search_permite_namespace_customizado_para_curator(deps):
 
     assert out["results"][0]["id"] == str(doc.id)
     assert out["graph"]["relationships"] == [
-        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "tenant-b",
+            "seed": "brain",
+            "depth": 1,
+        }
     ]
 
 
@@ -1310,7 +1399,14 @@ async def test_deep_search_normaliza_rel_types_no_handler(deps):
     assert out["results"][0]["id"] == str(doc.id)
     assert out["meta"]["rel_types"] == ["curates", "supports"]
     assert out["graph"]["relationships"] == [
-        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        }
     ]
 
 

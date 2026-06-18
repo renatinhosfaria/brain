@@ -19,7 +19,7 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         max_entities: int = 3,
         rel_types: list[str] | None = None,
         filters: dict | None = None,
-        namespace: str = "curated",
+        namespace: str | None = None,
     ) -> dict:
         return await handlers.deep_search(
             deps,

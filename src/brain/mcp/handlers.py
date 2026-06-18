@@ -84,6 +84,13 @@ def _normalize_rel_types(rel_types) -> list[str] | None:  # noqa: ANN001
     return normalized or None
 
 
+def _normalize_optional_namespace(namespace) -> str | None:  # noqa: ANN001
+    if not isinstance(namespace, str):
+        return None
+    namespace = namespace.strip()
+    return namespace or None
+
+
 def _require_token_encryption_key(settings) -> str:
     key = settings.brain_token_encryption_key
     if not key:
@@ -550,9 +557,9 @@ async def deep_search(
     max_entities: int = 3,
     rel_types: list[str] | None = None,
     filters: dict | None = None,
-    namespace: str = "curated",
+    namespace: str | None = None,
 ) -> dict:
-    principal = _require_deep_search_principal()
+    _require_deep_search_principal()
     resolved_limit = repo.normalize_search_limit(10 if limit is None else limit)
     resolved_depth = _bounded_int(depth, name="depth", min_value=1, max_value=3)
     resolved_max_entities = _bounded_int(
@@ -562,9 +569,7 @@ async def deep_search(
         max_value=3,
     )
     resolved_rel_types = _normalize_rel_types(rel_types)
-    resolved_namespace = namespace if isinstance(namespace, str) else "curated"
-    if principal.type == "client" and resolved_namespace != "curated":
-        raise PermissionError("curator required for non-curated namespace")
+    resolved_namespace = _normalize_optional_namespace(namespace)
 
     async with deps.session_factory() as s:
         return await _deep_search(
