@@ -50,6 +50,13 @@ def _require_client_or_curator():
     return auth.get_current_principal()
 
 
+def _require_deep_search_principal():
+    p = auth.get_current_principal()
+    if p.type not in {"client", "curator"}:
+        raise PermissionError("client or curator required")
+    return p
+
+
 def _bounded_int(value, *, name: str, min_value: int, max_value: int) -> int:  # noqa: ANN001
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{name} deve ser um inteiro entre {min_value} e {max_value}")
@@ -526,7 +533,7 @@ async def deep_search(
     filters: dict | None = None,
     namespace: str = "curated",
 ) -> dict:
-    _require_client_or_curator()
+    _require_deep_search_principal()
     resolved_limit = repo.normalize_search_limit(10 if limit is None else limit)
     resolved_depth = _bounded_int(depth, name="depth", min_value=1, max_value=3)
     resolved_max_entities = _bounded_int(

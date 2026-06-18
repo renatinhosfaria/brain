@@ -1177,6 +1177,16 @@ async def test_deep_search_permite_principal_client_e_retorna_grafo_estruturado(
     assert out["meta"]["max_entities"] == 3
 
 
+async def test_deep_search_rejeita_principal_invalido(deps):
+    with pytest.raises(PermissionError, match="client or curator required"):
+        await _as_principal(
+            auth.Principal("service", "svc", "Service"),
+            handlers.deep_search,
+            deps,
+            "brain",
+        )
+
+
 @pytest.mark.parametrize("depth", [False, True, 0, 4, "1", 1.5])
 async def test_deep_search_rejeita_depth_invalido_no_handler(deps, depth):
     with pytest.raises(ValueError, match="depth"):
