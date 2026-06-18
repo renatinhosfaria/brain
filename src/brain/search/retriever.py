@@ -33,17 +33,18 @@ def _dedupe_entities(entities: list[dict], max_entities: int) -> list[dict]:
     max_entities = _valid_max_entities(max_entities)
     if max_entities == 0:
         return []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     result: list[dict] = []
     for entity in entities:
         name = str(entity.get("name") or "").strip()
-        if not name:
+        namespace = str(entity.get("namespace") or "").strip()
+        if not name or not namespace:
             continue
-        key = name.casefold()
+        key = (name.casefold(), namespace)
         if key in seen:
             continue
         seen.add(key)
-        result.append({"name": name, "type": entity.get("type")})
+        result.append({"name": name, "type": entity.get("type"), "namespace": namespace})
         if len(result) >= max_entities:
             break
     return result
@@ -55,10 +56,20 @@ def _valid_max_entities(value) -> int:  # noqa: ANN001
     return value
 
 
+def _graph_namespaces(graph: dict) -> list[str]:
+    namespaces = {
+        str(item.get("namespace"))
+        for collection in (graph.get("entities", []), graph.get("relationships", []))
+        for item in collection
+        if item.get("namespace")
+    }
+    return sorted(namespaces)
+
+
 async def _resolve_seed_entities(
     session,
     query: str,
-    namespace: str,
+    namespace: str | None,
     max_entities: int,
 ) -> tuple[list[dict], str]:
     direct = _dedupe_entities(
@@ -74,7 +85,7 @@ async def _resolve_llm_entities(
     session,
     llm,
     query: str,
-    namespace: str,
+    namespace: str | None,
     max_entities: int,
 ) -> tuple[list[dict], list[str]]:
     try:
@@ -105,10 +116,11 @@ async def deep_search(
     max_entities: int = 3,
     rel_types: list[str] | None = None,
     filters: dict | None = None,
-    namespace: str = "curated",
+    namespace: str | None = None,
 ) -> dict:
     limit = repo.normalize_search_limit(limit)
     resolved_max_entities = _valid_max_entities(max_entities)
+    namespace_strategy = "all" if namespace is None else "single"
     source_filter = (filters or {}).get("source")
     if source_filter not in (None, "document", "curated", "note"):
         return {
@@ -119,6 +131,8 @@ async def deep_search(
                 "depth": depth,
                 "max_entities": resolved_max_entities,
                 "seed_strategy": "none",
+                "namespace_strategy": namespace_strategy,
+                "namespaces": [],
                 "rel_types": rel_types,
                 "warnings": [],
             },
@@ -137,6 +151,8 @@ async def deep_search(
                 "depth": depth,
                 "max_entities": resolved_max_entities,
                 "seed_strategy": "none",
+                "namespace_strategy": namespace_strategy,
+                "namespaces": [],
                 "rel_types": rel_types,
                 "warnings": [],
             },
@@ -163,21 +179,26 @@ async def deep_search(
             seed_strategy = "llm"
 
     graph = {"entities": [], "relationships": []}
+    namespaces = []
     if seeds:
         graph = await age.get_relationship_paths(
             session,
-            [seed["name"] for seed in seeds],
+            seeds,
             namespace,
             depth=depth,
             rel_types=rel_types,
             limit=50,
         )
-        seed_names = {seed["name"] for seed in seeds}
+        seed_keys = {(seed["name"], seed["namespace"]) for seed in seeds}
         for entity in graph["entities"]:
-            if entity["depth"] == 0 and entity["name"] in seed_names:
+            if (
+                entity["depth"] == 0
+                and (entity["name"], entity.get("namespace")) in seed_keys
+            ):
                 entity["matched_by"] = seed_strategy
             else:
                 entity["matched_by"] = "relationship"
+        namespaces = _graph_namespaces(graph)
 
     return {
         "query": query,
@@ -187,6 +208,8 @@ async def deep_search(
             "depth": depth,
             "max_entities": resolved_max_entities,
             "seed_strategy": seed_strategy,
+            "namespace_strategy": namespace_strategy,
+            "namespaces": namespaces,
             "rel_types": rel_types,
             "warnings": warnings,
         },

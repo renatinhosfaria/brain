@@ -317,7 +317,14 @@ async def test_deep_search_combina_chunks_e_grafo_por_fast_path(session):
     assert out["query"] == "brain"
     assert out["results"][0]["id"] == str(doc.id)
     assert out["graph"]["relationships"] == [
-        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        }
     ]
     entities = {entity["name"]: entity for entity in out["graph"]["entities"]}
     assert entities["brain"]["matched_by"] == "substring"
@@ -331,9 +338,9 @@ async def test_resolve_seed_entities_passa_limit_para_busca_direta(monkeypatch):
     async def fake_search_entities(session, query, namespace, limit=None):
         calls.append((query, namespace, limit))
         return [
-            {"name": "Brain Zeta", "type": "projeto"},
-            {"name": "Brain Alpha", "type": "projeto"},
-            {"name": "Brain Beta", "type": "projeto"},
+            {"name": "Brain Zeta", "type": "projeto", "namespace": "curated"},
+            {"name": "Brain Alpha", "type": "projeto", "namespace": "curated"},
+            {"name": "Brain Beta", "type": "projeto", "namespace": "curated"},
         ]
 
     monkeypatch.setattr(retriever.age, "search_entities", fake_search_entities)
@@ -366,12 +373,15 @@ async def test_deep_search_seleciona_seeds_diretos_em_ordem_deterministica_e_lim
     emb = FakeEmbedder({"Brain": _vec(0.11)})
     out = await deep_search(session, emb, None, "Brain", depth=1, max_entities=2)
 
-    matched_seed_names = {
-        entity["name"]
+    matched_seed_keys = {
+        (entity["name"], entity["namespace"])
         for entity in out["graph"]["entities"]
         if entity.get("matched_by") == "substring"
     }
-    assert matched_seed_names == {"Brain Alpha", "Brain Beta"}
+    assert matched_seed_keys == {
+        ("Brain Alpha", "curated"),
+        ("Brain Beta", "curated"),
+    }
     assert {rel["seed"] for rel in out["graph"]["relationships"]} == {
         "Brain Alpha",
         "Brain Beta",
@@ -517,5 +527,130 @@ async def test_deep_search_namespace_controla_so_grafo(session):
     assert out["results"][0]["id"] == str(doc.id)
     assert {result["namespace"] for result in out["results"]} == {"curated"}
     assert out["graph"]["relationships"] == [
-        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "tenant-b",
+            "seed": "brain",
+            "depth": 1,
+        }
+    ]
+
+
+async def test_deep_search_sem_namespace_busca_grafo_global_em_lista_unica(session):
+    doc = await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+
+    await age.upsert_entity(session, "brain", "projeto", "trabalho")
+    await age.upsert_entity(session, "Renato", "pessoa", "trabalho")
+    await age.upsert_relation(session, "Renato", "brain", "owns", "trabalho")
+    await session.commit()
+
+    emb = FakeEmbedder({"brain": _vec(0.11)})
+    out = await deep_search(session, emb, None, "brain", namespace=None, depth=1, max_entities=3)
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert {result["namespace"] for result in out["results"]} == {"curated"}
+    assert out["graph"]["relationships"] == [
+        {
+            "from": "Hermes",
+            "to": "brain",
+            "type": "curates",
+            "namespace": "curated",
+            "seed": "brain",
+            "depth": 1,
+        },
+        {
+            "from": "Renato",
+            "to": "brain",
+            "type": "owns",
+            "namespace": "trabalho",
+            "seed": "brain",
+            "depth": 1,
+        },
+    ]
+    assert out["meta"]["namespace_strategy"] == "all"
+    assert out["meta"]["namespaces"] == ["curated", "trabalho"]
+
+
+async def test_deep_search_namespace_explicito_limita_apenas_grafo(session):
+    doc = await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "curated")
+    await age.upsert_entity(session, "Hermes", "agente", "curated")
+    await age.upsert_relation(session, "Hermes", "brain", "curates", "curated")
+
+    await age.upsert_entity(session, "brain", "projeto", "trabalho")
+    await age.upsert_entity(session, "Renato", "pessoa", "trabalho")
+    await age.upsert_relation(session, "Renato", "brain", "owns", "trabalho")
+    await session.commit()
+
+    emb = FakeEmbedder({"brain": _vec(0.11)})
+    out = await deep_search(session, emb, None, "brain", namespace="trabalho", depth=1)
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert {result["namespace"] for result in out["results"]} == {"curated"}
+    assert out["graph"]["relationships"] == [
+        {
+            "from": "Renato",
+            "to": "brain",
+            "type": "owns",
+            "namespace": "trabalho",
+            "seed": "brain",
+            "depth": 1,
+        }
+    ]
+    assert out["meta"]["namespace_strategy"] == "single"
+    assert out["meta"]["namespaces"] == ["trabalho"]
+
+
+async def test_deep_search_fallback_llm_global_resolve_seed_em_qualquer_namespace(session):
+    await _add_document_chunk(
+        session,
+        namespace="curated",
+        repo_path="projetos/brain.md",
+        text="nota curada sobre brain",
+        seed=0.10,
+    )
+    await age.upsert_entity(session, "brain", "projeto", "trabalho")
+    await age.upsert_entity(session, "Renato", "pessoa", "trabalho")
+    await age.upsert_relation(session, "Renato", "brain", "owns", "trabalho")
+    await session.commit()
+
+    emb = FakeEmbedder({"Como o projeto se relaciona com o dono?": _vec(0.11)})
+    llm = FakeLLM({"entities": [{"name": "brain"}]})
+    out = await deep_search(
+        session,
+        emb,
+        llm,
+        "Como o projeto se relaciona com o dono?",
+        namespace=None,
+    )
+
+    assert out["meta"]["seed_strategy"] == "llm"
+    assert out["meta"]["namespace_strategy"] == "all"
+    assert out["meta"]["namespaces"] == ["trabalho"]
+    assert out["graph"]["relationships"] == [
+        {
+            "from": "Renato",
+            "to": "brain",
+            "type": "owns",
+            "namespace": "trabalho",
+            "seed": "brain",
+            "depth": 1,
+        }
     ]
