@@ -1187,6 +1187,41 @@ async def test_deep_search_rejeita_principal_invalido(deps):
         )
 
 
+async def test_deep_search_rejeita_namespace_customizado_para_client(deps):
+    with pytest.raises(PermissionError, match="curator required for non-curated namespace"):
+        await _as_client(handlers.deep_search, deps, "brain", namespace="tenant-b")
+
+
+async def test_deep_search_permite_namespace_customizado_para_curator(deps):
+    async with deps.session_factory() as s:
+        doc = await repo.upsert_document(
+            s,
+            namespace="curated",
+            repo_path="projetos/brain-tenant.md",
+            title=None,
+            raw_content="nota curada sobre brain",
+            content_hash="deep-search-tenant",
+            commit_sha=None,
+        )
+        await repo.replace_chunks(
+            s,
+            doc.id,
+            [{"ordinal": 0, "text": "nota curada sobre brain", "token_count": 1}],
+            [[0.2] * 2000],
+        )
+        await handlers.age.upsert_entity(s, "brain", "projeto", "tenant-b")
+        await handlers.age.upsert_entity(s, "Hermes", "agente", "tenant-b")
+        await handlers.age.upsert_relation(s, "Hermes", "brain", "curates", "tenant-b")
+        await s.commit()
+
+    out = await _as_curator(handlers.deep_search, deps, "brain", namespace="tenant-b")
+
+    assert out["results"][0]["id"] == str(doc.id)
+    assert out["graph"]["relationships"] == [
+        {"from": "Hermes", "to": "brain", "type": "curates", "seed": "brain", "depth": 1}
+    ]
+
+
 @pytest.mark.parametrize("depth", [False, True, 0, 4, "1", 1.5])
 async def test_deep_search_rejeita_depth_invalido_no_handler(deps, depth):
     with pytest.raises(ValueError, match="depth"):

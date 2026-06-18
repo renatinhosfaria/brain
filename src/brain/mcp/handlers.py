@@ -533,7 +533,7 @@ async def deep_search(
     filters: dict | None = None,
     namespace: str = "curated",
 ) -> dict:
-    _require_deep_search_principal()
+    principal = _require_deep_search_principal()
     resolved_limit = repo.normalize_search_limit(10 if limit is None else limit)
     resolved_depth = _bounded_int(depth, name="depth", min_value=1, max_value=3)
     resolved_max_entities = _bounded_int(
@@ -543,6 +543,9 @@ async def deep_search(
         max_value=3,
     )
     resolved_rel_types = None if rel_types == [] else rel_types
+    resolved_namespace = namespace if isinstance(namespace, str) else "curated"
+    if principal.type == "client" and resolved_namespace != "curated":
+        raise PermissionError("curator required for non-curated namespace")
 
     async with deps.session_factory() as s:
         return await _deep_search(
@@ -555,7 +558,7 @@ async def deep_search(
             max_entities=resolved_max_entities,
             rel_types=resolved_rel_types,
             filters=filters if isinstance(filters, dict) else None,
-            namespace=namespace if isinstance(namespace, str) else "curated",
+            namespace=resolved_namespace,
         )
 
 
