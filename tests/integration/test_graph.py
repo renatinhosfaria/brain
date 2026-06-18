@@ -129,9 +129,13 @@ async def test_get_relationship_paths_deduplica_e_respeita_limit(session):
         limit=2,
     )
 
+    assert [(rel["to"], rel["depth"]) for rel in out["relationships"]] == [
+        ("Entidade 0", 1),
+        ("Entidade 1", 1),
+    ]
     assert len(out["relationships"]) == 2
-    assert len({(r["from"], r["to"], r["type"], r["seed"], r["depth"]) for r in out["relationships"]}) == 2
-    assert len({(e["name"], e["seed"], e["depth"]) for e in out["entities"]}) == len(out["entities"])
+    assert len(out["entities"]) == 3
+    assert {e["name"] for e in out["entities"]} == {"brain", "Entidade 0", "Entidade 1"}
 
 
 async def test_get_relationship_paths_deduplica_entidade_por_nome_no_namespace(session):

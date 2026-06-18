@@ -214,12 +214,13 @@ async def get_relationship_paths(
     relationship_keys: set[tuple[str, str, str, str, int]] = set()
 
     for seed in seed_names:
-        if len(relationships) >= bounded_limit:
-            break
         q = (
             f"SELECT * FROM cypher('brain', $cy$ "
             f"MATCH p = (s:Entity {{name: {_lit(seed)}, namespace: {_lit(namespace)}}})"
             f"-[*1..{bounded_depth}]-(n:Entity) "
+            f"WITH p, n "
+            f"ORDER BY n.name "
+            f"LIMIT {bounded_limit} "
             f"RETURN nodes(p), relationships(p) $cy$) AS (nodes agtype, rels agtype)"
         )
         rows = (await session.execute(text(q))).all()
@@ -288,20 +289,17 @@ async def get_relationship_paths(
                 relationship_keys.add(key)
                 relationships.append(payload)
 
-                if len(relationships) >= bounded_limit:
-                    break
-            if len(relationships) >= bounded_limit:
-                break
+    relationships.sort(key=lambda r: (r["seed"], r["depth"], r["from"], r["to"], r["type"]))
+    limited_relationships = relationships[:bounded_limit]
 
-    filtered_entity_names = {rel["from"] for rel in relationships} | {rel["to"] for rel in relationships}
+    filtered_entity_names = {rel["from"] for rel in limited_relationships} | {rel["to"] for rel in limited_relationships}
     entities = [
         entity
-        for entity in entity_by_key.values()
-        if entity["depth"] == 0 or entity["name"] in filtered_entity_names
+        for key, entity in entity_by_key.items()
+        if key[0] in filtered_entity_names
     ]
-    entities.sort(key=lambda e: (e["depth"], e["seed"], e["name"]))
-    relationships.sort(key=lambda r: (r["seed"], r["depth"], r["from"], r["to"], r["type"]))
-    return {"entities": entities, "relationships": relationships}
+    entities.sort(key=lambda e: (e["seed"], e["depth"], e["name"]))
+    return {"entities": entities, "relationships": limited_relationships}
 
 
 async def update_entity(
