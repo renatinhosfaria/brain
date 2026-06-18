@@ -2,6 +2,7 @@ import subprocess
 
 import sqlalchemy as sa
 from sqlalchemy import text
+from cryptography.fernet import Fernet
 
 
 def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
@@ -9,6 +10,8 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk")
     monkeypatch.setenv("GITHUB_TOKEN", "gh")
     monkeypatch.setenv("BRAIN_AUTH_TOKEN", "t")
+    monkeypatch.setenv("BRAIN_CURATOR_TOKEN", "curator")
+    monkeypatch.setenv("BRAIN_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("WEBHOOK_SECRET", "w")
     monkeypatch.setenv("REPO_URL", "https://x/y.git")
 
@@ -94,3 +97,81 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
     assert "ix_agent_clients_slug" not in index_names
     assert "ix_agent_clients_token_hash" not in index_names
     assert "ix_agent_notes_repo_path" not in index_names
+
+
+def test_alembic_upgrade_de_legacy_0002_cria_inbox(sync_dsn, async_dsn, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", async_dsn)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh")
+    monkeypatch.setenv("BRAIN_AUTH_TOKEN", "t")
+    monkeypatch.setenv("BRAIN_CURATOR_TOKEN", "curator")
+    monkeypatch.setenv("BRAIN_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("WEBHOOK_SECRET", "w")
+    monkeypatch.setenv("REPO_URL", "https://x/y.git")
+
+    engine = sa.create_engine(sync_dsn)
+    with engine.begin() as conn:
+        for t in [
+            "note_links",
+            "outbox_events",
+            "agent_notes",
+            "agent_clients",
+            "ingestion_jobs",
+            "memories",
+            "chunks",
+            "documents",
+            "namespaces",
+            "alembic_version",
+        ]:
+            conn.execute(text(f"DROP TABLE IF EXISTS {t} CASCADE"))
+
+    result = subprocess.run(
+        ["uv", "run", "alembic", "upgrade", "0001"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE ingestion_jobs "
+                "ADD COLUMN IF NOT EXISTS run_after TIMESTAMP WITH TIME ZONE"
+            )
+        )
+        conn.execute(text("UPDATE alembic_version SET version_num='0002'"))
+
+    result = subprocess.run(
+        ["uv", "run", "alembic", "upgrade", "head"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    with engine.connect() as conn:
+        tables = set(
+            conn.execute(
+                text("SELECT tablename FROM pg_tables WHERE schemaname='public'")
+            ).scalars()
+        )
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        has_run_after = conn.execute(
+            text(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema='public'
+                  AND table_name='ingestion_jobs'
+                  AND column_name='run_after'
+                """
+            )
+        ).scalar_one_or_none()
+
+    assert {
+        "agent_clients",
+        "agent_notes",
+        "outbox_events",
+        "note_links",
+    } <= tables
+    assert has_run_after == 1
+    assert version == "0003"

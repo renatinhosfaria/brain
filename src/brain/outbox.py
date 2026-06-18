@@ -14,6 +14,11 @@ def sign_webhook(secret: str, timestamp: str, body: bytes) -> str:
     return f"sha256={digest}"
 
 
+def sign_webhook_body(secret: str, body: bytes) -> str:
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
 def _serialize_payload(payload: dict) -> bytes:
     return json.dumps(
         payload,
@@ -29,15 +34,43 @@ def _retry_delay(attempts: int) -> dt.timedelta:
     return dt.timedelta(seconds=seconds)
 
 
+def _webhook_payload(
+    *,
+    event_id,
+    event_type: str,
+    created_at: dt.datetime | None,
+    attempt: int,
+    payload: dict,
+) -> dict:
+    created = created_at or dt.datetime.now(dt.UTC)
+    return {
+        **payload,
+        "event_id": str(event_id),
+        "event_type": event_type,
+        "created_at": created.isoformat(),
+        "attempt": attempt,
+    }
+
+
 async def _post_event(
     webhook_url: str,
     webhook_secret: str,
     event_id,
     event_type: str,
+    created_at: dt.datetime | None,
+    attempt: int,
     payload: dict,
     client,
 ) -> str | None:
-    body = _serialize_payload(payload)
+    body = _serialize_payload(
+        _webhook_payload(
+            event_id=event_id,
+            event_type=event_type,
+            created_at=created_at,
+            attempt=attempt,
+            payload=payload,
+        )
+    )
     timestamp = dt.datetime.now(dt.UTC).isoformat()
     headers = {
         "Content-Type": "application/json",
@@ -45,6 +78,7 @@ async def _post_event(
         "X-Brain-Event-Type": event_type,
         "X-Brain-Timestamp": timestamp,
         "X-Brain-Signature": sign_webhook(webhook_secret, timestamp, body),
+        "X-Hub-Signature-256": sign_webhook_body(webhook_secret, body),
     }
 
     close_client = client is None
@@ -82,6 +116,7 @@ async def deliver_once(session_factory, settings, *, worker_id="outbox", client=
             return False
         event_id = event.id
         event_type = event.type
+        created_at = event.created_at
         payload = event.payload
         attempts = event.attempts
         claim = repositories.outbox_claim_token(event)
@@ -93,6 +128,8 @@ async def deliver_once(session_factory, settings, *, worker_id="outbox", client=
             webhook_secret,
             event_id,
             event_type,
+            created_at,
+            attempts,
             payload,
             client,
         )

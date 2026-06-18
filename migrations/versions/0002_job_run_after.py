@@ -1,12 +1,12 @@
 """adiciona backoff na fila de ingestao
 
-Revision ID: 0003
-Revises: 0002
+Revision ID: 0002
+Revises: 0001
 """
 from alembic import op
 
-revision = "0003"
-down_revision = "0002"
+revision = "0002"
+down_revision = "0001"
 branch_labels = None
 depends_on = None
 

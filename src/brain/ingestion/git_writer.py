@@ -587,5 +587,5 @@ def _push_with_retry(dest: Path, retries: int, token: str | None = None) -> None
     raise RuntimeError(f"push falhou após {retries} tentativas: {last_error}")
 
 
-def push_repo(dest: str | Path, *, retries: int = 3) -> None:
-    _push_with_retry(Path(dest), retries)
+def push_repo(dest: str | Path, *, retries: int = 3, token: str | None = None) -> None:
+    _push_with_retry(Path(dest), retries, token=token)

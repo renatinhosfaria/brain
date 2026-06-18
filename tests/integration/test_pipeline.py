@@ -1,4 +1,5 @@
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy import text
 
@@ -13,7 +14,9 @@ from brain.storage.models import Base, Chunk
 def _settings() -> Settings:
     return Settings(
         database_url="x", openai_api_key="x", github_token="x",
-        brain_auth_token="x", webhook_secret="x", repo_url="x",
+        brain_auth_token="x", brain_curator_token="curator",
+        brain_token_encryption_key=Fernet.generate_key().decode(),
+        webhook_secret="x", repo_url="x",
     )
 
 

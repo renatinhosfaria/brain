@@ -4,6 +4,7 @@ import hmac
 import anyio
 import pytest_asyncio
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from brain import main
@@ -27,7 +28,9 @@ async def prepared_db(async_dsn):
 def _settings(async_dsn, tmp_path) -> Settings:
     return Settings(
         database_url=async_dsn, openai_api_key="x", github_token="x",
-        brain_auth_token="tok", webhook_secret="seg", repo_url="https://x/y.git",
+        brain_auth_token="tok", brain_curator_token="curator-token",
+        brain_token_encryption_key=Fernet.generate_key().decode(),
+        webhook_secret="seg", repo_url="https://x/y.git",
         repo_cache_path=str(tmp_path), git_push_enabled=False,
     )
 
@@ -135,7 +138,7 @@ def test_mcp_streamable_http_exposto_em_mcp(async_dsn, tmp_path, prepared_db):
         },
     }
     headers = {
-        "Authorization": "Bearer tok",
+        "Authorization": "Bearer curator-token",
         "Accept": "application/json, text/event-stream",
     }
     with TestClient(app, base_url="http://localhost:8000") as client:

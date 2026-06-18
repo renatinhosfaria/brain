@@ -401,7 +401,7 @@ async def _index_curated_note(
 
 def _push_curated_note_if_enabled(deps: Deps) -> None:
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path)
+        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
 
 
 def _validate_agent_note_transition(note, *, action: str, allowed_statuses: set[str]) -> None:
@@ -739,16 +739,17 @@ async def submit_agent_note(
             await s.flush()
 
             event_payload = {
-                "event_type": "agent_note.created",
-                "type": "agent_note.created",
                 "agent_note": {
                     "id": note_id,
                     "client_slug": client.slug,
+                    "client_name": client.name,
                     "repo_path": repo_path,
+                    "title": title,
+                    "suggested_namespace": suggested_namespace,
+                    "metadata": metadata or {},
                 },
             }
             event = await repo.create_outbox_event(s, "agent_note.created", event_payload)
-            event.payload = {"event_id": str(event.id), **event_payload}
             await s.flush()
             await s.commit()
             result = {
@@ -762,7 +763,7 @@ async def submit_agent_note(
             raise
 
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path)
+        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
     return result
 
 
@@ -999,7 +1000,7 @@ async def create_agent_client(
             raise
 
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path)
+        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
     out.update({"token": token, "profile_path": profile_path})
     return out
 
@@ -1071,7 +1072,7 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
             raise
 
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path)
+        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
     out.update({"token": token, "profile_path": profile_path})
     return out
 

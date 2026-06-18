@@ -2,7 +2,7 @@ import hashlib
 import hmac
 
 from brain.main import verify_signature
-from brain.outbox import sign_webhook
+from brain.outbox import sign_webhook, sign_webhook_body
 
 
 def _sig(secret: str, body: bytes) -> str:
@@ -33,3 +33,15 @@ def test_assinatura_outbox_usa_timestamp_ponto_e_body_bruto():
     ).hexdigest()
 
     assert sign_webhook("segredo", timestamp, body) == expected
+
+
+def test_assinatura_outbox_compatibilidade_hermes_usa_body_bruto():
+    body = b'{"note_id":"note-1","status":"created"}'
+
+    expected = "sha256=" + hmac.new(
+        b"segredo",
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert sign_webhook_body("segredo", body) == expected

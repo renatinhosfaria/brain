@@ -36,11 +36,11 @@ curl https://SEU_DOMINIO/health
 Por padrão o Caddy publica `80` e `443`. Se já houver outro proxy no host,
 ajuste `BRAIN_HTTP_PORT` e `BRAIN_HTTPS_PORT` no `.env`.
 
-O endpoint `/health` é público para healthchecks. O endpoint `/status` exige o
-token de curador:
+O endpoint `/health` é público para healthchecks. O endpoint `/status` exige
+`BRAIN_AUTH_TOKEN`:
 
 ```bash
-curl -H "Authorization: Bearer $BRAIN_CURATOR_TOKEN" https://SEU_DOMINIO/status
+curl -H "Authorization: Bearer $BRAIN_AUTH_TOKEN" https://SEU_DOMINIO/status
 ```
 
 Para backups agendados do Postgres, suba também o profile `backup`:
@@ -85,10 +85,8 @@ Endpoint: https://SEU_DOMINIO/mcp
 Authorization: Bearer <BRAIN_CURATOR_TOKEN>
 ```
 
-`BRAIN_AUTH_TOKEN` é apenas fallback de migração enquanto
-`BRAIN_CURATOR_TOKEN` estiver ausente. Depois que `BRAIN_CURATOR_TOKEN` é
-configurado, o Hermes deve usar esse token; `BRAIN_AUTH_TOKEN` não funciona como
-credencial paralela de curador.
+`BRAIN_AUTH_TOKEN` não autentica no MCP e não é credencial paralela de curador.
+Ele protege apenas `/status`. O Hermes deve usar `BRAIN_CURATOR_TOKEN`.
 
 ## Criar e configurar clientes
 
@@ -145,9 +143,10 @@ clientes, e na resolução de links do vault.
 
 Quando um cliente chama `submit_agent_note`, o brain grava a nota em `_agents/`,
 cria um evento `agent_note.created` no outbox e faz push se
-`GIT_PUSH_ENABLED=true`. O evento é apenas uma referência: id da nota, slug do
-cliente e caminho do arquivo. O conteúdo continua no vault/Postgres e não é
-enviado no webhook.
+`GIT_PUSH_ENABLED=true`. O webhook envia o envelope do evento (`event_id`,
+`event_type`, `created_at`, `attempt`) e metadados da nota bruta: id, slug e
+nome do cliente, caminho, título, namespace sugerido e metadata. O conteúdo
+continua no vault/Postgres e não é enviado no webhook.
 
 `_agents/` não é uma barreira de confidencialidade. Notas brutas podem conter
 contexto sensível; mesmo sem indexação e sem exposição para clientes, elas são
@@ -166,8 +165,10 @@ HERMES_WEBHOOK_SECRET=...
 
 O worker entrega eventos pendentes do outbox para `HERMES_WEBHOOK_URL` com
 assinatura HMAC em `X-Brain-Signature`, tipo em `X-Brain-Event-Type`, id em
-`X-Brain-Event-Id` e timestamp em `X-Brain-Timestamp`. Falhas são persistidas e
-retentadas com backoff até o limite de tentativas configurado.
+`X-Brain-Event-Id` e timestamp em `X-Brain-Timestamp`. Ele tambem envia
+`X-Hub-Signature-256` com HMAC do corpo bruto para compatibilidade com o webhook
+publico do Hermes. Falhas são persistidas e retentadas com backoff até o limite
+de tentativas configurado.
 
 ## Exemplo de instruções para um cliente
 

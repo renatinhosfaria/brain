@@ -58,7 +58,11 @@ async def test_resolve_principal_accepts_curator_token():
     assert principal == auth.Principal(type="curator", slug="hermes", name="Hermes")
 
 
-async def test_resolve_principal_accepts_legacy_auth_token_when_curator_token_missing():
+async def test_resolve_principal_rejects_legacy_auth_token_without_curator(monkeypatch):
+    async def no_client(_session, _token_hash):
+        return None
+
+    monkeypatch.setattr(repo, "get_agent_client_by_token_hash", no_client)
     settings = SimpleNamespace(
         brain_curator_token=None,
         brain_auth_token="legacy-token",
@@ -66,9 +70,8 @@ async def test_resolve_principal_accepts_legacy_auth_token_when_curator_token_mi
         brain_curator_name="Hermes",
     )
 
-    principal = await auth.resolve_principal(object(), settings, "legacy-token")
-
-    assert principal == auth.Principal(type="curator", slug="hermes", name="Hermes")
+    with pytest.raises(AuthError, match="curador.*configurado"):
+        await auth.resolve_principal(object(), settings, "legacy-token")
 
 
 async def test_resolve_principal_rejects_curator_when_not_configured(monkeypatch):

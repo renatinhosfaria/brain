@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from cryptography.fernet import Fernet
 from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -7,6 +8,8 @@ _PLACEHOLDER_VALUES = {
     "openai_api_key": {"sk-..."},
     "github_token": {"ghp_..."},
     "brain_auth_token": {"gere-um-token-forte"},
+    "brain_curator_token": {"..."},
+    "brain_token_encryption_key": {"..."},
     "webhook_secret": {"gere-um-segredo"},
     "repo_url": {"https://github.com/usuario/brain-vault.git"},
 }
@@ -26,8 +29,8 @@ class Settings(BaseSettings):
     # Curadoria / auth
     brain_curator_slug: str = "hermes"
     brain_curator_name: str = "Hermes"
-    brain_curator_token: str | None = None
-    brain_token_encryption_key: str | None = None
+    brain_curator_token: str
+    brain_token_encryption_key: str
 
     # Agent inbox
     agent_inbox_dir: str = "_agents"
@@ -62,6 +65,8 @@ class Settings(BaseSettings):
         "openai_api_key",
         "github_token",
         "brain_auth_token",
+        "brain_curator_token",
+        "brain_token_encryption_key",
         "webhook_secret",
         "repo_url",
     )
@@ -71,6 +76,15 @@ class Settings(BaseSettings):
             raise ValueError("configure DATABASE_URL; valor de placeholder nao permitido")
         if value in _PLACEHOLDER_VALUES.get(info.field_name, set()):
             raise ValueError(f"configure {info.field_name}; valor de placeholder nao permitido")
+        return value
+
+    @field_validator("brain_token_encryption_key")
+    @classmethod
+    def validate_token_encryption_key(cls, value: str) -> str:
+        try:
+            Fernet(value.encode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("brain_token_encryption_key deve ser uma chave Fernet valida") from exc
         return value
 
 

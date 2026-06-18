@@ -1,12 +1,14 @@
 import datetime as dt
+import json
 
 import httpx
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from sqlalchemy import select, text
 
 from brain.config import Settings
-from brain.outbox import sign_webhook
+from brain.outbox import sign_webhook, sign_webhook_body
 from brain.queue.base import JobType
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.storage import repositories as repo
@@ -53,7 +55,10 @@ async def ctx(async_dsn, tmp_path):
     sf = make_session_factory(engine)
     settings = Settings(
         database_url=async_dsn, openai_api_key="x", github_token="x",
-        brain_auth_token="x", webhook_secret="x", repo_url="x",
+        brain_auth_token="x", brain_curator_token="curator",
+        brain_token_encryption_key=Fernet.generate_key().decode(),
+        webhook_secret="x", repo_url="x",
+        hermes_webhook_url=None, hermes_webhook_secret=None,
         repo_cache_path=str(tmp_path),
     )
     yield sf, PostgresJobQueue(sf), settings, tmp_path
@@ -379,13 +384,26 @@ async def test_worker_entrega_outbox_hermes_e_marca_delivered(ctx):
     assert len(requests) == 1
     request = requests[0]
     assert str(request.url) == "https://hermes.test/events"
-    assert request.content == b'{"note_id":"note-1","status":"created"}'
+    body = json.loads(request.content)
+    assert body == {
+        "attempt": 1,
+        "created_at": body["created_at"],
+        "event_id": str(event_id),
+        "event_type": "agent_note.created",
+        "note_id": "note-1",
+        "status": "created",
+    }
+    assert body["created_at"]
     assert request.headers["X-Brain-Event-Id"] == str(event_id)
     assert request.headers["X-Brain-Event-Type"] == "agent_note.created"
     timestamp = request.headers["X-Brain-Timestamp"]
     assert request.headers["X-Brain-Signature"] == sign_webhook(
         "segredo",
         timestamp,
+        request.content,
+    )
+    assert request.headers["X-Hub-Signature-256"] == sign_webhook_body(
+        "segredo",
         request.content,
     )
 

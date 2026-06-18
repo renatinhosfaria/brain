@@ -50,7 +50,8 @@ async def deps(async_dsn, tmp_path):
     _init_repo(vault)
     settings = Settings(
         database_url=async_dsn, openai_api_key="x", github_token="x",
-        brain_auth_token="x", webhook_secret="x", repo_url="x",
+        brain_auth_token="x", brain_curator_token="curator",
+        webhook_secret="x", repo_url="x",
         repo_cache_path=str(vault), git_push_enabled=False,
         brain_token_encryption_key=Fernet.generate_key().decode(),
     )
@@ -1215,19 +1216,17 @@ async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
     assert note.meta == {"model": "gpt-5.5"}
     assert event.type == "agent_note.created"
     assert event.status == "pending"
-    assert event.payload["event_type"] == "agent_note.created"
-    assert event.payload["type"] == "agent_note.created"
     assert event.payload["agent_note"] == {
         "id": out["note_id"],
         "client_slug": "chatgpt-web",
+        "client_name": "ChatGPT Web",
         "repo_path": out["repo_path"],
+        "title": "Resumo antes da compressao",
+        "suggested_namespace": "brain",
+        "metadata": {"model": "gpt-5.5"},
     }
     assert "content" not in event.payload
     assert "messages" not in event.payload
-    assert "client_name" not in event.payload["agent_note"]
-    assert "title" not in event.payload["agent_note"]
-    assert "suggested_namespace" not in event.payload["agent_note"]
-    assert "metadata" not in event.payload["agent_note"]
 
 
 async def test_submit_agent_note_nao_extrai_links_de_nota_bruta(deps):
@@ -1642,6 +1641,26 @@ async def test_submit_agent_note_persiste_db_e_outbox_quando_push_falha(deps, mo
     assert events[0].payload["agent_note"]["repo_path"] == notes[0].repo_path
 
 
+async def test_submit_agent_note_push_usa_github_token(deps, monkeypatch):
+    await _create_client_as_curator(deps)
+    deps.settings.git_push_enabled = True
+    deps.settings.github_token = "github-token"
+    push_calls = []
+
+    monkeypatch.setattr(
+        handlers.git_writer,
+        "push_repo",
+        lambda *args, **kwargs: push_calls.append((args, kwargs)),
+        raising=False,
+    )
+
+    await _submit_note_as_client(deps)
+
+    assert push_calls == [
+        ((deps.settings.repo_cache_path,), {"token": "github-token"}),
+    ]
+
+
 async def test_create_agent_client_persiste_db_e_git_local_quando_push_falha(
     deps, monkeypatch
 ):
@@ -1685,6 +1704,25 @@ async def test_create_agent_client_persiste_db_e_git_local_quando_push_falha(
         text=True,
     ).stdout
     assert status == ""
+
+
+async def test_create_agent_client_push_usa_github_token(deps, monkeypatch):
+    deps.settings.git_push_enabled = True
+    deps.settings.github_token = "github-token"
+    push_calls = []
+
+    monkeypatch.setattr(
+        handlers.git_writer,
+        "push_repo",
+        lambda *args, **kwargs: push_calls.append((args, kwargs)),
+        raising=False,
+    )
+
+    await _create_client_as_curator(deps, slug="codex", name="Codex")
+
+    assert push_calls == [
+        ((deps.settings.repo_cache_path,), {"token": "github-token"}),
+    ]
 
 
 async def test_rotate_agent_client_persiste_token_e_git_local_quando_push_falha(

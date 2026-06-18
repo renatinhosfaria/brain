@@ -12,6 +12,8 @@ def _valid_settings() -> dict:
         "openai_api_key": "sk-test",
         "github_token": "ghp_test",
         "brain_auth_token": "secret-token",
+        "brain_curator_token": "curator-token",
+        "brain_token_encryption_key": Fernet.generate_key().decode(),
         "webhook_secret": "hmac-secret",
         "repo_url": "https://github.com/user/brain-vault.git",
     }
@@ -22,6 +24,8 @@ def test_settings_le_variaveis_de_ambiente(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
     monkeypatch.setenv("BRAIN_AUTH_TOKEN", "secret-token")
+    monkeypatch.setenv("BRAIN_CURATOR_TOKEN", "curator-token")
+    monkeypatch.setenv("BRAIN_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("WEBHOOK_SECRET", "hmac-secret")
     monkeypatch.setenv("REPO_URL", "https://github.com/user/brain-vault.git")
 
@@ -43,6 +47,8 @@ def test_settings_le_variaveis_de_ambiente(monkeypatch):
         ("openai_api_key", "sk-..."),
         ("github_token", "ghp_..."),
         ("brain_auth_token", "gere-um-token-forte"),
+        ("brain_curator_token", "..."),
+        ("brain_token_encryption_key", "..."),
         ("webhook_secret", "gere-um-segredo"),
         ("repo_url", "https://github.com/usuario/brain-vault.git"),
     ],
@@ -63,19 +69,13 @@ def test_defaults_de_modelos():
     assert s.git_push_enabled is True
 
 
-def test_settings_aceita_curadoria_ausente_durante_migracao():
-    s = Settings(
-        database_url="postgresql+asyncpg://x",
-        openai_api_key="sk-test",
-        github_token="ghp_test",
-        brain_auth_token="legacy",
-        webhook_secret="webhook",
-        repo_url="https://example/repo.git",
-    )
-    assert s.brain_curator_slug == "hermes"
-    assert s.brain_curator_name == "Hermes"
-    assert s.brain_curator_token is None
-    assert s.brain_token_encryption_key is None
+@pytest.mark.parametrize("missing_field", ["brain_curator_token", "brain_token_encryption_key"])
+def test_settings_exige_bootstrap_de_curadoria(missing_field):
+    kwargs = _valid_settings()
+    kwargs.pop(missing_field)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **kwargs)
 
 
 def test_settings_curator_bootstrap_fields():
@@ -118,8 +118,5 @@ def test_env_example_documenta_curadoria_e_webhook_hermes():
         'python -c "from cryptography.fernet import Fernet; '
         'print(Fernet.generate_key().decode())"'
     ) in env_example
-    assert (
-        "BRAIN_AUTH_TOKEN is a migration fallback only when BRAIN_CURATOR_TOKEN is unset"
-        in env_example
-    )
-    assert "not a parallel Hermes curator credential" in env_example
+    assert "BRAIN_AUTH_TOKEN protects /status only" in env_example
+    assert "MCP auth uses BRAIN_CURATOR_TOKEN or agent-client tokens" in env_example

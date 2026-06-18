@@ -418,6 +418,38 @@ def test_push_with_retry_limpa_worktree_quando_rebase_conflita(tmp_path):
     assert _git(["log", "--format=%s", "-1"], local).stdout.strip() == "local change"
 
 
+def test_push_repo_repassa_token_para_push_with_retry(tmp_path, monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        git_writer,
+        "_push_with_retry",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    git_writer.push_repo(tmp_path, retries=2, token="github-token")
+
+    assert calls == [((tmp_path, 2), {"token": "github-token"})]
+
+
+def test_push_with_retry_configura_upstream_no_primeiro_push(tmp_path):
+    remote = tmp_path / "remote.git"
+    local = tmp_path / "local"
+    _git(["init", "--bare", "--initial-branch=main", str(remote)], tmp_path)
+    _git(["clone", str(remote), str(local)], tmp_path)
+    _git(["config", "user.email", "local@t"], local)
+    _git(["config", "user.name", "local"], local)
+
+    (local / "note.md").write_text("primeiro commit\n", encoding="utf-8")
+    _git(["add", "note.md"], local)
+    _git(["commit", "-m", "first"], local)
+
+    git_writer._push_with_retry(local, retries=1)
+
+    assert _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], local).stdout.strip() == "origin/main"
+    assert _git(["show", "main:note.md"], remote).stdout == "primeiro commit\n"
+
+
 @pytest.mark.parametrize(
     "path",
     [
