@@ -28,7 +28,7 @@ deep_search(
   max_entities: int = 3,
   rel_types: list[str] | None = None,
   filters: dict | None = None,
-  namespace: str = "curated"
+  namespace: str | None = None
 )
 ```
 
@@ -42,7 +42,11 @@ Regras:
 - `limit` controla apenas a quantidade de resultados textuais.
 - O grafo usa limite interno de 50 relações para evitar payloads grandes.
 - O texto é buscado apenas em chunks de notas curadas.
-- O parâmetro `namespace` controla a busca de entidades e relações no grafo; ele não libera busca textual fora de notas curadas.
+- `namespace=None` ou omitido consulta entidades e relações em todos os namespaces do grafo.
+- `namespace="..."` limita apenas a busca do grafo ao namespace informado.
+- O parâmetro `namespace` nunca libera busca textual fora de notas curadas.
+- Clientes e curadores podem consultar `deep_search` em modo global ou em namespace explícito.
+- A permissão ampliada vale só para leitura via `deep_search`; escrita do cliente continua restrita ao inbox `_agents/{slug}/...`, e ferramentas administrativas de grafo continuam restritas ao curador.
 
 ## Payload
 
@@ -66,6 +70,7 @@ Regras:
       {
         "name": "brain",
         "type": "projeto",
+        "namespace": "curated",
         "seed": "brain",
         "depth": 0,
         "matched_by": "substring"
@@ -73,6 +78,7 @@ Regras:
       {
         "name": "Hermes",
         "type": "agente",
+        "namespace": "curated",
         "seed": "brain",
         "depth": 1,
         "matched_by": "relationship"
@@ -83,6 +89,7 @@ Regras:
         "from": "Hermes",
         "to": "brain",
         "type": "curates",
+        "namespace": "curated",
         "seed": "brain",
         "depth": 1
       }
@@ -92,6 +99,8 @@ Regras:
     "depth": 1,
     "max_entities": 3,
     "seed_strategy": "substring",
+    "namespace_strategy": "all",
+    "namespaces": ["curated"],
     "rel_types": null,
     "warnings": []
   }
@@ -111,8 +120,8 @@ Assinatura interna:
 ```text
 get_relationship_paths(
   session,
-  seeds: list[str],
-  namespace: str,
+  seeds: list[dict],
+  namespace: str | None = None,
   depth: int = 1,
   rel_types: list[str] | None = None,
   limit: int = 50
@@ -122,12 +131,15 @@ get_relationship_paths(
 Comportamento:
 
 - Executa uma travessia de caminhos de comprimento variável a partir das sementes.
-- Usa o grafo `brain` e entidades `Entity` filtradas por `name` e `namespace`.
-- Retorna entidades com `name`, `type`, `seed`, `depth`.
-- Retorna relações com `from`, `to`, `type`, `seed`, `depth`.
+- Cada seed interna carrega pelo menos `name` e `namespace`.
+- Usa o grafo `brain` e entidades `Entity` filtradas por `name` e pelo namespace da seed.
+- Quando `namespace` for informado, descarta seeds fora dele.
+- Quando `namespace=None`, percorre cada seed dentro do seu próprio namespace, sem atravessar relações para outro namespace.
+- Retorna entidades com `name`, `type`, `namespace`, `seed`, `depth`.
+- Retorna relações com `from`, `to`, `type`, `namespace`, `seed`, `depth`.
 - Deduplica no Python:
   - entidade por `(name, namespace)`;
-  - relação por `(from, to, type, seed, depth)`.
+  - relação por `(from, to, type, namespace, seed, depth)`.
 - Aplica `rel_types` no Python.
 - Interrompe a montagem do resultado ao atingir o limite interno.
 
@@ -159,14 +171,17 @@ Fluxo:
 
 1. Gera embedding da query.
 2. Busca chunks curados com a mesma base do `search` atual.
-3. Resolve entidades-semente:
-   - primeiro `age.search_entities(query, namespace)`;
+3. Resolve o escopo de grafo:
+   - `namespace=None` ou omitido vira modo global (`namespace_strategy = "all"`);
+   - `namespace="..."` vira modo de namespace único (`namespace_strategy = "single"`).
+4. Resolve entidades-semente:
+   - primeiro `age.search_entities(query, namespace)`, onde `namespace=None` busca em todos os namespaces;
    - se não houver resultado, usa `query_entities` como fallback;
    - resolve cada nome retornado pelo LLM com `age.search_entities(nome, namespace)`;
-   - deduplica entidades resolvidas;
-   - limita a `max_entities`.
-4. Se houver sementes, chama `age.get_relationship_paths`.
-5. Retorna `results`, `graph` e `meta`.
+   - deduplica entidades resolvidas por `(name, namespace)`;
+   - limita a `max_entities` no total, mesmo em modo global.
+5. Se houver sementes, chama `age.get_relationship_paths`.
+6. Retorna `results`, `graph` e `meta`.
 
 ### `brain.mcp.handlers.deep_search` e `brain.mcp.server`
 
@@ -179,7 +194,9 @@ Validações:
 - rejeita `depth < 1` ou `depth > 3`;
 - rejeita `max_entities < 1` ou `max_entities > 3`;
 - trata `rel_types=[]` como `None`;
+- normaliza `namespace` vazio ou ausente para `None`;
 - repassa `filters` apenas quando for `dict`.
+- não bloqueia clientes por namespace em `deep_search`, porque a ferramenta é leitura; as restrições de escrita e administração continuam em seus handlers específicos.
 
 ## Tratamento de Erros
 
@@ -188,6 +205,7 @@ Validações:
 - Consulta AGE falha: retorna erro da ferramenta. `deep_search` foi chamado para obter grafo, então uma falha estrutural do grafo não deve ser mascarada como busca bem-sucedida.
 - `depth` ou `max_entities` fora dos limites: erro claro no handler.
 - `rel_types` vazio: interpretado como ausência de filtro.
+- `namespace` omitido e nenhum seed encontrado em qualquer namespace: retorna chunks normalmente, grafo vazio, `meta.namespace_strategy = "all"` e `meta.namespaces = []`.
 
 ## Testes
 
@@ -212,6 +230,9 @@ Adicionar testes em `tests/integration/test_retriever.py`:
 - retorna grafo vazio com `seed_strategy = "none"` quando não há seeds;
 - retorna chunks e warning quando fallback LLM falha;
 - não inclui `memories` nem `_agents/`.
+- quando `namespace=None`, resolve seeds e caminhos em todos os namespaces e retorna lista única com campo `namespace`;
+- quando `namespace` é informado, limita apenas o grafo a esse namespace;
+- clientes podem consultar `deep_search` com `namespace=None` ou namespace explícito.
 
 ### MCP
 
@@ -222,11 +243,15 @@ Adicionar testes em `tests/integration/test_mcp_handlers.py`:
 - rejeita `depth` inválido;
 - rejeita `max_entities` inválido;
 - aceita `rel_types` opcional;
+- aceita `namespace` omitido como busca global;
+- permite cliente consultar namespace explícito em `deep_search`;
 - exige autenticação compatível com `search`.
 
 ## Compatibilidade
 
-Esta entrega é aditiva. Clientes existentes continuam usando `search` sem alteração. Agentes que precisam seguir relações usam `deep_search` explicitamente.
+Esta entrega mantém `search` inalterado. Agentes que precisam seguir relações usam `deep_search` explicitamente.
+
+Para `deep_search`, a revisão de namespace muda o comportamento padrão: omitir `namespace` deixa de significar `curated` e passa a significar busca global no grafo. Clientes que precisarem restringir o grafo ao escopo curado devem enviar `namespace="curated"` explicitamente. O texto retornado em `results` continua vindo apenas de chunks curados.
 
 ## Fontes Técnicas
 
