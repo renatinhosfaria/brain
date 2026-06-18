@@ -1,9 +1,11 @@
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
+from sqlalchemy import select
 
 from brain import auth
 from brain.config import Settings
@@ -11,7 +13,7 @@ from brain.mcp import handlers
 from brain.mcp.handlers import Deps
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.storage.db import make_engine, make_session_factory
-from brain.storage.models import Base
+from brain.storage.models import Base, OutboxEvent
 from brain.storage import repositories as repo
 
 
@@ -301,6 +303,109 @@ async def test_search_permite_principal_client(deps):
     out = await _as_client(handlers.search, deps, "qualquer coisa")
 
     assert out == {"results": [], "graph": []}
+
+
+async def test_client_submit_agent_note_cria_arquivo_nota_e_outbox(deps):
+    await _create_client_as_curator(deps)
+
+    out = await _as_client(
+        handlers.submit_agent_note,
+        deps,
+        title="Resumo antes da compressao",
+        content="Conteudo livre enviado pelo client.",
+        messages=[{"role": "assistant", "content": "Detalhe adicional."}],
+        suggested_namespace="brain",
+        metadata={"model": "gpt-5.5"},
+    )
+
+    assert set(out) == {"note_id", "repo_path", "status", "event_id"}
+    assert out["status"] == "pending"
+    assert out["repo_path"].startswith("_agents/chatgpt-web/")
+    assert out["repo_path"].endswith("-resumo-antes-da-compressao.md")
+
+    note_path = Path(deps.settings.repo_cache_path) / out["repo_path"]
+    text = note_path.read_text(encoding="utf-8")
+    assert "type: agent_note" in text
+    assert f"id: {out['note_id']}" in text
+    assert "client_slug: chatgpt-web" in text
+    assert "client_name: ChatGPT Web" in text
+    assert "Conteudo livre enviado pelo client." in text
+    assert "**assistant:** Detalhe adicional." in text
+
+    async with deps.session_factory() as s:
+        note = await repo.get_agent_note(s, uuid.UUID(out["note_id"]))
+        event = (
+            await s.execute(select(OutboxEvent).where(OutboxEvent.id == uuid.UUID(out["event_id"])))
+        ).scalar_one()
+
+    assert note.client_slug == "chatgpt-web"
+    assert note.repo_path == out["repo_path"]
+    assert note.status == "pending"
+    assert note.suggested_namespace == "brain"
+    assert note.meta == {"model": "gpt-5.5"}
+    assert event.type == "agent_note.created"
+    assert event.status == "pending"
+    assert event.payload["event_type"] == "agent_note.created"
+    assert event.payload["type"] == "agent_note.created"
+    assert event.payload["agent_note"] == {
+        "id": out["note_id"],
+        "client_slug": "chatgpt-web",
+        "client_name": "ChatGPT Web",
+        "repo_path": out["repo_path"],
+        "title": "Resumo antes da compressao",
+        "suggested_namespace": "brain",
+        "metadata": {"model": "gpt-5.5"},
+    }
+    assert "content" not in event.payload
+    assert "messages" not in event.payload
+
+
+async def test_submit_agent_note_rejeita_curator(deps):
+    with pytest.raises(PermissionError, match="client required"):
+        await _as_curator(
+            handlers.submit_agent_note,
+            deps,
+            content="Conteudo bruto.",
+        )
+
+
+async def test_submit_agent_note_exige_content_ou_messages(deps):
+    await _create_client_as_curator(deps)
+
+    with pytest.raises(ValueError, match="content or messages required"):
+        await _as_client(
+            handlers.submit_agent_note,
+            deps,
+            title="Sem corpo",
+        )
+
+
+async def test_submit_agent_note_falha_quando_client_principal_nao_existe(deps):
+    principal = auth.Principal("client", "ghost", "Ghost")
+
+    with pytest.raises(ValueError, match="active agent client not found: ghost"):
+        await _as_principal(
+            principal,
+            handlers.submit_agent_note,
+            deps,
+            content="Conteudo bruto.",
+        )
+
+
+async def test_submit_agent_note_falha_quando_client_esta_inativo(deps):
+    await _create_client_as_curator(deps, slug="codex", name="Codex")
+    async with deps.session_factory() as s:
+        await repo.disable_agent_client(s, "codex")
+        await s.commit()
+
+    principal = auth.Principal("client", "codex", "Codex")
+    with pytest.raises(ValueError, match="agent client disabled: codex"):
+        await _as_principal(
+            principal,
+            handlers.submit_agent_note,
+            deps,
+            content="Conteudo bruto.",
+        )
 
 
 async def test_create_agent_client_duplicado_nao_retorna_token_novo_nem_altera_hash(

@@ -30,6 +30,13 @@ def _require_curator():
     return p
 
 
+def _require_client():
+    p = auth.get_current_principal()
+    if p.type != "client":
+        raise PermissionError("client required")
+    return p
+
+
 def _require_client_or_curator():
     return auth.get_current_principal()
 
@@ -151,6 +158,84 @@ async def search(deps: Deps, query: str, namespace: str | None = None,
     async with deps.session_factory() as s:
         return await _search(s, deps.embedder, query, namespace=namespace,
                              limit=limit, include_graph=include_graph)
+
+
+async def submit_agent_note(
+    deps: Deps,
+    title: str | None = None,
+    content: str | None = None,
+    messages: list[dict] | None = None,
+    suggested_namespace: str | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    principal = _require_client()
+    if not content and not messages:
+        raise ValueError("content or messages required")
+
+    async with deps.session_factory() as s:
+        try:
+            client = await repo.get_agent_client(s, slug=principal.slug)
+            if client is None:
+                raise ValueError(f"active agent client not found: {principal.slug}")
+            if client.status != "active":
+                raise ValueError(f"agent client disabled: {principal.slug}")
+
+            note = await repo.create_agent_note(
+                s,
+                client_id=client.id,
+                client_slug=client.slug,
+                title=title,
+                repo_path=f"pending/{client.slug}/{uuid.uuid4()}",
+                suggested_namespace=suggested_namespace,
+                meta=metadata,
+                status="pending",
+            )
+            note_id = str(note.id)
+            repo_path = git_writer.write_agent_note(
+                deps.settings.repo_cache_path,
+                inbox_dir=deps.settings.agent_inbox_dir,
+                client_slug=client.slug,
+                client_name=client.name,
+                note_id=note_id,
+                timestamp=_now_stamp(),
+                title=title,
+                content=content,
+                messages=messages,
+                suggested_namespace=suggested_namespace,
+                metadata=metadata,
+                author_name=deps.settings.git_author_name,
+                author_email=deps.settings.git_author_email,
+                push=deps.settings.git_push_enabled,
+            )
+            note.repo_path = repo_path
+            await s.flush()
+
+            event_payload = {
+                "event_type": "agent_note.created",
+                "type": "agent_note.created",
+                "agent_note": {
+                    "id": note_id,
+                    "client_slug": client.slug,
+                    "client_name": client.name,
+                    "repo_path": repo_path,
+                    "title": title,
+                    "suggested_namespace": suggested_namespace,
+                    "metadata": metadata or {},
+                },
+            }
+            event = await repo.create_outbox_event(s, "agent_note.created", event_payload)
+            event.payload = {"event_id": str(event.id), **event_payload}
+            await s.flush()
+            await s.commit()
+            return {
+                "note_id": note_id,
+                "repo_path": repo_path,
+                "status": note.status,
+                "event_id": str(event.id),
+            }
+        except Exception:
+            await s.rollback()
+            raise
 
 
 async def get_memory(deps: Deps, id: str) -> dict | None:

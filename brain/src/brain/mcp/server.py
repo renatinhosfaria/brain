@@ -17,6 +17,23 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         return await handlers.search(deps, query, namespace, limit, include_graph)
 
     @mcp.tool()
+    async def submit_agent_note(
+        title: str | None = None,
+        content: str | None = None,
+        messages: list[dict] | None = None,
+        suggested_namespace: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        return await handlers.submit_agent_note(
+            deps,
+            title,
+            content,
+            messages,
+            suggested_namespace,
+            metadata,
+        )
+
+    @mcp.tool()
     async def get_memory(id: str) -> dict | None:
         return await handlers.get_memory(deps, id)
 
