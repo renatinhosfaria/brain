@@ -152,7 +152,7 @@ Pushes feitos pelo autor de automação Git configurado são ignorados para evit
 
 Quando um push válido chega, a API atualiza o clone/cache do repositório, normaliza os caminhos Markdown alterados e enfileira jobs conforme a mudança detectada. Arquivos Markdown adicionados ou modificados geram `index_document`; arquivos removidos geram `delete_document`.
 
-Markdown sob `_agents/` é ignorado pelo caminho de webhook/indexação. Esses caminhos são rejeitados por `normalize_repo_path(...)`, não geram jobs e aparecem nos logs como warning de caminho pulado (`webhook_skipped_repo_path`). Isso explica respostas com `enqueued: 0` quando o push altera apenas arquivos de inbox bruto.
+Markdown sob `_agents/` é ignorado pelo caminho de webhook/indexação. Esses caminhos são rejeitados por `normalize_repo_path`, não geram jobs e aparecem nos logs como warning de caminho pulado (`webhook_skipped_repo_path`). Isso explica respostas com `enqueued: 0` quando o push altera apenas arquivos de inbox bruto.
 
 ## Worker E Fila
 
@@ -205,7 +205,7 @@ Antes de qualquer restore destrutivo, siga uma sequência segura:
 2. Prefira restaurar primeiro em um banco/volume novo ou em ambiente de staging.
 3. Se o restore for em produção no banco existente, pare writers com `docker compose stop api worker backup`.
 4. Confirme explicitamente que o alvo é o banco correto antes de executar `--clean --if-exists`.
-5. Use `pg_restore --exit-on-error --single-transaction --clean --if-exists ...`.
+5. Use `pg_restore --exit-on-error --single-transaction --clean --if-exists <arquivo.dump>`.
 6. Depois do restore, suba os serviços e rode `curl http://localhost:8000/health`.
 
 O exemplo abaixo restaura no serviço `postgres` existente do Compose e assume que o banco de destino já foi inicializado com as extensões esperadas.

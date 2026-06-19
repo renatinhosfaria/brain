@@ -18,7 +18,7 @@ uv sync
 test -f .env || cp .env.example .env
 ```
 
-O arquivo `.env` deve usar somente segredos locais ou de desenvolvimento. Não faça commit desse arquivo nem de valores sensíveis derivados dele. O `.env.example` contém valores de exemplo que `Settings` rejeita na inicialização; substitua os placeholders antes de executar a aplicação. Gere uma chave Fernet válida para `BRAIN_TOKEN_ENCRYPTION_KEY` e configure `OPENAI_API_KEY` para chamadas reais de embeddings e extração.
+O arquivo `.env` deve usar somente segredos locais ou de desenvolvimento. Não faça commit desse arquivo nem de valores sensíveis derivados dele. O `.env.example` contém valores de exemplo que `Settings` rejeita na inicialização; substitua esses valores antes de executar a aplicação. Gere uma chave Fernet válida para `BRAIN_TOKEN_ENCRYPTION_KEY` e configure `OPENAI_API_KEY` para chamadas reais de embeddings e extração.
 
 ## Testes
 
