@@ -5,6 +5,8 @@ notas curadas, leem notas curadas por id ou caminho e enviam notas brutas para o
 inbox `_agents/`. O Hermes atua como curador: revisa o inbox, cria ou atualiza
 notas curadas e decide o que entra na busca do vault.
 
+Documentação técnica detalhada: [docs/README.md](docs/README.md).
+
 ## Subir em produção (VPS)
 
 ```bash
