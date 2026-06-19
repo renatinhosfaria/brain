@@ -1,71 +1,71 @@
 ---
 name: install-brain-mcp
-description: Install, connect, validate, or troubleshoot the Brain MCP server for AI clients and agents, including Codex CLI, Codex Desktop/App, Claude Desktop, Claude Web, Claude Code, and Hermes. Use when configuring Brain's `/mcp` endpoint, bearer-token authentication, client-vs-curator principals, or client-specific MCP setup.
+description: Use quando precisar instalar, conectar, validar ou solucionar problemas do servidor Brain MCP para clientes e agentes de IA, incluindo Codex CLI, Codex Desktop/App, Claude Desktop, Claude Web, Claude Code e Hermes. Use ao configurar o endpoint `/mcp` do Brain, autenticação por token bearer, principals de cliente versus curador ou configuração MCP específica de cliente.
 ---
 
-# Install Brain MCP
+# Instalar Brain MCP
 
-Use this skill when a user wants to connect an AI client or agent to the `brain` MCP server. Treat this as an integration task with live credentials: verify the target client, confirm the server URL, choose the right principal, and avoid exposing bearer tokens.
+Use esta skill quando um usuário quiser conectar um cliente ou agente de IA ao servidor MCP `brain`. Trate isso como uma tarefa de integração com credenciais ativas: verifique o cliente-alvo, confirme a URL do servidor, escolha o principal correto e evite expor tokens bearer.
 
-## Required Inputs
+## Entradas Necessárias
 
-Determine these values before writing or changing client configuration:
+Determine estes valores antes de escrever ou alterar a configuração do cliente:
 
-- **Target client:** Codex CLI, Codex Desktop/App, Claude Desktop, Claude Web, Claude Code, Hermes, or another MCP-capable client.
-- **Brain base URL:** the deployment root, such as `https://brain.example.com`.
-- **Brain MCP URL:** the final MCP endpoint, always `<brain-base-url>/mcp`.
-- **Principal type:** `curator` for trusted administrative integrations, or `client` for ordinary agent clients.
-- **Bearer token source:** an environment variable, secure store, or one-time user-provided token value.
-- **Network location:** local machine, private network, public internet, or allowlisted public endpoint.
-- **Configuration scope:** user-local, project-local, organization-managed, or Hermes runtime configuration.
+- **Cliente-alvo:** Codex CLI, Codex Desktop/App, Claude Desktop, Claude Web, Claude Code, Hermes ou outro cliente compatível com MCP.
+- **URL base do Brain:** a raiz da implantação, como `https://brain.example.com`.
+- **URL MCP do Brain:** o endpoint MCP final, sempre `<brain-base-url>/mcp`.
+- **Tipo de principal:** `curator` para integrações administrativas confiáveis, ou `client` para clientes de agente comuns.
+- **Origem do token bearer:** uma variável de ambiente, armazenamento seguro ou valor de token fornecido uma única vez pelo usuário.
+- **Local de rede:** máquina local, rede privada, internet pública ou endpoint público em allowlist.
+- **Escopo de configuração:** local do usuário, local do projeto, gerenciado pela organização ou configuração de runtime do Hermes.
 
-Ask for missing values when they cannot be inferred from local files or current environment. Never ask the user to paste a secret if a local environment variable or secure store is already available.
+Peça valores ausentes quando eles não puderem ser inferidos de arquivos locais ou do ambiente atual. Nunca peça ao usuário para colar um segredo se uma variável de ambiente local ou armazenamento seguro já estiver disponível.
 
-## Brain MCP Facts
+## Fatos do Brain MCP
 
-Use these project-specific facts:
+Use estes fatos específicos do projeto:
 
-- The MCP endpoint is `/mcp`.
-- The transport is streamable HTTP through FastMCP.
-- MCP requests authenticate with `Authorization: Bearer <token>`.
-- `GET /health` is public and checks basic service availability.
-- `GET /status` uses `BRAIN_AUTH_TOKEN`, but `BRAIN_AUTH_TOKEN` does not authenticate MCP.
-- `BRAIN_CURATOR_TOKEN` authenticates the `curator` principal.
-- Tokens that start with `brain_client_` authenticate agent clients created by Brain curator tools.
-- Clients can search and read curated notes and may submit agent notes when their permissions allow it.
-- Curator credentials can administer clients, raw agent notes, curated notes, graph maintenance, and other protected MCP tools.
-- `_agents/` is raw inbox workflow state. Ordinary clients must not treat it as public searchable content.
+- O endpoint MCP é `/mcp`.
+- O transporte é HTTP streamable por meio do FastMCP.
+- Requisições MCP são autenticadas com `Authorization: Bearer <token>`.
+- `GET /health` é público e verifica disponibilidade básica do serviço.
+- `GET /status` usa `BRAIN_AUTH_TOKEN`, mas `BRAIN_AUTH_TOKEN` não autentica MCP.
+- `BRAIN_CURATOR_TOKEN` autentica o principal `curator`.
+- Tokens que começam com `brain_client_` autenticam clientes de agente criados pelas ferramentas de curador do Brain.
+- Clientes podem pesquisar e ler notas curadas e podem enviar notas de agente quando suas permissões permitirem.
+- Credenciais de curador podem administrar clientes, notas brutas de agentes, notas curadas, manutenção do grafo e outras ferramentas MCP protegidas.
+- `_agents/` é o estado bruto do fluxo de caixa de entrada. Clientes comuns não devem tratá-lo como conteúdo público pesquisável.
 
-## Common Setup Flow
+## Fluxo Comum de Configuração
 
-Follow this sequence for every client:
+Siga esta sequência para todos os clientes:
 
-1. Identify the target client and its current MCP configuration mechanism.
-2. Normalize the URL:
-   - If the user gives `https://brain.example.com`, use `https://brain.example.com/mcp`.
-   - If the user gives `https://brain.example.com/mcp`, keep it.
-   - Do not use `/health` or `/status` as the MCP URL.
-3. Verify service availability when network tools are available:
+1. Identifique o cliente-alvo e seu mecanismo atual de configuração MCP.
+2. Normalize a URL:
+   - Se o usuário fornecer `https://brain.example.com`, use `https://brain.example.com/mcp`.
+   - Se o usuário fornecer `https://brain.example.com/mcp`, mantenha.
+   - Não use `/health` nem `/status` como URL MCP.
+3. Verifique a disponibilidade do serviço quando ferramentas de rede estiverem disponíveis:
 
    ```bash
    curl -fsS "$BRAIN_BASE_URL/health"
    ```
 
-4. Select the token:
-   - Use a `brain_client_` token for ordinary agent clients.
-   - Use `BRAIN_CURATOR_TOKEN` only for Hermes or another trusted administrative integration.
-   - Do not use `BRAIN_AUTH_TOKEN` for MCP.
-5. Prefer environment-variable based token configuration when the client supports it.
-6. Write only configuration needed by the selected client.
-7. Reload or restart the client if its MCP configuration is loaded at startup.
-8. Verify the MCP server appears in the client and exposes expected tools.
-9. Diagnose failures by layer: network, URL, transport, authentication, principal permissions, then client-specific loading behavior.
+4. Selecione o token:
+   - Use um token `brain_client_` para clientes de agente comuns.
+   - Use `BRAIN_CURATOR_TOKEN` apenas para Hermes ou outra integração administrativa confiável.
+   - Não use `BRAIN_AUTH_TOKEN` para MCP.
+5. Prefira configuração de token baseada em variável de ambiente quando o cliente oferecer suporte.
+6. Escreva somente a configuração necessária para o cliente selecionado.
+7. Recarregue ou reinicie o cliente se sua configuração MCP for carregada na inicialização.
+8. Verifique se o servidor MCP aparece no cliente e expõe as ferramentas esperadas.
+9. Diagnostique falhas por camada: rede, URL, transporte, autenticação, permissões do principal e então comportamento de carregamento específico do cliente.
 
-## Client Matrix
+## Matriz de Clientes
 
 ### Codex CLI
 
-Codex supports streamable HTTP MCP servers through `config.toml`. Prefer this shape for user-level configuration:
+O Codex oferece suporte a servidores MCP HTTP streamable por meio de `config.toml`. Prefira este formato para configuração no nível do usuário:
 
 ```toml
 [mcp_servers.brain]
@@ -73,41 +73,41 @@ url = "https://brain.example.com/mcp"
 bearer_token_env_var = "BRAIN_MCP_TOKEN"
 ```
 
-For project-scoped configuration in a trusted repository, use `.codex/config.toml` with the same table. For user-wide configuration, use the user's Codex config file.
+Para configuração com escopo de projeto em um repositório confiável, use `.codex/config.toml` com a mesma tabela. Para configuração global do usuário, use o arquivo de configuração do Codex do usuário.
 
-When executing setup:
+Ao executar a configuração:
 
 ```bash
 export BRAIN_MCP_TOKEN="<BRAIN_MCP_TOKEN>"
 codex mcp --help
 ```
 
-Use `codex mcp --help` to confirm the installed CLI's exact add/update flags before using command-line MCP management. If flags are unclear or differ from the current documentation, edit `config.toml` directly instead of guessing.
+Use `codex mcp --help` para confirmar os flags exatos de adição/atualização da CLI instalada antes de usar o gerenciamento MCP por linha de comando. Se os flags estiverem pouco claros ou diferirem da documentação atual, edite `config.toml` diretamente em vez de adivinhar.
 
-Verify inside the Codex TUI with:
+Verifique dentro da TUI do Codex com:
 
 ```text
 /mcp
 ```
 
-Expected result: a server named `brain` appears. If it does not, check that the config file is in the active Codex scope and that the shell launching Codex has `BRAIN_MCP_TOKEN` set.
+Resultado esperado: aparece um servidor chamado `brain`. Se isso não acontecer, verifique se o arquivo de configuração está no escopo ativo do Codex e se o shell que inicia o Codex tem `BRAIN_MCP_TOKEN` definido.
 
 ### Codex Desktop/App
 
-Codex skills are available in the Codex app, but direct MCP configuration support can differ by surface and version. Do not claim that Codex Desktop/App can consume a remote MCP server until the current app UI or official documentation confirms the path.
+As skills do Codex estão disponíveis no app Codex, mas o suporte a configuração direta de MCP pode variar por superfície e versão. Não afirme que Codex Desktop/App pode consumir um servidor MCP remoto até que a UI atual do app ou a documentação oficial confirme o caminho.
 
-Use this decision path:
+Use este caminho de decisão:
 
-- If the app exposes MCP settings, configure the same HTTP URL and bearer-token environment variable pattern used for Codex CLI.
-- If the app shares the active Codex configuration with CLI or IDE in the user's environment, configure `config.toml` and verify from the app.
-- If the app does not expose direct MCP settings, explain the limitation and recommend Codex CLI/IDE for direct MCP use.
-- If the user needs distribution through Codex App later, recommend a plugin as future packaging work, not part of this skill.
+- Se o app expuser configurações de MCP, configure a mesma URL HTTP e o mesmo padrão de variável de ambiente para token bearer usados no Codex CLI.
+- Se o app compartilhar a configuração ativa do Codex com a CLI ou IDE no ambiente do usuário, configure `config.toml` e verifique pelo app.
+- Se o app não expuser configurações diretas de MCP, explique a limitação e recomende Codex CLI/IDE para uso direto de MCP.
+- Se o usuário precisar de distribuição pelo Codex App posteriormente, recomende um plugin como trabalho futuro de empacotamento, não como parte desta skill.
 
 ### Claude Code
 
-Claude Code supports HTTP MCP servers. Use `claude mcp add` for the current user or project scope.
+Claude Code oferece suporte a servidores MCP HTTP. Use `claude mcp add` para o escopo do usuário atual ou do projeto.
 
-Example command using a shell variable instead of a literal token in shell history:
+Exemplo de comando usando uma variável de shell em vez de um token literal no histórico do shell:
 
 ```bash
 export BRAIN_MCP_URL="https://brain.example.com/mcp"
@@ -115,24 +115,24 @@ export BRAIN_MCP_TOKEN="<BRAIN_MCP_TOKEN>"
 claude mcp add --transport http brain "$BRAIN_MCP_URL" --header "Authorization: Bearer $BRAIN_MCP_TOKEN"
 ```
 
-For project-shared configuration, use Claude Code's project-scoped MCP configuration only when the token is not committed. Keep secrets in user-local settings, environment variables, or a secure helper supported by the client.
+Para configuração compartilhada pelo projeto, use a configuração MCP com escopo de projeto do Claude Code somente quando o token não for incluído em commit. Mantenha segredos em configurações locais do usuário, variáveis de ambiente ou um helper seguro compatível com o cliente.
 
-Verify inside Claude Code with:
+Verifique dentro do Claude Code com:
 
 ```text
 /mcp
 ```
 
-Expected result: `brain` appears in the MCP server list. If authentication fails, re-check whether the token is a Brain MCP token, not `BRAIN_AUTH_TOKEN`.
+Resultado esperado: `brain` aparece na lista de servidores MCP. Se a autenticação falhar, verifique novamente se o token é um token Brain MCP, não `BRAIN_AUTH_TOKEN`.
 
 ### Claude Desktop
 
-Claude Desktop has two relevant MCP paths:
+Claude Desktop tem dois caminhos MCP relevantes:
 
-- **Remote connectors through Claude account:** treat these like Claude Web. The Brain MCP URL must be reachable from Anthropic infrastructure.
-- **Local Desktop MCP configuration:** use only when the installed Desktop version supports the needed transport and authentication headers.
+- **Conectores remotos pela conta Claude:** trate-os como Claude Web. A URL MCP do Brain deve ser alcançável pela infraestrutura da Anthropic.
+- **Configuração MCP local do Desktop:** use somente quando a versão instalada do Desktop oferecer suporte ao transporte e aos headers de autenticação necessários.
 
-When local Desktop configuration supports HTTP MCP servers with headers, use a configuration equivalent to:
+Quando a configuração local do Desktop oferecer suporte a servidores MCP HTTP com headers, use uma configuração equivalente a:
 
 ```json
 {
@@ -148,64 +148,64 @@ When local Desktop configuration supports HTTP MCP servers with headers, use a c
 }
 ```
 
-Do not commit this file if it contains a literal token. If the Desktop path uses a Claude account connector instead of local config, follow the Claude Web constraints below.
+Não faça commit deste arquivo se ele contiver um token literal. Se o caminho do Desktop usar um conector de conta Claude em vez de configuração local, siga as restrições do Claude Web abaixo.
 
 ### Claude Web
 
-Claude Web custom connectors use remote MCP. The server is contacted from Anthropic infrastructure, not from the user's local machine.
+Conectores personalizados do Claude Web usam MCP remoto. O servidor é contatado pela infraestrutura da Anthropic, não pela máquina local do usuário.
 
-Before configuring Claude Web, confirm all of these:
+Antes de configurar Claude Web, confirme todos estes pontos:
 
-- The Brain MCP URL is publicly reachable or allowlisted for the relevant Claude plan.
-- TLS and DNS work from outside the user's private network.
-- The connector path can supply authentication compatible with Brain's bearer-token MCP authentication.
-- The user understands that exposing Brain publicly requires production-grade auth, monitoring, and secret handling.
+- A URL MCP do Brain é publicamente alcançável ou está em allowlist para o plano Claude relevante.
+- TLS e DNS funcionam de fora da rede privada do usuário.
+- O caminho do conector consegue fornecer autenticação compatível com a autenticação MCP por token bearer do Brain.
+- O usuário entende que expor o Brain publicamente exige autenticação, monitoramento e tratamento de segredos em padrão de produção.
 
-If the current Claude Web connector flow cannot send Brain's required bearer token, do not weaken Brain authentication. Recommend one of these paths:
+Se o fluxo atual de conector do Claude Web não conseguir enviar o token bearer exigido pelo Brain, não enfraqueça a autenticação do Brain. Recomende um destes caminhos:
 
-- Use Claude Code with an HTTP MCP server and bearer header.
-- Use Claude Desktop local MCP configuration if the installed version supports it.
-- Add a small trusted auth proxy or OAuth-capable connector layer as separate future work.
+- Use Claude Code com um servidor MCP HTTP e header bearer.
+- Use configuração MCP local do Claude Desktop se a versão instalada oferecer suporte.
+- Adicione um pequeno proxy de autenticação confiável ou uma camada de conector compatível com OAuth como trabalho futuro separado.
 
 ### Hermes
 
-Treat Hermes as a trusted internal integration when it performs Brain curator workflows.
+Trate o Hermes como uma integração interna confiável quando ele executar fluxos de curador do Brain.
 
-Configure Hermes with:
+Configure o Hermes com:
 
 ```bash
 BRAIN_MCP_URL="https://brain.example.com/mcp"
 BRAIN_MCP_TOKEN="<BRAIN_CURATOR_TOKEN>"
 ```
 
-Use a curator token only when Hermes needs administrative MCP tools. If Hermes only needs ordinary client capabilities, create a Brain agent client and use its `brain_client_` token instead.
+Use um token de curador somente quando o Hermes precisar de ferramentas MCP administrativas. Se o Hermes precisar apenas de capacidades de cliente comum, crie um cliente de agente do Brain e use o token `brain_client_` dele.
 
-Do not confuse these Hermes-related values:
+Não confunda estes valores relacionados ao Hermes:
 
-- `BRAIN_MCP_TOKEN`: bearer token Hermes sends to Brain MCP.
-- `HERMES_WEBHOOK_SECRET`: secret Brain uses to sign outbox deliveries to Hermes.
-- `HERMES_WEBHOOK_URL`: URL Brain uses to deliver events to Hermes.
+- `BRAIN_MCP_TOKEN`: token bearer que o Hermes envia ao Brain MCP.
+- `HERMES_WEBHOOK_SECRET`: segredo que o Brain usa para assinar entregas de outbox ao Hermes.
+- `HERMES_WEBHOOK_URL`: URL que o Brain usa para entregar eventos ao Hermes.
 
-Webhook settings do not authenticate Hermes to `/mcp`.
+Configurações de webhook não autenticam o Hermes em `/mcp`.
 
-## Security Rules
+## Regras de Segurança
 
-Apply these rules every time:
+Aplique estas regras sempre:
 
-- Never commit `.env`, local secret files, literal bearer tokens, or generated client tokens.
-- Prefer environment variables, secure stores, or helper commands over static token values in config files.
-- Use examples like `<BRAIN_MCP_TOKEN>` and `<BRAIN_CURATOR_TOKEN>` instead of real values.
-- Validate the destination URL before attaching a token to it.
-- Use client tokens for normal agents.
-- Use curator tokens only for trusted administrative integrations.
-- Explain Claude Web and remote Claude connector network exposure before recommending that path.
-- Do not remove Brain authentication to make a client easier to connect.
+- Nunca commite `.env`, arquivos locais de segredo, tokens bearer literais ou tokens de cliente gerados.
+- Prefira variáveis de ambiente, armazenamentos seguros ou comandos auxiliares em vez de valores estáticos de token em arquivos de configuração.
+- Use exemplos como `<BRAIN_MCP_TOKEN>` e `<BRAIN_CURATOR_TOKEN>` em vez de valores reais.
+- Valide a URL de destino antes de anexar um token a ela.
+- Use tokens de cliente para agentes normais.
+- Use tokens de curador somente para integrações administrativas confiáveis.
+- Explique a exposição de rede do Claude Web e de conectores remotos do Claude antes de recomendar esse caminho.
+- Não remova a autenticação do Brain para facilitar a conexão de um cliente.
 
-## Verification
+## Verificação
 
-Use the strongest verification available for the selected client:
+Use a verificação mais forte disponível para o cliente selecionado:
 
-- Brain service:
+- Serviço Brain:
 
   ```bash
   curl -fsS "$BRAIN_BASE_URL/health"
@@ -223,38 +223,38 @@ Use the strongest verification available for the selected client:
   /mcp
   ```
 
-- Claude Web or remote Claude connector:
-  - Confirm the connector is added and authenticated in Claude settings.
-  - Confirm the Brain URL is not `localhost` and is reachable from outside the private network.
+- Claude Web ou conector remoto do Claude:
+  - Confirme que o conector foi adicionado e autenticado nas configurações do Claude.
+  - Confirme que a URL do Brain não é `localhost` e é alcançável de fora da rede privada.
 
 - Hermes:
-  - Confirm Hermes uses `BRAIN_MCP_URL` ending in `/mcp`.
-  - Confirm Hermes uses the intended MCP bearer token, not webhook secrets.
-  - Confirm any failed MCP call logs redact the token.
+  - Confirme que o Hermes usa `BRAIN_MCP_URL` terminando em `/mcp`.
+  - Confirme que o Hermes usa o token bearer MCP pretendido, não segredos de webhook.
+  - Confirme que logs de qualquer chamada MCP com falha mascaram o token.
 
-Do not treat a successful `/health` response as proof that MCP auth works. `/health` only proves that the HTTP service is reachable.
+Não trate uma resposta bem-sucedida de `/health` como prova de que a autenticação MCP funciona. `/health` prova apenas que o serviço HTTP está alcançável.
 
-## Troubleshooting
+## Solução de Problemas
 
-Use this failure map:
+Use este mapa de falhas:
 
-| Symptom | Likely Cause | Action |
+| Sintoma | Causa Provável | Ação |
 | --- | --- | --- |
-| `401` from MCP | Missing token, wrong token, disabled client, wrong principal, or `BRAIN_AUTH_TOKEN` used for MCP | Use `BRAIN_CURATOR_TOKEN` for curator workflows or a `brain_client_` token for ordinary clients |
-| `404` or route error | Client points at the wrong path | Use `<brain-base-url>/mcp` |
-| `/health` works but MCP fails | Auth or MCP transport issue | Check bearer token, client MCP transport, and server logs |
-| Claude Web cannot connect | Brain is local, private, behind VPN, blocked by firewall, or connector auth cannot send the bearer token | Use a public or allowlisted endpoint, Claude Code, local Desktop config, or future auth proxy work |
-| Tools are missing | Principal lacks permission, client filtered tools, server did not reload, or wrong Brain environment is configured | Verify principal, enabled tools, client reload, and target URL |
-| Hermes cannot administer Brain | Hermes is using a client token or webhook secret | Use curator MCP credentials for administrative workflows |
-| Token appears in config diff | Secret was written literally | Remove it from the file, rotate the token if exposed, and switch to environment-variable or secure-store configuration |
+| `401` do MCP | Token ausente, token errado, cliente desativado, principal errado ou `BRAIN_AUTH_TOKEN` usado para MCP | Use `BRAIN_CURATOR_TOKEN` para fluxos de curador ou um token `brain_client_` para clientes comuns |
+| `404` ou erro de rota | Cliente aponta para o caminho errado | Use `<brain-base-url>/mcp` |
+| `/health` funciona, mas MCP falha | Problema de autenticação ou transporte MCP | Verifique o token bearer, o transporte MCP do cliente e os logs do servidor |
+| Claude Web não consegue conectar | Brain está local, privado, atrás de VPN, bloqueado por firewall ou a autenticação do conector não consegue enviar o token bearer | Use um endpoint público ou em allowlist, Claude Code, configuração local do Desktop ou trabalho futuro de proxy de autenticação |
+| Ferramentas estão ausentes | Principal não tem permissão, cliente filtrou ferramentas, servidor não recarregou ou ambiente Brain errado está configurado | Verifique o principal, ferramentas habilitadas, recarga do cliente e URL de destino |
+| Hermes não consegue administrar o Brain | Hermes está usando um token de cliente ou segredo de webhook | Use credenciais MCP de curador para fluxos administrativos |
+| Token aparece no diff de configuração | Segredo foi escrito literalmente | Remova-o do arquivo, rotacione o token se ele foi exposto e mude para configuração por variável de ambiente ou armazenamento seguro |
 
-## Output Expectations
+## Expectativas de Saída
 
-When helping a user install Brain MCP:
+Ao ajudar um usuário a instalar Brain MCP:
 
-- State the selected client path.
-- State the exact MCP URL shape.
-- State which token class is needed without printing the token.
-- Provide only the configuration relevant to that client.
-- Include a verification step.
-- Include the most likely next diagnostic if verification fails.
+- Informe o caminho de cliente selecionado.
+- Informe o formato exato da URL MCP.
+- Informe qual classe de token é necessária sem imprimir o token.
+- Forneça somente a configuração relevante para esse cliente.
+- Inclua uma etapa de verificação.
+- Inclua o próximo diagnóstico mais provável se a verificação falhar.

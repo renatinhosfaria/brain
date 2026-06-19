@@ -1,129 +1,129 @@
 ---
 name: use-brain
-description: Use Brain as connected MCP memory for agent clients by retrieving curated context with `search`, `deep_search`, and `get_note`, and submitting durable new knowledge for curation with `submit_agent_note`. Use when an agent needs project context, decisions, preferences, reusable knowledge, or guidance on what to preserve in Brain.
+description: Use Brain como memória MCP conectada para clientes de agente ao recuperar contexto curado com `search`, `deep_search` e `get_note`, e enviar novo conhecimento durável para curadoria com `submit_agent_note`. Use quando um agente precisar de contexto de projeto, decisões, preferências, conhecimento reutilizável ou orientação sobre o que preservar no Brain.
 ---
 
-# Use Brain
+# Usar Brain
 
-Use Brain as curated memory after the MCP server is already connected. This skill is about how an ordinary agent client should retrieve context and contribute durable knowledge; it is not about installing MCP or performing curator administration.
+Use o Brain como memória curada depois que o servidor MCP já estiver conectado. Esta skill explica como um cliente de agente comum deve recuperar contexto e contribuir conhecimento durável; ela não trata da instalação do MCP nem da administração por curadores.
 
-## Core Mental Model
+## Modelo Mental Principal
 
-Brain separates curated knowledge from raw submissions:
+O Brain separa conhecimento curado de envios brutos:
 
-- `search`, `deep_search`, and `get_note` read curated knowledge.
-- `submit_agent_note` sends raw knowledge to the agent inbox for later curation.
-- A submitted agent note is not a curated note yet.
-- Ordinary clients should not read `_agents/` or depend on raw inbox paths.
-- Ordinary clients should not try to create or update curated notes directly.
-- Administrative and curator workflows belong to trusted curator principals, not ordinary clients.
+- `search`, `deep_search` e `get_note` leem conhecimento curado.
+- `submit_agent_note` envia conhecimento bruto para a caixa de entrada de agentes para curadoria posterior.
+- Uma nota de agente enviada ainda não é uma nota curada.
+- Clientes comuns não devem ler `_agents/` nem depender de caminhos brutos da caixa de entrada.
+- Clientes comuns não devem tentar criar ou atualizar notas curadas diretamente.
+- Fluxos administrativos e de curadoria pertencem a principals de curador confiáveis, não a clientes comuns.
 
-Use Brain when the task depends on project history, decisions, user preferences, domain facts, prior discoveries, reusable context, or knowledge that may outlive the current conversation.
+Use o Brain quando a tarefa depender de histórico de projeto, decisões, preferências do usuário, fatos de domínio, descobertas anteriores, contexto reutilizável ou conhecimento que possa sobreviver à conversa atual.
 
-## Start With Retrieval
+## Comece Pela Recuperação
 
-Before answering or acting, ask whether prior context could materially change the result.
+Antes de responder ou agir, pergunte se contexto anterior poderia mudar materialmente o resultado.
 
-Retrieve from Brain when the user asks about:
+Recupere informações do Brain quando o usuário perguntar sobre:
 
-- a project, repository, system, person, customer, process, or decision;
-- preferences, conventions, constraints, or prior agreements;
-- questions about known context, such as "what do we know about this project?";
-- historical context or rationale;
-- information that may have been learned in earlier sessions.
+- um projeto, repositório, sistema, pessoa, cliente, processo ou decisão;
+- preferências, convenções, restrições ou acordos anteriores;
+- perguntas sobre contexto conhecido, como "o que sabemos sobre este projeto?";
+- contexto histórico ou justificativa;
+- informações que podem ter sido aprendidas em sessões anteriores.
 
-Do not retrieve for trivial one-off tasks where memory cannot help, such as formatting a single sentence with all required context already present.
+Não recupere informações para tarefas triviais e pontuais em que a memória não possa ajudar, como formatar uma única frase quando todo o contexto necessário já está presente.
 
-## Retrieval Workflow
+## Fluxo de Recuperação
 
-Use this sequence:
+Use esta sequência:
 
-1. Start with `search` for direct questions and likely keywords.
-2. Use `deep_search` when context may depend on related entities, graph relationships, or broader project history.
-3. Use `get_note` to open the most relevant notes before making important claims.
-4. Answer from curated context when the notes support the answer.
-5. Say when Brain did not provide enough support instead of inventing missing context.
+1. Comece com `search` para perguntas diretas e palavras-chave prováveis.
+2. Use `deep_search` quando o contexto puder depender de entidades relacionadas, relações de grafo ou histórico mais amplo do projeto.
+3. Use `get_note` para abrir as notas mais relevantes antes de fazer afirmações importantes.
+4. Responda com base no contexto curado quando as notas sustentarem a resposta.
+5. Diga quando o Brain não forneceu suporte suficiente em vez de inventar contexto ausente.
 
 ### Use `search`
 
-Use `search` for direct retrieval from curated notes.
+Use `search` para recuperação direta em notas curadas.
 
-Good uses:
+Bons usos:
 
-- find notes about a project, person, decision, preference, or technical topic;
-- locate candidate notes by likely terms;
-- get snippets before deciding which notes to open.
+- encontrar notas sobre um projeto, pessoa, decisão, preferência ou tópico técnico;
+- localizar notas candidatas por termos prováveis;
+- obter trechos antes de decidir quais notas abrir.
 
-Keep `limit` moderate. Treat snippets as leads. For important claims, open the source note with `get_note`.
+Mantenha `limit` moderado. Trate trechos como pistas. Para afirmações importantes, abra a nota de origem com `get_note`.
 
 ### Use `deep_search`
 
-Use `deep_search` when the user needs context, not just matching text.
+Use `deep_search` quando o usuário precisar de contexto, não apenas de correspondência textual.
 
-Good uses:
+Bons usos:
 
-- understand project history;
-- discover related entities or decisions;
-- connect people, systems, concepts, repositories, or processes;
-- recover context when direct keyword search may miss adjacent knowledge.
+- entender o histórico do projeto;
+- descobrir entidades ou decisões relacionadas;
+- conectar pessoas, sistemas, conceitos, repositórios ou processos;
+- recuperar contexto quando a busca direta por palavras-chave puder perder conhecimento adjacente.
 
-Prefer conservative parameters first. Increase `depth` or `max_entities` only when the first result is too narrow. Use `namespace` or `rel_types` only when you know they reduce noise.
+Prefira parâmetros conservadores primeiro. Aumente `depth` ou `max_entities` apenas quando o primeiro resultado for estreito demais. Use `namespace` ou `rel_types` somente quando souber que eles reduzem ruído.
 
 ### Use `get_note`
 
-Use `get_note` to read a curated note by id or path.
+Use `get_note` para ler uma nota curada por id ou caminho.
 
-Use it when:
+Use quando:
 
-- a `search` or `deep_search` result looks relevant;
-- the snippet is not enough to answer confidently;
-- the user asks for the source, rationale, details, or exact context.
+- um resultado de `search` ou `deep_search` parecer relevante;
+- o trecho não for suficiente para responder com confiança;
+- o usuário pedir a fonte, a justificativa, detalhes ou o contexto exato.
 
-If `get_note` returns `null`, treat the note as unavailable. Do not infer its content. Do not try to read `_agents/` as an ordinary client.
+Se `get_note` retornar `null`, trate a nota como indisponível. Não infira seu conteúdo. Não tente ler `_agents/` como cliente comum.
 
-## Contribution Workflow
+## Fluxo de Contribuição
 
-Use `submit_agent_note` when new durable knowledge appears during work.
+Use `submit_agent_note` quando novo conhecimento durável surgir durante o trabalho.
 
-Durable knowledge includes:
+Conhecimento durável inclui:
 
-- stable facts;
-- decisions and their rationale;
-- user preferences and conventions;
-- reusable project context;
-- technical or operational discoveries;
-- mappings between names, systems, repositories, processes, and entities;
-- useful corrections to previously assumed context.
+- fatos estáveis;
+- decisões e suas justificativas;
+- preferências e convenções do usuário;
+- contexto de projeto reutilizável;
+- descobertas técnicas ou operacionais;
+- mapeamentos entre nomes, sistemas, repositórios, processos e entidades;
+- correções úteis para contexto anteriormente presumido.
 
-Before submitting, check:
+Antes de enviar, verifique:
 
-1. Will this likely help a future session?
-2. Is it stable enough to preserve?
-3. Can another person understand it without this whole chat?
-4. Is it free of secrets and unnecessary sensitive data?
-5. Did the user allow or reasonably expect this kind of persistence?
+1. Isso provavelmente ajudará uma sessão futura?
+2. É estável o suficiente para preservar?
+3. Outra pessoa consegue entender sem esta conversa inteira?
+4. Está livre de segredos e dados sensíveis desnecessários?
+5. O usuário permitiu ou razoavelmente esperava esse tipo de persistência?
 
-If the answer is yes, submit a clear note for curation. If the answer is uncertain, ask before submitting.
+Se a resposta for sim, envie uma nota clara para curadoria. Se a resposta for incerta, pergunte antes de enviar.
 
-## Note Quality Rules
+## Regras de Qualidade das Notas
 
-Write submissions for a future curator and a future agent.
+Escreva envios para um curador futuro e um agente futuro.
 
 Use:
 
-- a concise title that names the topic;
-- self-contained content with the relevant facts and context;
-- source or origin when it helps assess reliability;
-- uncertainty labels when the knowledge is tentative;
-- `suggested_namespace` when the project, domain, or tenant is clear;
-- short `metadata` only when it helps curation.
+- um título conciso que nomeie o tópico;
+- conteúdo autocontido com os fatos e o contexto relevantes;
+- fonte ou origem quando isso ajudar a avaliar confiabilidade;
+- marcadores de incerteza quando o conhecimento for tentativo;
+- `suggested_namespace` quando o projeto, domínio ou tenant estiver claro;
+- `metadata` curto somente quando ajudar a curadoria.
 
-Prefer this shape:
+Prefira este formato:
 
 ```json
 {
-  "title": "Project Alpha uses pgvector for semantic document search",
-  "content": "During work on Project Alpha, we confirmed that semantic document search is backed by pgvector in PostgreSQL. This matters when diagnosing retrieval quality or migration behavior.",
+  "title": "O Projeto Alpha usa pgvector para busca semântica de documentos",
+  "content": "Durante o trabalho no Projeto Alpha, confirmamos que a busca semântica de documentos é baseada em pgvector no PostgreSQL. Isso importa ao diagnosticar qualidade de recuperação ou comportamento de migração.",
   "suggested_namespace": "project-alpha",
   "metadata": {
     "source": "agent-session",
@@ -132,49 +132,49 @@ Prefer this shape:
 }
 ```
 
-Do not submit vague notes such as "talked about the project" or "user likes this". Include what was learned and why it matters.
+Não envie notas vagas como "conversamos sobre o projeto" ou "o usuário gosta disso". Inclua o que foi aprendido e por que isso importa.
 
-## What Not To Store
+## O Que Não Armazenar
 
-Do not submit:
+Não envie:
 
-- tokens, passwords, API keys, private keys, cookies, or session identifiers;
-- raw logs unless a compact summary captures the reusable lesson;
-- long transcripts without synthesis;
-- one-off task progress with no future value;
-- sensitive personal data that is not necessary for future work;
-- copyrighted or confidential source material copied wholesale;
-- claims that are uncertain but written as facts;
-- anything the user asked not to persist.
+- tokens, senhas, chaves de API, chaves privadas, cookies ou identificadores de sessão;
+- logs brutos, a menos que um resumo compacto capture a lição reutilizável;
+- transcrições longas sem síntese;
+- progresso de tarefas pontuais sem valor futuro;
+- dados pessoais sensíveis que não sejam necessários para trabalhos futuros;
+- material-fonte protegido por direitos autorais ou confidencial copiado integralmente;
+- afirmações incertas escritas como fatos;
+- qualquer coisa que o usuário pediu para não persistir.
 
-When in doubt, summarize the durable lesson and omit sensitive details.
+Em caso de dúvida, resuma a lição durável e omita detalhes sensíveis.
 
-## Error Handling
+## Tratamento de Erros
 
-Use this failure map:
+Use este mapa de falhas:
 
-| Situation | Action |
+| Situação | Ação |
 | --- | --- |
-| `search` returns no useful results | Reformulate with synonyms, project names, people, paths, or narrower terms; then try `deep_search` if relationships may matter |
-| `deep_search` returns noise | Reduce broad parameters, remove unnecessary filters, try direct `search`, or open only high-confidence notes |
-| `get_note` returns `null` | Treat the note as unavailable and avoid claims based on it |
-| `submit_agent_note` requires content | Send either `content` or structured `messages`; use `content` for concise durable facts |
-| `submit_agent_note` is not permitted | Tell the user this client cannot submit notes and a curator must adjust permissions |
-| A tool appears to require curator access | Do not use it as an ordinary client; stay within `search`, `deep_search`, `get_note`, and `submit_agent_note` |
-| The retrieved context conflicts with the current user | Surface the conflict and ask or proceed with the user's explicit current instruction |
+| `search` não retorna resultados úteis | Reformule com sinônimos, nomes de projetos, pessoas, caminhos ou termos mais específicos; depois tente `deep_search` se relacionamentos puderem importar |
+| `deep_search` retorna ruído | Reduza parâmetros amplos, remova filtros desnecessários, tente `search` direto ou abra apenas notas de alta confiança |
+| `get_note` retorna `null` | Trate a nota como indisponível e evite afirmações baseadas nela |
+| `submit_agent_note` exige conteúdo | Envie `content` ou `messages` estruturadas; use `content` para fatos duráveis concisos |
+| `submit_agent_note` não é permitido | Diga ao usuário que este cliente não pode enviar notas e que um curador deve ajustar as permissões |
+| Uma ferramenta parece exigir acesso de curador | Não a use como cliente comum; mantenha-se em `search`, `deep_search`, `get_note` e `submit_agent_note` |
+| O contexto recuperado conflita com o usuário atual | Exponha o conflito e pergunte, ou prossiga com a instrução atual explícita do usuário |
 
-## Output Expectations
+## Expectativas de Saída
 
-When Brain retrieval influenced the answer:
+Quando a recuperação do Brain influenciar a resposta:
 
-- Mention that you used curated Brain context when it helps the user trust the answer.
-- Avoid over-citing tool internals; summarize the relevant note content.
-- State uncertainty when retrieval was weak or empty.
+- Mencione que usou contexto curado do Brain quando isso ajudar o usuário a confiar na resposta.
+- Evite citar em excesso detalhes internos das ferramentas; resuma o conteúdo relevante das notas.
+- Declare incerteza quando a recuperação tiver sido fraca ou vazia.
 
-When submitting knowledge:
+Ao enviar conhecimento:
 
-- Say that the knowledge was submitted for curation.
-- Do not claim it is already curated or searchable.
-- Mention the durable point that was submitted, without exposing secrets.
+- Diga que o conhecimento foi enviado para curadoria.
+- Não afirme que ele já está curado ou pesquisável.
+- Mencione o ponto durável enviado, sem expor segredos.
 
-Keep the user's current instruction above older memory. Brain provides context; it does not override explicit user direction.
+Mantenha a instrução atual do usuário acima de memórias mais antigas. O Brain fornece contexto; ele não substitui direcionamento explícito do usuário.
