@@ -341,6 +341,9 @@ def _add_path_aliases(aliases: list[str], seen: set[str], repo_path: str) -> Non
     _add_alias(aliases, seen, stem)
     normalized = normalize_entity_text(stem)
     _add_alias(aliases, seen, normalized)
+    tokens = _tokens(stem)
+    _add_domain_token_aliases(aliases, seen, tokens)
+    _add_keyphrase_aliases(aliases, seen, tokens)
 
 
 def _tokens(value: str) -> list[tuple[str, str]]:
@@ -389,6 +392,7 @@ def _add_keyphrase_aliases(
     has_env = ".env" in norms or "env" in norms
     if has_env and "migrations" in norms:
         _add_alias(aliases, seen, "env migrations")
+        _add_env_migration_aliases(aliases, seen, norms)
 
     if "stack" in norms and "projeto" in norms:
         tecnica_display = _display_for(tokens, "tecnica")
@@ -398,6 +402,43 @@ def _add_keyphrase_aliases(
             _add_alias(aliases, seen, f"stack {tecnica_display} por projeto")
             _add_alias(aliases, seen, "stack tecnica por projeto")
         _add_alias(aliases, seen, "stack por projeto")
+
+
+def _add_env_migration_aliases(
+    aliases: list[str],
+    seen: set[str],
+    norms: list[str],
+) -> None:
+    phrase_tokens = ["env" if token == ".env" else token for token in norms]
+    env_idx = _first_index(norms, {".env", "env"})
+    migrations_idx = _first_index(norms, {"migrations"})
+    if env_idx is None or migrations_idx is None or migrations_idx < env_idx:
+        return
+
+    regras_idx = _first_index(norms, {"regras"})
+    if regras_idx is not None and regras_idx < env_idx:
+        _add_alias(aliases, seen, "regras env")
+        _add_alias(
+            aliases,
+            seen,
+            " ".join(phrase_tokens[regras_idx : migrations_idx + 1]),
+        )
+
+    projeto_idx = _first_index(norms, {"projeto"})
+    por_idx = _first_index(norms, {"por"})
+    if (
+        por_idx is not None
+        and projeto_idx is not None
+        and migrations_idx < por_idx < projeto_idx
+    ):
+        _add_alias(aliases, seen, "migrations por projeto")
+
+
+def _first_index(values: list[str], candidates: set[str]) -> int | None:
+    for idx, value in enumerate(values):
+        if value in candidates:
+            return idx
+    return None
 
 
 def _add_adjacent_sequence(

@@ -29,17 +29,24 @@ def test_build_payload_prefers_metadata_title_over_h1_and_keeps_path_alias():
     assert payload["props"]["repo_path"] == "preferencias/regras-env-e-migrations-por-projeto.md"
     assert payload["props"]["document_id"] == "doc-1"
     assert payload["props"]["tags"] == ["env", "migrations"]
-    assert "regras-env-e-migrations-por-projeto" in _aliases(payload)
-    assert "regras env e migrations por projeto" in _aliases(payload)
-    assert "env migrations" in _aliases(payload)
-    assert ".env" in _aliases(payload)
+    assert {
+        ".env",
+        "env",
+        "migrations",
+        "env migrations",
+        "regras env",
+        "migrations por projeto",
+        "regras de env e migrations",
+        "regras-env-e-migrations-por-projeto",
+        "regras env e migrations por projeto",
+    }.issubset(_aliases(payload))
 
 
-def test_build_payload_uses_h1_before_humanized_path():
+def test_build_payload_uses_markdown_h1_before_humanized_path_when_title_is_none():
     payload = build_curated_entity_payload(
         namespace="curated",
         repo_path="preferencias/stack-tecnica-por-projeto.md",
-        title="Stack técnica deve ser inferida por projeto",
+        title=None,
         content="# Stack técnica deve ser inferida por projeto\n\nCorpo.",
         metadata={},
     )
@@ -65,6 +72,16 @@ def test_build_payload_uses_humanized_path_without_title_or_h1():
     assert payload["status"] == "ready"
     assert payload["name"] == "Minio"
     assert "minio" in _aliases(payload)
+
+
+def test_build_payload_skips_when_no_canonical_name_can_be_derived():
+    assert build_curated_entity_payload(
+        namespace="curated",
+        repo_path=".md",
+        title=None,
+        content="Sem heading.",
+        metadata={},
+    ) == {"status": "skipped", "reason": "missing_name"}
 
 
 def test_build_payload_skips_non_curated_agents_and_non_markdown():
@@ -147,3 +164,5 @@ def test_normalize_entity_text_casefolds_and_removes_accents():
     assert normalize_entity_text("Stack Técnica") == "stack tecnica"
     assert normalize_entity_text("ações externas") == "acoes externas"
     assert normalize_entity_text("regras-env") == "regras env"
+    assert normalize_entity_text(".env") == ".env"
+    assert normalize_entity_text("  Stack   Técnica\npor\tprojeto  ") == "stack tecnica por projeto"
