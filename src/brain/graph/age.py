@@ -170,6 +170,9 @@ def _props_with_search_text(name: str, props: dict | None) -> dict:
     if aliases_normalized:
         enriched["aliases_normalized"] = aliases_normalized
     enriched["aliases_search_text_normalized"] = " ".join(aliases_normalized)
+    enriched["aliases_exact_normalized"] = (
+        f"|{'|'.join(aliases_normalized)}|" if aliases_normalized else ""
+    )
 
     tag_values = _as_string_list(enriched.get("tags")) + _as_string_list(
         enriched.get("tags_normalized")
@@ -182,6 +185,9 @@ def _props_with_search_text(name: str, props: dict | None) -> dict:
     if tags_normalized:
         enriched["tags_normalized"] = tags_normalized
     enriched["tags_search_text_normalized"] = " ".join(tags_normalized)
+    enriched["tags_exact_normalized"] = (
+        f"|{'|'.join(tags_normalized)}|" if tags_normalized else ""
+    )
 
     path_values = []
     for key in (
@@ -292,7 +298,9 @@ async def upsert_entity(
         f"n.name_normalized = {_lit(props.get('name_normalized'))}, "
         f"n.search_text_normalized = {_lit(props.get('search_text_normalized'))}, "
         f"n.aliases_search_text_normalized = {_lit(props.get('aliases_search_text_normalized'))}, "
+        f"n.aliases_exact_normalized = {_lit(props.get('aliases_exact_normalized'))}, "
         f"n.tags_search_text_normalized = {_lit(props.get('tags_search_text_normalized'))}, "
+        f"n.tags_exact_normalized = {_lit(props.get('tags_exact_normalized'))}, "
         f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
         f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
         f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
@@ -415,6 +423,7 @@ async def search_entities(
     if query_normalized:
         query_lit = _lit(query)
         normalized_lit = _lit(query_normalized)
+        exact_normalized_lit = _lit(f"|{query_normalized}|")
         where_clauses = [
             (
                 f"WHERE toLower(n.name) = toLower({query_lit}) "
@@ -432,8 +441,16 @@ async def search_entities(
                 f"OR n.props.name_normalized CONTAINS {normalized_lit} "
             ),
             (
+                f"WHERE n.aliases_exact_normalized CONTAINS {exact_normalized_lit} "
+                f"OR n.props.aliases_exact_normalized CONTAINS {exact_normalized_lit} "
+            ),
+            (
                 f"WHERE n.aliases_search_text_normalized CONTAINS {normalized_lit} "
                 f"OR n.props.aliases_search_text_normalized CONTAINS {normalized_lit} "
+            ),
+            (
+                f"WHERE n.tags_exact_normalized CONTAINS {exact_normalized_lit} "
+                f"OR n.props.tags_exact_normalized CONTAINS {exact_normalized_lit} "
             ),
             (
                 f"WHERE n.tags_search_text_normalized CONTAINS {normalized_lit} "
@@ -827,7 +844,9 @@ async def update_entity(
         f"n.name_normalized = {_lit(props.get('name_normalized'))}, "
         f"n.search_text_normalized = {_lit(props.get('search_text_normalized'))}, "
         f"n.aliases_search_text_normalized = {_lit(props.get('aliases_search_text_normalized'))}, "
+        f"n.aliases_exact_normalized = {_lit(props.get('aliases_exact_normalized'))}, "
         f"n.tags_search_text_normalized = {_lit(props.get('tags_search_text_normalized'))}, "
+        f"n.tags_exact_normalized = {_lit(props.get('tags_exact_normalized'))}, "
         f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
         f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
         f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
@@ -873,7 +892,9 @@ async def update_entity_identity(
         f"n.name_normalized = {_lit(props.get('name_normalized'))}, "
         f"n.search_text_normalized = {_lit(props.get('search_text_normalized'))}, "
         f"n.aliases_search_text_normalized = {_lit(props.get('aliases_search_text_normalized'))}, "
+        f"n.aliases_exact_normalized = {_lit(props.get('aliases_exact_normalized'))}, "
         f"n.tags_search_text_normalized = {_lit(props.get('tags_search_text_normalized'))}, "
+        f"n.tags_exact_normalized = {_lit(props.get('tags_exact_normalized'))}, "
         f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
         f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
         f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "

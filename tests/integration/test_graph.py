@@ -649,6 +649,60 @@ async def test_search_entities_exact_name_not_excluded_by_name_contains_cap(sess
     assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
 
 
+async def test_search_entities_exact_alias_not_excluded_by_alias_contains_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A alias parcial {idx:03d}",
+            "conceito",
+            "curated",
+            {"aliases": [f"term {idx:03d}"]},
+            commit=False,
+        )
+    await age.upsert_entity(
+        session,
+        "Zulu Alias Exato",
+        "conceito",
+        "curated",
+        {"aliases": ["term"]},
+        commit=False,
+    )
+    await session.commit()
+
+    found = await age.search_entities(session, "term", "curated", limit=1)
+
+    assert found == [
+        {"name": "Zulu Alias Exato", "type": "conceito", "namespace": "curated"}
+    ]
+
+
+async def test_search_entities_exact_tag_not_excluded_by_tag_contains_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A tag parcial {idx:03d}",
+            "conceito",
+            "curated",
+            {"tags": [f"term {idx:03d}"]},
+            commit=False,
+        )
+    await age.upsert_entity(
+        session,
+        "Zulu Tag Exata",
+        "conceito",
+        "curated",
+        {"tags": ["term"]},
+        commit=False,
+    )
+    await session.commit()
+
+    found = await age.search_entities(session, "term", "curated", limit=1)
+
+    assert found == [
+        {"name": "Zulu Tag Exata", "type": "conceito", "namespace": "curated"}
+    ]
+
+
 async def test_upsert_and_update_entity_store_normalized_search_text(session):
     await age.upsert_entity(
         session,
@@ -669,6 +723,8 @@ async def test_upsert_and_update_entity_store_normalized_search_text(session):
     assert "stack tecnica" in search_text
     assert "arquitetura" in search_text
     assert "preferencias goiania stack.md" in search_text
+    assert got["props"]["aliases_exact_normalized"] == "|stack tecnica|"
+    assert got["props"]["tags_exact_normalized"] == "|arquitetura|"
 
     await age.update_entity(
         session,
@@ -716,6 +772,8 @@ async def test_search_entities_uses_bounded_candidate_query(monkeypatch):
     assert any("n.name_normalized =" in query for query in candidate_queries)
     assert any("STARTS WITH" in query for query in candidate_queries)
     assert any("n.name" in query for query in candidate_queries)
+    assert any("aliases_exact_normalized" in query for query in candidate_queries)
     assert any("aliases_search_text_normalized" in query for query in candidate_queries)
+    assert any("tags_exact_normalized" in query for query in candidate_queries)
     assert any("n.props.search_text_normalized" in query for query in candidate_queries)
     assert any("n.source_doc" in query for query in candidate_queries)
