@@ -1,6 +1,10 @@
+import pytest
+
+import brain.ingestion.semantic_entities as semantic_entities
 from brain.ingestion.semantic_entities import (
     build_curated_entity_payload,
     normalize_entity_text,
+    upsert_entity_from_curated_document,
 )
 
 
@@ -166,3 +170,181 @@ def test_normalize_entity_text_casefolds_and_removes_accents():
     assert normalize_entity_text("regras-env") == "regras env"
     assert normalize_entity_text(".env") == ".env"
     assert normalize_entity_text("  Stack   Técnica\npor\tprojeto  ") == "stack tecnica por projeto"
+
+
+@pytest.mark.asyncio
+async def test_upsert_returns_skipped_payload_without_calling_age(monkeypatch):
+    calls = []
+
+    async def fail_if_called(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("AGE helper should not be called for skipped payload")
+
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "find_entity_by_source_doc",
+        fail_if_called,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "update_entity_identity",
+        fail_if_called,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "upsert_entity",
+        fail_if_called,
+        raising=False,
+    )
+
+    result = await upsert_entity_from_curated_document(
+        object(),
+        namespace="tenant",
+        repo_path="preferencias/privacidade.md",
+        title="Privacidade",
+        content="# Privacidade",
+        metadata={},
+    )
+
+    assert result == {"status": "skipped", "reason": "namespace_not_curated"}
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_upsert_updates_existing_entity_with_commit_false(monkeypatch):
+    session = object()
+    existing = {"id": "entity-1"}
+    calls = []
+
+    async def find_entity_by_source_doc(session_arg, **kwargs):
+        calls.append(("find", session_arg, kwargs))
+        return existing
+
+    async def update_entity_identity(session_arg, **kwargs):
+        calls.append(("update", session_arg, kwargs))
+
+    async def fail_upsert(*args, **kwargs):
+        calls.append(("upsert", args, kwargs))
+        raise AssertionError("upsert_entity should not be called for existing entity")
+
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "find_entity_by_source_doc",
+        find_entity_by_source_doc,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "update_entity_identity",
+        update_entity_identity,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "upsert_entity",
+        fail_upsert,
+        raising=False,
+    )
+
+    result = await upsert_entity_from_curated_document(
+        session,
+        namespace="curated",
+        repo_path="preferencias/perfil-ceo.md",
+        title="Perfil CEO",
+        content="# Perfil CEO",
+        metadata={},
+    )
+
+    assert result["status"] == "updated"
+    assert calls == [
+        (
+            "find",
+            session,
+            {
+                "namespace": "curated",
+                "source_doc": "preferencias/perfil-ceo.md",
+            },
+        ),
+        (
+            "update",
+            session,
+            {
+                "entity": existing,
+                "namespace": "curated",
+                "name": "Perfil CEO",
+                "type": "conceito",
+                "props": result["props"],
+                "commit": False,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_upsert_creates_entity_with_commit_false_when_not_found(monkeypatch):
+    session = object()
+    calls = []
+
+    async def find_entity_by_source_doc(session_arg, **kwargs):
+        calls.append(("find", session_arg, kwargs))
+        return None
+
+    async def fail_update(*args, **kwargs):
+        calls.append(("update", args, kwargs))
+        raise AssertionError("update_entity_identity should not be called for new entity")
+
+    async def upsert_entity(*args, **kwargs):
+        calls.append(("upsert", args, kwargs))
+
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "find_entity_by_source_doc",
+        find_entity_by_source_doc,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "update_entity_identity",
+        fail_update,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        semantic_entities.age,
+        "upsert_entity",
+        upsert_entity,
+        raising=False,
+    )
+
+    result = await upsert_entity_from_curated_document(
+        session,
+        namespace="curated",
+        repo_path="preferencias/perfil-ceo.md",
+        title="Perfil CEO",
+        content="# Perfil CEO",
+        metadata={},
+    )
+
+    assert result["status"] == "created"
+    assert calls == [
+        (
+            "find",
+            session,
+            {
+                "namespace": "curated",
+                "source_doc": "preferencias/perfil-ceo.md",
+            },
+        ),
+        (
+            "upsert",
+            (
+                session,
+                "Perfil CEO",
+                "conceito",
+                "curated",
+                result["props"],
+            ),
+            {"commit": False},
+        ),
+    ]
