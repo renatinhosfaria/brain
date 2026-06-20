@@ -197,3 +197,83 @@ async def test_reindex_remove_entidades_antigas_do_mesmo_documento(session):
 
     assert await age.get_entity(session, "Antigo", "t") is None
     assert await age.get_entity(session, "Novo", "t") is not None
+
+
+async def test_index_document_cria_entidade_deterministica_de_nota_curada(session):
+    content = "# Stack técnica deve ser inferida por projeto\n\nCorpo."
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        _settings(),
+        namespace="curated",
+        repo_path="preferencias/stack-tecnica-por-projeto.md",
+        content=content,
+        commit_sha="abc",
+        meta={"metadata": {"type": "preference", "tags": ["stack"]}},
+    )
+
+    found = await age.search_entities(session, "stack tecnica", "curated")
+    assert found[0]["name"] == "Stack técnica deve ser inferida por projeto"
+    ent = await age.get_entity(session, "Stack técnica deve ser inferida por projeto", "curated")
+    assert ent["type"] == "preferencia"
+    assert ent["props"]["source_doc"] == "preferencias/stack-tecnica-por-projeto.md"
+
+
+async def test_index_document_content_hash_igual_sincroniza_metadata_sem_rechunk(session):
+    settings = _settings()
+    content = "# Nome Antigo\n\nMesmo corpo."
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path="preferencias/metadata.md",
+        content=content,
+        commit_sha="old",
+        meta={"metadata": {"title": "Nome Antigo", "type": "preference"}},
+    )
+
+    changed = await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path="preferencias/metadata.md",
+        content=content,
+        commit_sha="new",
+        meta={
+            "metadata": {
+                "title": "Nome Novo",
+                "type": "decision",
+                "tags": ["renomeado"],
+            }
+        },
+    )
+
+    assert changed is False
+    assert await age.get_entity(session, "Nome Antigo", "curated") is None
+    ent = await age.get_entity(session, "Nome Novo", "curated")
+    assert ent is not None
+    assert ent["type"] == "decisao"
+    assert "renomeado" in ent["props"]["tags"]
+    found = await age.search_entities(session, "renomeado", "curated")
+    assert found[0]["name"] == "Nome Novo"
+
+
+async def test_index_document_nao_cria_entidade_deterministica_para_agents(session):
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        _settings(),
+        namespace="curated",
+        repo_path="_agents/chatgpt/raw.md",
+        content="# Raw\n\nNao deve virar entidade.",
+        commit_sha="abc",
+    )
+
+    assert await age.search_entities(session, "Raw", "curated") == []
