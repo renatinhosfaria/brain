@@ -516,3 +516,90 @@ async def test_get_relationship_paths_ordena_empate_por_intermediario(session):
             "depth": 2,
         },
     ]
+
+
+async def test_find_entity_by_source_doc_and_update_identity_preserves_relation(session):
+    await age.upsert_entity(
+        session,
+        "Nome Antigo",
+        "conceito",
+        "curated",
+        {"source_doc": "preferencias/x.md", "aliases": ["antigo"]},
+    )
+    await age.upsert_entity(session, "Vizinho", "conceito", "curated")
+    await age.upsert_relation(session, "Nome Antigo", "Vizinho", "relates_to", "curated")
+
+    found = await age.find_entity_by_source_doc(session, "curated", "preferencias/x.md")
+    assert found["name"] == "Nome Antigo"
+
+    await age.update_entity_identity(
+        session,
+        "Nome Antigo",
+        "curated",
+        name="Nome Novo",
+        type="preferencia",
+        props={"source_doc": "preferencias/x.md", "aliases": ["novo"]},
+    )
+
+    assert await age.get_entity(session, "Nome Antigo", "curated") is None
+    got = await age.get_entity(session, "Nome Novo", "curated")
+    assert got["type"] == "preferencia"
+    related = await age.get_related(session, "Nome Novo", "curated")
+    assert {"name": "Vizinho", "type": "conceito"} in related
+
+
+async def test_search_entities_matches_aliases_tags_and_path_with_ranking(session):
+    await age.upsert_entity(
+        session,
+        "Stack técnica deve ser inferida por projeto",
+        "preferencia",
+        "curated",
+        {
+            "source_doc": "preferencias/stack-tecnica-por-projeto.md",
+            "repo_path": "preferencias/stack-tecnica-por-projeto.md",
+            "aliases": ["stack tecnica", "stack por projeto"],
+            "tags": ["arquitetura"],
+        },
+    )
+    await age.upsert_entity(
+        session,
+        "Outro",
+        "conceito",
+        "curated",
+        {
+            "source_doc": "preferencias/outro-stack-tecnica.md",
+            "repo_path": "preferencias/outro-stack-tecnica.md",
+            "aliases": [],
+            "tags": [],
+        },
+    )
+
+    by_alias = await age.search_entities(session, "stack tecnica", "curated")
+    assert by_alias[0]["name"] == "Stack técnica deve ser inferida por projeto"
+
+    by_tag = await age.search_entities(session, "arquitetura", "curated")
+    assert by_tag[0]["name"] == "Stack técnica deve ser inferida por projeto"
+
+    by_path = await age.search_entities(session, "outro stack tecnica", "curated")
+    assert any(entity["name"] == "Outro" for entity in by_path)
+
+
+async def test_search_entities_limit_applies_after_ranking(session):
+    await age.upsert_entity(
+        session,
+        "Alvo Exato",
+        "conceito",
+        "curated",
+        {"aliases": ["termo"]},
+    )
+    await age.upsert_entity(
+        session,
+        "Termo",
+        "conceito",
+        "curated",
+        {"aliases": []},
+    )
+
+    found = await age.search_entities(session, "termo", "curated", limit=1)
+
+    assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]

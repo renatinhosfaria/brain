@@ -1,6 +1,7 @@
 import json
 from collections.abc import Iterable
 import re
+import unicodedata
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,6 +115,45 @@ def _dedupe_strings(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _normalize_match_text(value: object) -> str:
+    if value is None:
+        return ""
+    text_value = str(value).casefold()
+    text_value = "".join(
+        " " if unicodedata.category(ch) == "Pd" else ch for ch in text_value
+    )
+    decomposed = unicodedata.normalize("NFKD", text_value)
+    without_accents = "".join(
+        ch for ch in decomposed if not unicodedata.combining(ch)
+    )
+    cleaned = "".join(
+        ch if ch.isalnum() or ch.isspace() or ch == "." else " "
+        for ch in without_accents
+    )
+    return " ".join(cleaned.split())
+
+
+def _as_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, Iterable) and not isinstance(
+        value, (bytes, bytearray, dict)
+    ):
+        values = value
+    else:
+        values = [value]
+    result: list[str] = []
+    for item in values:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
 def _normalize_seed_entries(
     seeds: list[str] | list[dict],
     namespace: str | None,
@@ -145,16 +185,23 @@ def _normalize_seed_entries(
     return result
 
 
-async def ensure_graph(session: AsyncSession) -> None:
+async def ensure_graph(session: AsyncSession, *, commit: bool = True) -> None:
     await _prepare(session)
     exists = (await session.execute(text("SELECT 1 FROM ag_graph WHERE name='brain'"))).first()
     if not exists:
         await session.execute(text("SELECT create_graph('brain')"))
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def upsert_entity(
-    session: AsyncSession, name: str, type: str, namespace: str, props: dict | None = None
+    session: AsyncSession,
+    name: str,
+    type: str,
+    namespace: str,
+    props: dict | None = None,
+    *,
+    commit: bool = True,
 ) -> None:
     await _prepare(session)
     props = props or {}
@@ -169,11 +216,18 @@ async def upsert_entity(
         f"RETURN n $cy$) AS (n agtype)"
     )
     await session.execute(text(q))
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def upsert_relation(
-    session: AsyncSession, source: str, target: str, rel_type: str, namespace: str
+    session: AsyncSession,
+    source: str,
+    target: str,
+    rel_type: str,
+    namespace: str,
+    *,
+    commit: bool = True,
 ) -> None:
     await _prepare(session)
     q = (
@@ -184,7 +238,8 @@ async def upsert_relation(
         f"RETURN r $cy$) AS (r agtype)"
     )
     await session.execute(text(q))
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def get_entity(session: AsyncSession, name: str, namespace: str) -> dict | None:
@@ -200,6 +255,41 @@ async def get_entity(session: AsyncSession, name: str, namespace: str) -> dict |
     return {"name": _unwrap(row[0]), "type": _unwrap(row[1]), "props": _unwrap(row[2])}
 
 
+async def find_entity_by_source_doc(
+    session: AsyncSession,
+    namespace: str,
+    repo_path: str,
+    *,
+    document_id: str | None = None,
+) -> dict | None:
+    await _prepare(session)
+    source_filters = [
+        f"n.source_doc = {_lit(repo_path)}",
+        f"n.props.source_doc = {_lit(repo_path)}",
+        f"n.props.repo_path = {_lit(repo_path)}",
+    ]
+    if document_id is not None:
+        source_filters.append(f"n.props.document_id = {_lit(document_id)}")
+    q = (
+        f"SELECT * FROM cypher('brain', $cy$ "
+        f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
+        f"WHERE {' OR '.join(source_filters)} "
+        f"RETURN n.name, n.type, n.namespace, n.props "
+        f"ORDER BY n.name "
+        f"LIMIT 1 $cy$) AS (name agtype, type agtype, namespace agtype, props agtype)"
+    )
+    row = (await session.execute(text(q))).first()
+    if row is None:
+        return None
+    props = _unwrap(row[3])
+    return {
+        "name": _unwrap(row[0]),
+        "type": _unwrap(row[1]),
+        "namespace": _unwrap(row[2]),
+        "props": props if isinstance(props, dict) else {},
+    }
+
+
 async def search_entities(
     session: AsyncSession,
     query: str,
@@ -207,11 +297,10 @@ async def search_entities(
     limit: int | None = None,
 ) -> list[dict]:
     await _prepare(session)
-    limit_clause = ""
     if limit is not None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit deve ser um inteiro positivo")
-        limit_clause = f"LIMIT {limit} "
+    query_normalized = _normalize_match_text(query)
     namespace_match = (
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
         if namespace is not None
@@ -220,16 +309,79 @@ async def search_entities(
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"{namespace_match}"
-        f"WHERE toLower(n.name) CONTAINS toLower({_lit(query)}) "
-        f"RETURN n.name, n.type, n.namespace "
-        f"ORDER BY toLower(n.name), n.namespace, n.name, n.type "
-        f"{limit_clause}$cy$) AS (name agtype, type agtype, namespace agtype)"
+        f"RETURN n.name, n.type, n.namespace, n.props, n.source_doc "
+        f"ORDER BY n.namespace, n.name, n.type "
+        f"$cy$) AS (name agtype, type agtype, namespace agtype, "
+        f"props agtype, source_doc agtype)"
     )
     rows = (await session.execute(text(q))).all()
-    return [
-        {"name": _unwrap(n), "type": _unwrap(t), "namespace": _unwrap(ns)}
-        for n, t, ns in rows
-    ]
+    ranked: list[tuple[int, str, str, str, str, dict]] = []
+    for raw_name, raw_type, raw_namespace, raw_props, raw_source_doc in rows:
+        name = _unwrap(raw_name)
+        type_ = _unwrap(raw_type)
+        namespace_ = _unwrap(raw_namespace)
+        props = _unwrap(raw_props)
+        if not isinstance(props, dict):
+            props = {}
+
+        name_normalized = _normalize_match_text(name)
+        alias_values = [
+            _normalize_match_text(alias)
+            for alias in _as_string_list(props.get("aliases"))
+        ]
+        tag_values = [
+            _normalize_match_text(tag)
+            for tag in _as_string_list(props.get("tags"))
+        ]
+        path_values = [
+            _normalize_match_text(path)
+            for path in _as_string_list(
+                [
+                    props.get("source_doc"),
+                    props.get("repo_path"),
+                    props.get("path"),
+                    _unwrap(raw_source_doc),
+                ]
+            )
+        ]
+
+        rank: int | None
+        if not query_normalized:
+            rank = 6
+        elif name_normalized == query_normalized:
+            rank = 1
+        elif query_normalized in alias_values:
+            rank = 2
+        elif query_normalized in tag_values:
+            rank = 3
+        elif name_normalized.startswith(query_normalized) or any(
+            alias.startswith(query_normalized) for alias in alias_values
+        ):
+            rank = 4
+        elif query_normalized in name_normalized or any(
+            query_normalized in alias for alias in alias_values
+        ):
+            rank = 5
+        elif any(query_normalized in value for value in tag_values + path_values):
+            rank = 6
+        else:
+            continue
+
+        payload = {"name": name, "type": type_, "namespace": namespace_}
+        ranked.append(
+            (
+                rank,
+                name_normalized,
+                str(namespace_),
+                str(name),
+                str(type_),
+                payload,
+            )
+        )
+
+    ranked.sort(key=lambda item: item[:5])
+    results = [payload for *_, payload in ranked]
+    return results[:limit] if limit is not None else results
 
 
 async def get_related(
@@ -490,7 +642,12 @@ async def get_relationship_paths(
 
 
 async def update_entity(
-    session: AsyncSession, name: str, namespace: str, props: dict
+    session: AsyncSession,
+    name: str,
+    namespace: str,
+    props: dict,
+    *,
+    commit: bool = True,
 ) -> None:
     await _prepare(session)
     source_doc = props.get("source_doc")
@@ -503,7 +660,34 @@ async def update_entity(
         f"RETURN n $cy$) AS (n agtype)"
     )
     await session.execute(text(q))
-    await session.commit()
+    if commit:
+        await session.commit()
+
+
+async def update_entity_identity(
+    session: AsyncSession,
+    current_name: str,
+    namespace: str,
+    *,
+    name: str,
+    type: str,
+    props: dict,
+    commit: bool = True,
+) -> None:
+    await _prepare(session)
+    source_doc = props.get("source_doc")
+    source_memory = props.get("source_memory")
+    q = (
+        f"SELECT * FROM cypher('brain', $cy$ "
+        f"MATCH (n:Entity {{name: {_lit(current_name)}, namespace: {_lit(namespace)}}}) "
+        f"SET n.name = {_lit(name)}, n.type = {_lit(type)}, "
+        f"n.props = {_lit(props)}, n.source_doc = {_lit(source_doc)}, "
+        f"n.source_memory = {_lit(source_memory)} "
+        f"RETURN n $cy$) AS (n agtype)"
+    )
+    await session.execute(text(q))
+    if commit:
+        await session.commit()
 
 
 async def delete_entity(session: AsyncSession, name: str, namespace: str) -> None:
@@ -518,7 +702,11 @@ async def delete_entity(session: AsyncSession, name: str, namespace: str) -> Non
 
 
 async def delete_entities_by_source_doc(
-    session: AsyncSession, repo_path: str, namespace: str
+    session: AsyncSession,
+    repo_path: str,
+    namespace: str,
+    *,
+    commit: bool = True,
 ) -> None:
     await _prepare(session)
     q = (
@@ -528,7 +716,8 @@ async def delete_entities_by_source_doc(
         f"DETACH DELETE n $cy$) AS (v agtype)"
     )
     await session.execute(text(q))
-    await session.commit()
+    if commit:
+        await session.commit()
 
 
 async def delete_entities_by_source_memory(
