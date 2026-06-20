@@ -159,6 +159,32 @@ def test_generic_metadata_tags_and_aliases_do_not_emit_singleton_aliases():
     assert {".env", "env", "CEO", "migrations"}.issubset(aliases)
 
 
+def test_delimited_metadata_string_tags_and_aliases_are_split_conservatively():
+    payload = build_curated_entity_payload(
+        namespace="curated",
+        repo_path="conceitos/atalhos.md",
+        title="Atalhos úteis",
+        content="# Atalhos úteis\n\nCorpo.",
+        metadata={
+            "tags": "regras/perfil/.env/env/migrations",
+            "aliases": "regras, perfil, tecnica, deve, CEO",
+        },
+    )
+
+    aliases = _aliases(payload)
+    assert {
+        "regras/perfil/.env/env/migrations",
+        "regras perfil .env env migrations",
+        "regras, perfil, tecnica, deve, CEO",
+        "regras perfil tecnica deve ceo",
+        "regras",
+        "perfil",
+        "tecnica",
+        "deve",
+    }.isdisjoint(aliases)
+    assert {".env", "env", "CEO", "migrations"}.issubset(aliases)
+
+
 def test_type_mapping_and_raw_type_preservation():
     mapped = build_curated_entity_payload(
         namespace="curated",

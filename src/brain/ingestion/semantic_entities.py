@@ -54,6 +54,7 @@ _DOMAIN_SINGLE_ALIASES = {
     "migrations": "migrations",
     "privacidade": "privacidade",
 }
+_METADATA_VALUE_DELIMITER = re.compile(r"[,;/]+")
 
 
 def normalize_entity_text(value: str) -> str:
@@ -274,11 +275,26 @@ def _as_string_list(value: object) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for item in values:
-        cleaned = _clean_str(item)
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            result.append(cleaned)
+        for cleaned in _metadata_value_parts(item):
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                result.append(cleaned)
     return result
+
+
+def _metadata_value_parts(value: object) -> list[str]:
+    cleaned = _clean_str(value)
+    if not cleaned:
+        return []
+    if not _METADATA_VALUE_DELIMITER.search(cleaned):
+        return [cleaned]
+    return [
+        part
+        for part in (
+            _clean_str(part) for part in _METADATA_VALUE_DELIMITER.split(cleaned)
+        )
+        if part
+    ]
 
 
 def _metadata_aliases(metadata: dict) -> list[str]:
