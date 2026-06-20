@@ -156,18 +156,67 @@ def _as_string_list(value: object) -> list[str]:
 
 def _props_with_search_text(name: str, props: dict | None) -> dict:
     enriched = dict(props or {})
-    values: list[str] = [name]
+    name_normalized = _normalize_match_text(name)
+    enriched["name_normalized"] = name_normalized
+
+    alias_values = _as_string_list(enriched.get("aliases")) + _as_string_list(
+        enriched.get("aliases_normalized")
+    )
+    aliases_normalized = _dedupe_strings(
+        normalized
+        for value in alias_values
+        if (normalized := _normalize_match_text(value))
+    )
+    if aliases_normalized:
+        enriched["aliases_normalized"] = aliases_normalized
+    enriched["aliases_search_text_normalized"] = " ".join(aliases_normalized)
+
+    tag_values = _as_string_list(enriched.get("tags")) + _as_string_list(
+        enriched.get("tags_normalized")
+    )
+    tags_normalized = _dedupe_strings(
+        normalized
+        for value in tag_values
+        if (normalized := _normalize_match_text(value))
+    )
+    if tags_normalized:
+        enriched["tags_normalized"] = tags_normalized
+    enriched["tags_search_text_normalized"] = " ".join(tags_normalized)
+
+    path_values = []
     for key in (
-        "aliases",
-        "aliases_normalized",
-        "tags",
-        "tags_normalized",
         "source_doc",
         "source_doc_normalized",
         "repo_path",
         "repo_path_normalized",
         "path",
-        "name_normalized",
+        "path_normalized",
+    ):
+        path_values.extend(_as_string_list(enriched.get(key)))
+    path_values_normalized = _dedupe_strings(
+        normalized
+        for value in path_values
+        if (normalized := _normalize_match_text(value))
+    )
+    if enriched.get("source_doc") is not None:
+        enriched["source_doc_normalized"] = _normalize_match_text(
+            enriched.get("source_doc")
+        )
+    if enriched.get("repo_path") is not None:
+        enriched["repo_path_normalized"] = _normalize_match_text(
+            enriched.get("repo_path")
+        )
+    if enriched.get("path") is not None:
+        enriched["path_normalized"] = _normalize_match_text(enriched.get("path"))
+    enriched["path_search_text_normalized"] = " ".join(path_values_normalized)
+
+    values: list[str] = [
+        name_normalized,
+        *aliases_normalized,
+        *tags_normalized,
+        *path_values_normalized,
+    ]
+    for key in (
         "search_text_normalized",
     ):
         values.extend(_as_string_list(enriched.get(key)))
@@ -239,7 +288,14 @@ async def upsert_entity(
         f"MERGE (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
         f"SET n.type = {_lit(type)}, n.props = {_lit(props)}, "
         f"n.source_doc = {_lit(source_doc)}, "
-        f"n.source_memory = {_lit(source_memory)} "
+        f"n.source_memory = {_lit(source_memory)}, "
+        f"n.name_normalized = {_lit(props.get('name_normalized'))}, "
+        f"n.search_text_normalized = {_lit(props.get('search_text_normalized'))}, "
+        f"n.aliases_search_text_normalized = {_lit(props.get('aliases_search_text_normalized'))}, "
+        f"n.tags_search_text_normalized = {_lit(props.get('tags_search_text_normalized'))}, "
+        f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
+        f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
+        f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
         f"RETURN n $cy$) AS (n agtype)"
     )
     await session.execute(text(q))
@@ -342,25 +398,64 @@ async def search_entities(
         if namespace is not None
         else "MATCH (n:Entity) "
     )
-    where_clause = ""
-    if query_normalized:
-        where_clause = (
-            f"WHERE toLower(n.name) CONTAINS toLower({_lit(query)}) "
-            f"OR toLower(n.source_doc) CONTAINS toLower({_lit(query)}) "
-            f"OR toLower(n.props.search_text_normalized) "
-            f"CONTAINS {_lit(query_normalized)} "
+
+    async def fetch_candidates(where_clause: str = "") -> list[tuple]:
+        q = (
+            f"SELECT * FROM cypher('brain', $cy$ "
+            f"{namespace_match}"
+            f"{where_clause}"
+            f"RETURN n.name, n.type, n.namespace, n.props, n.source_doc "
+            f"ORDER BY n.namespace, n.name, n.type "
+            f"LIMIT {candidate_limit} "
+            f"$cy$) AS (name agtype, type agtype, namespace agtype, "
+            f"props agtype, source_doc agtype)"
         )
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
-        f"{namespace_match}"
-        f"{where_clause}"
-        f"RETURN n.name, n.type, n.namespace, n.props, n.source_doc "
-        f"ORDER BY n.namespace, n.name, n.type "
-        f"LIMIT {candidate_limit} "
-        f"$cy$) AS (name agtype, type agtype, namespace agtype, "
-        f"props agtype, source_doc agtype)"
-    )
-    rows = (await session.execute(text(q))).all()
+        return (await session.execute(text(q))).all()
+
+    if query_normalized:
+        query_lit = _lit(query)
+        normalized_lit = _lit(query_normalized)
+        where_clauses = [
+            (
+                f"WHERE toLower(n.name) CONTAINS toLower({query_lit}) "
+                f"OR n.name_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.name_normalized CONTAINS {normalized_lit} "
+            ),
+            (
+                f"WHERE n.aliases_search_text_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.aliases_search_text_normalized CONTAINS {normalized_lit} "
+            ),
+            (
+                f"WHERE n.tags_search_text_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.tags_search_text_normalized CONTAINS {normalized_lit} "
+            ),
+            (
+                f"WHERE n.search_text_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.search_text_normalized CONTAINS {normalized_lit} "
+            ),
+            (
+                f"WHERE toLower(n.source_doc) CONTAINS toLower({query_lit}) "
+                f"OR n.source_doc_normalized CONTAINS {normalized_lit} "
+                f"OR n.repo_path_normalized CONTAINS {normalized_lit} "
+                f"OR n.path_search_text_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.source_doc_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.repo_path_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.path_normalized CONTAINS {normalized_lit} "
+                f"OR n.props.path_search_text_normalized CONTAINS {normalized_lit} "
+            ),
+        ]
+        rows = []
+        seen_candidates: set[tuple[object, object]] = set()
+        for where_clause in where_clauses:
+            for row in await fetch_candidates(where_clause):
+                key = (_unwrap(row[0]), _unwrap(row[2]))
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+                rows.append(row)
+    else:
+        rows = await fetch_candidates()
+
     ranked: list[tuple[int, str, str, str, str, dict]] = []
     for raw_name, raw_type, raw_namespace, raw_props, raw_source_doc in rows:
         name = _unwrap(raw_name)
@@ -718,7 +813,14 @@ async def update_entity(
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MATCH (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
         f"SET n.props = {_lit(props)}, n.source_doc = {_lit(source_doc)}, "
-        f"n.source_memory = {_lit(source_memory)} "
+        f"n.source_memory = {_lit(source_memory)}, "
+        f"n.name_normalized = {_lit(props.get('name_normalized'))}, "
+        f"n.search_text_normalized = {_lit(props.get('search_text_normalized'))}, "
+        f"n.aliases_search_text_normalized = {_lit(props.get('aliases_search_text_normalized'))}, "
+        f"n.tags_search_text_normalized = {_lit(props.get('tags_search_text_normalized'))}, "
+        f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
+        f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
+        f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
         f"RETURN n $cy$) AS (n agtype)"
     )
     await session.execute(text(q))
@@ -757,7 +859,14 @@ async def update_entity_identity(
         f"MATCH (n:Entity {{name: {_lit(current_name)}, namespace: {_lit(namespace)}}}) "
         f"SET n.name = {_lit(name)}, n.type = {_lit(type)}, "
         f"n.props = {_lit(props)}, n.source_doc = {_lit(source_doc)}, "
-        f"n.source_memory = {_lit(source_memory)} "
+        f"n.source_memory = {_lit(source_memory)}, "
+        f"n.name_normalized = {_lit(props.get('name_normalized'))}, "
+        f"n.search_text_normalized = {_lit(props.get('search_text_normalized'))}, "
+        f"n.aliases_search_text_normalized = {_lit(props.get('aliases_search_text_normalized'))}, "
+        f"n.tags_search_text_normalized = {_lit(props.get('tags_search_text_normalized'))}, "
+        f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
+        f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
+        f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
         f"RETURN n $cy$) AS (n agtype)"
     )
     await session.execute(text(q))

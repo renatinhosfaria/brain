@@ -611,6 +611,27 @@ async def test_search_entities_limit_applies_after_ranking(session):
     assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
 
 
+async def test_search_entities_name_match_not_excluded_by_path_candidate_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A caminho {idx:03d}",
+            "conceito",
+            "curated",
+            {
+                "source_doc": f"preferencias/termo-baixa-relevancia-{idx:03d}.md",
+                "repo_path": f"preferencias/termo-baixa-relevancia-{idx:03d}.md",
+            },
+            commit=False,
+        )
+    await age.upsert_entity(session, "Termo", "conceito", "curated", commit=False)
+    await session.commit()
+
+    found = await age.search_entities(session, "termo", "curated", limit=1)
+
+    assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
+
+
 async def test_upsert_and_update_entity_store_normalized_search_text(session):
     await age.upsert_entity(
         session,
@@ -671,7 +692,11 @@ async def test_search_entities_uses_bounded_candidate_query(monkeypatch):
 
     await age.search_entities(fake_session, "stack tecnica", "curated", limit=2)
 
-    query = fake_session.statements[-1]
-    assert "WHERE" in query
-    assert "n.props.search_text_normalized" in query
-    assert "LIMIT 100" in query
+    candidate_queries = fake_session.statements
+    assert len(candidate_queries) >= 3
+    assert all("WHERE" in query for query in candidate_queries)
+    assert all("LIMIT 100" in query for query in candidate_queries)
+    assert any("n.name" in query for query in candidate_queries)
+    assert any("aliases_search_text_normalized" in query for query in candidate_queries)
+    assert any("n.props.search_text_normalized" in query for query in candidate_queries)
+    assert any("n.source_doc" in query for query in candidate_queries)
