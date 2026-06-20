@@ -2256,3 +2256,27 @@ async def test_update_entity_cria_quando_entidade_nao_existe(deps):
     assert out == {"updated": True}
     found = await _as_curator(handlers.search_entities, deps, "manual", "curated")
     assert found[0]["name"] == "Entidade Manual"
+
+
+async def test_update_entity_preserva_tipo_existente_quando_props_omite_tipo(deps):
+    await _as_curator(
+        handlers.update_entity,
+        deps,
+        "Projeto Manual",
+        "curated",
+        {"type": "projeto", "aliases": ["brain"]},
+    )
+
+    out = await _as_curator(
+        handlers.update_entity,
+        deps,
+        "Projeto Manual",
+        "curated",
+        {"aliases": ["manual"]},
+    )
+
+    assert out == {"updated": True}
+    got = await _as_curator(handlers.get_entity, deps, "Projeto Manual", "curated")
+    assert got["type"] == "projeto"
+    found = await _as_curator(handlers.search_entities, deps, "manual", "curated")
+    assert found[0]["name"] == "Projeto Manual"

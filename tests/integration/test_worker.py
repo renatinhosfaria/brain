@@ -7,6 +7,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from sqlalchemy import select, text
 
+from brain.graph import age
 from brain.config import Settings
 from brain.outbox import sign_webhook, sign_webhook_body
 from brain.queue.base import JobType
@@ -299,6 +300,55 @@ async def test_worker_normaliza_repo_path_seguro_antes_de_indexar(ctx):
     assert doc is not None
     assert doc.namespace == "curated"
     assert raw_doc is None
+
+
+async def test_worker_reindex_curated_note_usa_frontmatter_metadata(ctx):
+    sf, queue, settings, tmp = ctx
+    note_path = tmp / "preferencias" / "worker.md"
+    note_path.parent.mkdir()
+    note_path.write_text(
+        """---
+type: curated_note
+metadata:
+  title: Worker Metadata Title
+  type: preference
+  aliases:
+    - worker alias
+  tags:
+    - worker-tag
+source_agent_note_ids:
+  - agent-1
+---
+# H1 Ignorado
+corpo
+""",
+        encoding="utf-8",
+    )
+
+    await queue.enqueue(
+        JobType.REINDEX.value,
+        {"namespace": "curated", "repo_path": "preferencias/worker.md"},
+    )
+
+    assert await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings) is True
+
+    async with sf() as s:
+        doc = await repo.get_document(s, repo_path="preferencias/worker.md")
+        found = await age.search_entities(s, "worker alias", "curated")
+        entity = await age.get_entity(s, "Worker Metadata Title", "curated")
+
+    assert doc is not None
+    assert doc.meta == {
+        "metadata": {
+            "title": "Worker Metadata Title",
+            "type": "preference",
+            "aliases": ["worker alias"],
+            "tags": ["worker-tag"],
+        },
+        "source_agent_note_ids": ["agent-1"],
+    }
+    assert found[0]["name"] == "Worker Metadata Title"
+    assert entity["type"] == "preferencia"
 
 
 async def test_worker_normaliza_repo_path_antes_de_deletar(ctx):

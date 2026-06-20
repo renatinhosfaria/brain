@@ -589,6 +589,69 @@ async def test_find_entity_by_source_doc_and_update_identity_preserves_relation(
     assert {"name": "Vizinho", "type": "conceito"} in related
 
 
+async def test_find_entity_by_source_doc_prefers_curated_note_over_llm_entity(session):
+    await age.upsert_entity(
+        session,
+        "Z Curada",
+        "preferencia",
+        "curated",
+        {
+            "source": "curated_note",
+            "source_doc": "preferencias/mesma.md",
+            "document_id": "doc-curated",
+        },
+    )
+    await age.upsert_entity(
+        session,
+        "A Extraida",
+        "conceito",
+        "curated",
+        {"source_doc": "preferencias/mesma.md"},
+    )
+
+    found = await age.find_entity_by_source_doc(
+        session,
+        namespace="curated",
+        source_doc="preferencias/mesma.md",
+    )
+
+    assert found["name"] == "Z Curada"
+
+
+async def test_find_entity_by_source_doc_prefers_exact_document_id(session):
+    await age.upsert_entity(
+        session,
+        "Documento A",
+        "preferencia",
+        "curated",
+        {
+            "source": "curated_note",
+            "source_doc": "preferencias/mesma.md",
+            "document_id": "doc-a",
+        },
+    )
+    await age.upsert_entity(
+        session,
+        "Documento Z",
+        "preferencia",
+        "curated",
+        {
+            "source": "curated_note",
+            "source_doc": "preferencias/mesma.md",
+            "document_id": "doc-z",
+        },
+    )
+
+    found = await age.find_entity_by_source_doc(
+        session,
+        namespace="curated",
+        source_doc="preferencias/mesma.md",
+        document_id="doc-z",
+    )
+
+    assert found["name"] == "Documento Z"
+
+
 async def test_search_entities_matches_aliases_tags_and_path_with_ranking(session):
     await age.upsert_entity(
         session,

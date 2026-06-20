@@ -375,18 +375,33 @@ async def find_entity_by_source_doc(
         f"WHERE {' OR '.join(source_filters)} "
         f"RETURN n.name, n.type, n.namespace, n.props "
         f"ORDER BY n.name "
-        f"LIMIT 1 $cy$) AS (name agtype, type agtype, namespace agtype, props agtype)"
+        f"$cy$) AS (name agtype, type agtype, namespace agtype, props agtype)"
     )
-    row = (await session.execute(text(q))).first()
-    if row is None:
+    rows = (await session.execute(text(q))).all()
+    if not rows:
         return None
-    props = _unwrap(row[3])
-    return {
-        "name": _unwrap(row[0]),
-        "type": _unwrap(row[1]),
-        "namespace": _unwrap(row[2]),
-        "props": props if isinstance(props, dict) else {},
-    }
+
+    def payload(row) -> dict:
+        props = _unwrap(row[3])
+        return {
+            "name": _unwrap(row[0]),
+            "type": _unwrap(row[1]),
+            "namespace": _unwrap(row[2]),
+            "props": props if isinstance(props, dict) else {},
+        }
+
+    def rank(candidate: dict) -> tuple[int, int, str]:
+        props = candidate["props"]
+        document_id_matches = (
+            document_id is not None and props.get("document_id") == document_id
+        )
+        return (
+            0 if props.get("source") == "curated_note" else 1,
+            0 if document_id_matches else 1,
+            str(candidate["name"]),
+        )
+
+    return min((payload(row) for row in rows), key=rank)
 
 
 async def search_entities(
