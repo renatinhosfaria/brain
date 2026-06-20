@@ -167,6 +167,8 @@ O grafo AGE usado pelo Brain se chama `brain`. A inicialização do PostgreSQL c
 
 Os nós de entidade são gerenciados por `brain.graph.age` com label `Entity`. Relações entre entidades usam arestas `REL`, com o tipo semântico salvo na propriedade `type`. As entidades carregam propriedades como `name`, `type`, `namespace`, `props`, `source_doc` e `source_memory`, permitindo rastrear a origem em documentos ou memórias.
 
+Além das entidades extraídas por LLM, notas curadas no namespace `curated` geram uma entidade determinística por documento Markdown elegível. Essa entidade usa título/metadados/path como fonte de nome, aliases e tags pesquisáveis, persiste `source_doc`/`repo_path`/`document_id` em `props` e pode ser reconstruída por reindexação individual do documento.
+
 A extração de entidades e relações ocorre a partir do LLM de extração durante a indexação de documentos ou durante a extração de fatos. Na indexação documental, entidades extraídas recebem `source_doc` com o `repo_path`; na extração de fatos, entidades podem receber `source_memory` com o identificador da memória persistida.
 
 `deep_search` combina busca textual/vetorial com travessia do grafo. A etapa de grafo usa `get_relationship_paths` para recuperar entidades e relações conectadas às sementes extraídas ou encontradas.
