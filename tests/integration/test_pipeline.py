@@ -388,3 +388,84 @@ async def test_index_document_agents_nao_prepara_grafo_para_sync_deterministico(
         content="# Raw\n\nNao deve virar entidade.",
         commit_sha="abc",
     )
+
+
+async def test_search_entities_acceptance_queries_for_curated_note_aliases(session):
+    settings = _settings()
+    cases = [
+        (
+            "preferencias/stack-tecnica-por-projeto.md",
+            "# Stack técnica deve ser inferida por projeto\n\nCorpo.",
+            {"metadata": {"title": "Stack técnica deve ser inferida por projeto", "type": "preference"}},
+            ["Stack técnica por projeto", "stack tecnica"],
+            "Stack técnica deve ser inferida por projeto",
+        ),
+        (
+            "preferencias/regras-env-e-migrations-por-projeto.md",
+            "# Regras de .env e migrations dependem do projeto\n\nCorpo.",
+            {"metadata": {"title": "Regras de .env e migrations dependem do projeto", "type": "preference"}},
+            ["env migrations", "migrations por projeto"],
+            "Regras de .env e migrations dependem do projeto",
+        ),
+        (
+            "preferencias/privacidade-credenciais-e-acoes-externas.md",
+            "# Privacidade, credenciais e ações externas\n\nCorpo.",
+            {"metadata": {"title": "Privacidade, credenciais e ações externas", "type": "preference"}},
+            ["Privacidade", "credenciais"],
+            "Privacidade, credenciais e ações externas",
+        ),
+        (
+            "preferencias/perfil-ceo.md",
+            "# Perfil CEO\n\nCorpo.",
+            {"metadata": {"title": "Perfil CEO", "aliases": ["Hermes CEO", "ceo hermes"]}},
+            ["Hermes CEO"],
+            "Perfil CEO",
+        ),
+        (
+            "projetos/famaagent.md",
+            "# FamaAgent\n\nProjeto.",
+            {"metadata": {"title": "FamaAgent", "type": "project"}},
+            ["FamaAgent"],
+            "FamaAgent",
+        ),
+        (
+            "projetos/mcp-fama.md",
+            "# MCP-Fama\n\nProjeto.",
+            {"metadata": {"title": "MCP-Fama", "type": "project", "aliases": ["mcp-fama"]}},
+            ["mcp-fama"],
+            "MCP-Fama",
+        ),
+        (
+            "projetos/evolution-go.md",
+            "# Evolution API\n\nProjeto.",
+            {"metadata": {"title": "Evolution API", "type": "project", "aliases": ["Evolution-go"]}},
+            ["Evolution-go"],
+            "Evolution API",
+        ),
+        (
+            "projetos/paperclip-openclaw.md",
+            "# OpenClaw\n\nProjeto.",
+            {"metadata": {"title": "OpenClaw", "type": "project", "aliases": ["Paperclip"]}},
+            ["Paperclip"],
+            "OpenClaw",
+        ),
+    ]
+
+    for repo_path, content, meta, queries, _expected_name in cases:
+        await pipeline.index_document(
+            session,
+            FakeEmbedder(),
+            None,
+            settings,
+            namespace="curated",
+            repo_path=repo_path,
+            content=content,
+            commit_sha="abc",
+            meta=meta,
+        )
+
+    for _repo_path, _content, _meta, queries, expected_name in cases:
+        for query in queries:
+            found = await age.search_entities(session, query, "curated")
+            assert found, query
+            assert found[0]["name"] == expected_name
