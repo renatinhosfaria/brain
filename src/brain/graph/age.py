@@ -417,6 +417,16 @@ async def search_entities(
         normalized_lit = _lit(query_normalized)
         where_clauses = [
             (
+                f"WHERE toLower(n.name) = toLower({query_lit}) "
+                f"OR n.name_normalized = {normalized_lit} "
+                f"OR n.props.name_normalized = {normalized_lit} "
+            ),
+            (
+                f"WHERE toLower(n.name) STARTS WITH toLower({query_lit}) "
+                f"OR n.name_normalized STARTS WITH {normalized_lit} "
+                f"OR n.props.name_normalized STARTS WITH {normalized_lit} "
+            ),
+            (
                 f"WHERE toLower(n.name) CONTAINS toLower({query_lit}) "
                 f"OR n.name_normalized CONTAINS {normalized_lit} "
                 f"OR n.props.name_normalized CONTAINS {normalized_lit} "

@@ -632,6 +632,23 @@ async def test_search_entities_name_match_not_excluded_by_path_candidate_cap(ses
     assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
 
 
+async def test_search_entities_exact_name_not_excluded_by_name_contains_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A termo {idx:03d}",
+            "conceito",
+            "curated",
+            commit=False,
+        )
+    await age.upsert_entity(session, "Termo", "conceito", "curated", commit=False)
+    await session.commit()
+
+    found = await age.search_entities(session, "termo", "curated", limit=1)
+
+    assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
+
+
 async def test_upsert_and_update_entity_store_normalized_search_text(session):
     await age.upsert_entity(
         session,
@@ -693,9 +710,11 @@ async def test_search_entities_uses_bounded_candidate_query(monkeypatch):
     await age.search_entities(fake_session, "stack tecnica", "curated", limit=2)
 
     candidate_queries = fake_session.statements
-    assert len(candidate_queries) >= 3
+    assert len(candidate_queries) >= 5
     assert all("WHERE" in query for query in candidate_queries)
     assert all("LIMIT 100" in query for query in candidate_queries)
+    assert any("n.name_normalized =" in query for query in candidate_queries)
+    assert any("STARTS WITH" in query for query in candidate_queries)
     assert any("n.name" in query for query in candidate_queries)
     assert any("aliases_search_text_normalized" in query for query in candidate_queries)
     assert any("n.props.search_text_normalized" in query for query in candidate_queries)
