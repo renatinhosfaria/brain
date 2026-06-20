@@ -79,6 +79,41 @@ async def test_delete_entity(session):
     assert await age.get_entity(session, "Temp", "pessoal") is None
 
 
+async def test_delete_entities_by_source_doc_preserva_sources_excluidos(session):
+    await age.upsert_entity(
+        session,
+        "Curada",
+        "preferencia",
+        "curated",
+        {"source": "curated_note", "source_doc": "preferencias/x.md"},
+    )
+    await age.upsert_entity(
+        session,
+        "Extraida",
+        "conceito",
+        "curated",
+        {"source_doc": "preferencias/x.md"},
+    )
+    await age.upsert_entity(
+        session,
+        "Outro Doc",
+        "conceito",
+        "curated",
+        {"source": "curated_note", "source_doc": "preferencias/outro.md"},
+    )
+
+    await age.delete_entities_by_source_doc(
+        session,
+        "preferencias/x.md",
+        "curated",
+        exclude_sources={"curated_note"},
+    )
+
+    assert await age.get_entity(session, "Curada", "curated") is not None
+    assert await age.get_entity(session, "Extraida", "curated") is None
+    assert await age.get_entity(session, "Outro Doc", "curated") is not None
+
+
 async def test_merge_entities_move_relacoes(session):
     await age.upsert_entity(session, "TS", "conceito", "trabalho")
     await age.upsert_entity(session, "TypeScript", "conceito", "trabalho")

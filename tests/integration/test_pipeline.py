@@ -51,6 +51,21 @@ class FactEntityLLM:
         return {"facts": [{"content": "gosta de python", "confidence": 0.8}]}
 
 
+class SameNameCuratedLLM:
+    async def complete_json(self, system, user):
+        if "entidades" in system:
+            return {
+                "entities": [
+                    {
+                        "name": "Stack técnica deve ser inferida por projeto",
+                        "type": "conceito",
+                    }
+                ],
+                "relations": [],
+            }
+        return {"facts": []}
+
+
 @pytest_asyncio.fixture
 async def session(async_dsn):
     engine = make_engine(async_dsn)
@@ -221,6 +236,34 @@ async def test_index_document_cria_entidade_deterministica_de_nota_curada(sessio
     assert ent["props"]["source_doc"] == "preferencias/stack-tecnica-por-projeto.md"
 
 
+async def test_index_document_entidade_deterministica_prevalece_sobre_llm_mesmo_nome(session):
+    content = "# Stack técnica deve ser inferida por projeto\n\nCorpo."
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        SameNameCuratedLLM(),
+        _settings(),
+        namespace="curated",
+        repo_path="preferencias/stack-tecnica-por-projeto.md",
+        content=content,
+        commit_sha="abc",
+        meta={
+            "metadata": {
+                "type": "preference",
+                "tags": ["stack"],
+                "aliases": ["stack por projeto"],
+            }
+        },
+    )
+
+    ent = await age.get_entity(session, "Stack técnica deve ser inferida por projeto", "curated")
+    assert ent["type"] == "preferencia"
+    assert ent["props"]["source"] == "curated_note"
+    assert "stack" in ent["props"]["tags"]
+    assert "stack por projeto" in ent["props"]["aliases"]
+
+
 async def test_index_document_content_hash_igual_sincroniza_metadata_sem_rechunk(session):
     settings = _settings()
     content = "# Nome Antigo\n\nMesmo corpo."
@@ -264,6 +307,53 @@ async def test_index_document_content_hash_igual_sincroniza_metadata_sem_rechunk
     assert found[0]["name"] == "Nome Novo"
 
 
+async def test_index_document_reindex_preserva_entidade_deterministica_e_relacoes(session):
+    settings = _settings()
+    repo_path = "preferencias/renomeavel.md"
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path=repo_path,
+        content="# Nome Antigo\n\nCorpo antigo.",
+        commit_sha="old",
+        meta={"metadata": {"title": "Nome Antigo", "type": "preference"}},
+    )
+    await age.upsert_entity(session, "Vizinho", "conceito", "curated")
+    await age.upsert_relation(session, "Vizinho", "Nome Antigo", "relates_to", "curated")
+    await session.commit()
+
+    changed = await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path=repo_path,
+        content="# Nome Novo\n\nCorpo novo.",
+        commit_sha="new",
+        meta={
+            "metadata": {
+                "title": "Nome Novo",
+                "type": "decision",
+                "tags": ["renomeado"],
+            }
+        },
+    )
+
+    assert changed is True
+    assert await age.get_entity(session, "Nome Antigo", "curated") is None
+    ent = await age.get_entity(session, "Nome Novo", "curated")
+    assert ent["type"] == "decisao"
+    assert ent["props"]["source"] == "curated_note"
+    assert "renomeado" in ent["props"]["tags"]
+    related = await age.get_related(session, "Nome Novo", "curated")
+    assert {"name": "Vizinho", "type": "conceito"} in related
+
+
 async def test_index_document_nao_cria_entidade_deterministica_para_agents(session):
     await pipeline.index_document(
         session,
@@ -277,3 +367,24 @@ async def test_index_document_nao_cria_entidade_deterministica_para_agents(sessi
     )
 
     assert await age.search_entities(session, "Raw", "curated") == []
+
+
+async def test_index_document_agents_nao_prepara_grafo_para_sync_deterministico(
+    session,
+    monkeypatch,
+):
+    async def fail_ensure_graph(*args, **kwargs):
+        raise AssertionError("ensure_graph nao deveria ser chamado para _agents sem LLM")
+
+    monkeypatch.setattr(pipeline.age, "ensure_graph", fail_ensure_graph)
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        _settings(),
+        namespace="curated",
+        repo_path="_agents/chatgpt/raw.md",
+        content="# Raw\n\nNao deve virar entidade.",
+        commit_sha="abc",
+    )

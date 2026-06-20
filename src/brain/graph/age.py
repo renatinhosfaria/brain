@@ -921,13 +921,21 @@ async def delete_entities_by_source_doc(
     repo_path: str,
     namespace: str,
     *,
+    exclude_sources: set[str] | None = None,
     commit: bool = True,
 ) -> None:
     await _prepare(session)
+    excluded_sources = _dedupe_strings(str(source) for source in (exclude_sources or set()))
+    source_filter = ""
+    if excluded_sources:
+        source_filter = (
+            f"AND (n.props.source IS NULL OR NOT (n.props.source IN {_lit(excluded_sources)})) "
+        )
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
         f"WHERE n.source_doc = {_lit(repo_path)} "
+        f"{source_filter}"
         f"DETACH DELETE n $cy$) AS (v agtype)"
     )
     await session.execute(text(q))
