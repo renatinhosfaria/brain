@@ -142,6 +142,23 @@ def test_alias_examples_are_conservative_and_domain_aliases_are_explicit():
     assert {"CEO", "perfil ceo", "Hermes CEO", "ceo hermes"}.issubset(_aliases(ceo))
 
 
+def test_generic_metadata_tags_and_aliases_do_not_emit_singleton_aliases():
+    payload = build_curated_entity_payload(
+        namespace="curated",
+        repo_path="conceitos/atalhos.md",
+        title="Atalhos úteis",
+        content="# Atalhos úteis\n\nCorpo.",
+        metadata={
+            "tags": ["regras", "perfil", "tecnica", "deve", ".env", "env", "migrations"],
+            "aliases": ["regras", "perfil", "tecnica", "deve", "CEO"],
+        },
+    )
+
+    aliases = _aliases(payload)
+    assert {"regras", "perfil", "tecnica", "deve"}.isdisjoint(aliases)
+    assert {".env", "env", "CEO", "migrations"}.issubset(aliases)
+
+
 def test_type_mapping_and_raw_type_preservation():
     mapped = build_curated_entity_payload(
         namespace="curated",

@@ -304,15 +304,15 @@ def _build_aliases(
         _add_phrase_aliases(aliases, seen, phrase)
     _add_path_aliases(aliases, seen, repo_path)
     for tag in tags:
-        _add_alias(aliases, seen, tag, force=True)
+        _add_alias(aliases, seen, tag)
         normalized = normalize_entity_text(tag)
         if normalized != tag:
-            _add_alias(aliases, seen, normalized, force=True)
+            _add_alias(aliases, seen, normalized)
     for alias in metadata_aliases:
-        _add_alias(aliases, seen, alias, force=True)
+        _add_alias(aliases, seen, alias)
         normalized = normalize_entity_text(alias)
         if normalized != alias:
-            _add_alias(aliases, seen, normalized, force=True)
+            _add_alias(aliases, seen, normalized)
 
     return aliases
 
