@@ -154,6 +154,33 @@ def _as_string_list(value: object) -> list[str]:
     return result
 
 
+def _props_with_search_text(name: str, props: dict | None) -> dict:
+    enriched = dict(props or {})
+    values: list[str] = [name]
+    for key in (
+        "aliases",
+        "aliases_normalized",
+        "tags",
+        "tags_normalized",
+        "source_doc",
+        "source_doc_normalized",
+        "repo_path",
+        "repo_path_normalized",
+        "path",
+        "name_normalized",
+        "search_text_normalized",
+    ):
+        values.extend(_as_string_list(enriched.get(key)))
+
+    normalized_values = [
+        normalized
+        for value in values
+        if (normalized := _normalize_match_text(value))
+    ]
+    enriched["search_text_normalized"] = " ".join(_dedupe_strings(normalized_values))
+    return enriched
+
+
 def _normalize_seed_entries(
     seeds: list[str] | list[dict],
     namespace: str | None,
@@ -204,7 +231,7 @@ async def upsert_entity(
     commit: bool = True,
 ) -> None:
     await _prepare(session)
-    props = props or {}
+    props = _props_with_search_text(name, props)
     source_doc = props.get("source_doc")
     source_memory = props.get("source_memory")
     q = (
@@ -258,18 +285,26 @@ async def get_entity(session: AsyncSession, name: str, namespace: str) -> dict |
 async def find_entity_by_source_doc(
     session: AsyncSession,
     namespace: str,
-    repo_path: str,
+    repo_path: str | None = None,
     *,
+    source_doc: str | None = None,
     document_id: str | None = None,
 ) -> dict | None:
     await _prepare(session)
-    source_filters = [
-        f"n.source_doc = {_lit(repo_path)}",
-        f"n.props.source_doc = {_lit(repo_path)}",
-        f"n.props.repo_path = {_lit(repo_path)}",
-    ]
+    source_path = repo_path or source_doc
+    source_filters = []
+    if source_path is not None:
+        source_filters.extend(
+            [
+                f"n.source_doc = {_lit(source_path)}",
+                f"n.props.source_doc = {_lit(source_path)}",
+                f"n.props.repo_path = {_lit(source_path)}",
+            ]
+        )
     if document_id is not None:
         source_filters.append(f"n.props.document_id = {_lit(document_id)}")
+    if not source_filters:
+        return None
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
@@ -301,16 +336,27 @@ async def search_entities(
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit deve ser um inteiro positivo")
     query_normalized = _normalize_match_text(query)
+    candidate_limit = max(limit * 20, 100) if limit is not None else 500
     namespace_match = (
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
         if namespace is not None
         else "MATCH (n:Entity) "
     )
+    where_clause = ""
+    if query_normalized:
+        where_clause = (
+            f"WHERE toLower(n.name) CONTAINS toLower({_lit(query)}) "
+            f"OR toLower(n.source_doc) CONTAINS toLower({_lit(query)}) "
+            f"OR toLower(n.props.search_text_normalized) "
+            f"CONTAINS {_lit(query_normalized)} "
+        )
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"{namespace_match}"
+        f"{where_clause}"
         f"RETURN n.name, n.type, n.namespace, n.props, n.source_doc "
         f"ORDER BY n.namespace, n.name, n.type "
+        f"LIMIT {candidate_limit} "
         f"$cy$) AS (name agtype, type agtype, namespace agtype, "
         f"props agtype, source_doc agtype)"
     )
@@ -327,22 +373,34 @@ async def search_entities(
         name_normalized = _normalize_match_text(name)
         alias_values = [
             _normalize_match_text(alias)
-            for alias in _as_string_list(props.get("aliases"))
+            for alias in (
+                _as_string_list(props.get("aliases"))
+                + _as_string_list(props.get("aliases_normalized"))
+            )
         ]
         tag_values = [
             _normalize_match_text(tag)
-            for tag in _as_string_list(props.get("tags"))
+            for tag in (
+                _as_string_list(props.get("tags"))
+                + _as_string_list(props.get("tags_normalized"))
+            )
         ]
         path_values = [
             _normalize_match_text(path)
             for path in _as_string_list(
                 [
                     props.get("source_doc"),
+                    props.get("source_doc_normalized"),
                     props.get("repo_path"),
+                    props.get("repo_path_normalized"),
                     props.get("path"),
                     _unwrap(raw_source_doc),
                 ]
             )
+        ]
+        search_values = [
+            _normalize_match_text(value)
+            for value in _as_string_list(props.get("search_text_normalized"))
         ]
 
         rank: int | None
@@ -362,7 +420,10 @@ async def search_entities(
             query_normalized in alias for alias in alias_values
         ):
             rank = 5
-        elif any(query_normalized in value for value in tag_values + path_values):
+        elif any(
+            query_normalized in value
+            for value in tag_values + path_values + search_values
+        ):
             rank = 6
         else:
             continue
@@ -650,6 +711,7 @@ async def update_entity(
     commit: bool = True,
 ) -> None:
     await _prepare(session)
+    props = _props_with_search_text(name, props)
     source_doc = props.get("source_doc")
     source_memory = props.get("source_memory")
     q = (
@@ -666,15 +728,28 @@ async def update_entity(
 
 async def update_entity_identity(
     session: AsyncSession,
-    current_name: str,
-    namespace: str,
+    current_name: str | None = None,
+    namespace: str | None = None,
     *,
+    entity: dict | None = None,
     name: str,
     type: str,
     props: dict,
     commit: bool = True,
 ) -> None:
     await _prepare(session)
+    if current_name is None and entity is not None:
+        entity_name = entity.get("name")
+        current_name = str(entity_name) if entity_name is not None else None
+    if namespace is None and entity is not None:
+        entity_namespace = entity.get("namespace")
+        namespace = str(entity_namespace) if entity_namespace is not None else None
+    if not current_name:
+        raise ValueError("current_name ou entity['name'] deve ser informado")
+    if not namespace:
+        raise ValueError("namespace deve ser informado")
+
+    props = _props_with_search_text(name, props)
     source_doc = props.get("source_doc")
     source_memory = props.get("source_memory")
     q = (

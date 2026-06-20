@@ -30,7 +30,7 @@ async def test_upsert_e_get_entity(session):
     got = await age.get_entity(session, "Renato", "trabalho")
     assert got["name"] == "Renato"
     assert got["type"] == "pessoa"
-    assert got["props"] == {"papel": "dev"}
+    assert got["props"]["papel"] == "dev"
 
 
 async def test_relacao_e_get_related(session):
@@ -529,17 +529,23 @@ async def test_find_entity_by_source_doc_and_update_identity_preserves_relation(
     await age.upsert_entity(session, "Vizinho", "conceito", "curated")
     await age.upsert_relation(session, "Nome Antigo", "Vizinho", "relates_to", "curated")
 
-    found = await age.find_entity_by_source_doc(session, "curated", "preferencias/x.md")
+    found = await age.find_entity_by_source_doc(
+        session,
+        namespace="curated",
+        source_doc="preferencias/x.md",
+    )
     assert found["name"] == "Nome Antigo"
 
     await age.update_entity_identity(
         session,
-        "Nome Antigo",
-        "curated",
+        entity=found,
+        namespace="curated",
         name="Nome Novo",
         type="preferencia",
         props={"source_doc": "preferencias/x.md", "aliases": ["novo"]},
+        commit=False,
     )
+    await session.commit()
 
     assert await age.get_entity(session, "Nome Antigo", "curated") is None
     got = await age.get_entity(session, "Nome Novo", "curated")
@@ -603,3 +609,69 @@ async def test_search_entities_limit_applies_after_ranking(session):
     found = await age.search_entities(session, "termo", "curated", limit=1)
 
     assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
+
+
+async def test_upsert_and_update_entity_store_normalized_search_text(session):
+    await age.upsert_entity(
+        session,
+        "Goiânia Stack",
+        "conceito",
+        "curated",
+        {
+            "source_doc": "preferencias/goiania-stack.md",
+            "repo_path": "preferencias/goiania-stack.md",
+            "aliases": ["Stack Técnica"],
+            "tags": ["Arquitetura"],
+        },
+    )
+
+    got = await age.get_entity(session, "Goiânia Stack", "curated")
+    search_text = got["props"]["search_text_normalized"]
+    assert "goiania stack" in search_text
+    assert "stack tecnica" in search_text
+    assert "arquitetura" in search_text
+    assert "preferencias goiania stack.md" in search_text
+
+    await age.update_entity(
+        session,
+        "Goiânia Stack",
+        "curated",
+        {
+            "source_doc": "preferencias/goiania-stack.md",
+            "aliases": ["Nome Atualizado"],
+            "tags": ["Decisão"],
+        },
+    )
+
+    updated = await age.get_entity(session, "Goiânia Stack", "curated")
+    updated_search_text = updated["props"]["search_text_normalized"]
+    assert "goiania stack" in updated_search_text
+    assert "nome atualizado" in updated_search_text
+    assert "decisao" in updated_search_text
+
+
+async def test_search_entities_uses_bounded_candidate_query(monkeypatch):
+    class EmptyRows:
+        def all(self):
+            return []
+
+    class FakeSession:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(str(statement))
+            return EmptyRows()
+
+    async def noop_prepare(session):
+        return None
+
+    monkeypatch.setattr(age, "_prepare", noop_prepare)
+    fake_session = FakeSession()
+
+    await age.search_entities(fake_session, "stack tecnica", "curated", limit=2)
+
+    query = fake_session.statements[-1]
+    assert "WHERE" in query
+    assert "n.props.search_text_normalized" in query
+    assert "LIMIT 100" in query
