@@ -1194,7 +1194,14 @@ async def get_related(deps: Deps, entity: str, namespace: str, depth: int = 1) -
 async def update_entity(deps: Deps, name: str, namespace: str, props: dict) -> dict:
     _require_curator()
     async with deps.session_factory() as s:
-        await age.update_entity(s, name, namespace, props)
+        if "type" in props:
+            entity_type = str(props["type"])
+        elif "entity_type" in props:
+            entity_type = str(props["entity_type"])
+        else:
+            existing = await age.get_entity(s, name, namespace)
+            entity_type = str(existing["type"]) if existing is not None else "conceito"
+        await age.upsert_entity(s, name, entity_type, namespace, props)
         return {"updated": True}
 
 

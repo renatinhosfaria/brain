@@ -190,7 +190,7 @@ def test_normalize_entity_text_casefolds_and_removes_accents():
 Run:
 
 ```bash
-pytest tests/test_semantic_entities.py -v
+uv run pytest tests/test_semantic_entities.py -v
 ```
 
 Expected: FAIL during import with `ModuleNotFoundError: No module named 'brain.ingestion.semantic_entities'`.
@@ -555,7 +555,7 @@ async def upsert_entity_from_curated_document(
 Run:
 
 ```bash
-pytest tests/test_semantic_entities.py -v
+uv run pytest tests/test_semantic_entities.py -v
 ```
 
 Expected: PASS for all tests in `tests/test_semantic_entities.py`.
@@ -676,7 +676,7 @@ async def test_search_entities_limit_applies_after_ranking(session):
 Run:
 
 ```bash
-pytest tests/integration/test_graph.py::test_find_entity_by_source_doc_and_update_identity_preserves_relation tests/integration/test_graph.py::test_search_entities_matches_aliases_tags_and_path_with_ranking tests/integration/test_graph.py::test_search_entities_limit_applies_after_ranking -v
+uv run pytest tests/integration/test_graph.py::test_find_entity_by_source_doc_and_update_identity_preserves_relation tests/integration/test_graph.py::test_search_entities_matches_aliases_tags_and_path_with_ranking tests/integration/test_graph.py::test_search_entities_limit_applies_after_ranking -v
 ```
 
 Expected: FAIL with missing `find_entity_by_source_doc` or `update_entity_identity`, and current `search_entities` not matching aliases.
@@ -990,7 +990,7 @@ async def search_entities(
 Run:
 
 ```bash
-pytest tests/integration/test_graph.py -v
+uv run pytest tests/integration/test_graph.py -v
 ```
 
 Expected: PASS for all graph integration tests.
@@ -1104,7 +1104,7 @@ async def test_index_document_nao_cria_entidade_deterministica_para_agents(sessi
 Run:
 
 ```bash
-pytest tests/integration/test_pipeline.py::test_index_document_cria_entidade_deterministica_de_nota_curada tests/integration/test_pipeline.py::test_index_document_content_hash_igual_sincroniza_metadata_sem_rechunk tests/integration/test_pipeline.py::test_index_document_nao_cria_entidade_deterministica_para_agents -v
+uv run pytest tests/integration/test_pipeline.py::test_index_document_cria_entidade_deterministica_de_nota_curada tests/integration/test_pipeline.py::test_index_document_content_hash_igual_sincroniza_metadata_sem_rechunk tests/integration/test_pipeline.py::test_index_document_nao_cria_entidade_deterministica_para_agents -v
 ```
 
 Expected: FAIL because `pipeline.index_document` does not call semantic entity sync yet.
@@ -1224,7 +1224,7 @@ In `src/brain/ingestion/pipeline.py`, change the LLM entity writes to pass `comm
 Run:
 
 ```bash
-pytest tests/integration/test_pipeline.py -v
+uv run pytest tests/integration/test_pipeline.py -v
 ```
 
 Expected: PASS for all pipeline integration tests.
@@ -1317,7 +1317,7 @@ async def test_update_entity_cria_quando_entidade_nao_existe(deps):
 Run:
 
 ```bash
-pytest tests/integration/test_mcp_handlers.py::test_create_note_cria_entidade_deterministica_pesquisavel_por_alias tests/integration/test_mcp_handlers.py::test_update_note_metadata_only_renomeia_entidade_sem_duplicar_source_doc tests/integration/test_mcp_handlers.py::test_update_entity_cria_quando_entidade_nao_existe -v
+uv run pytest tests/integration/test_mcp_handlers.py::test_create_note_cria_entidade_deterministica_pesquisavel_por_alias tests/integration/test_mcp_handlers.py::test_update_note_metadata_only_renomeia_entidade_sem_duplicar_source_doc tests/integration/test_mcp_handlers.py::test_update_entity_cria_quando_entidade_nao_existe -v
 ```
 
 Expected: first two tests fail until pipeline integration is present; third fails because current `update_entity` matches only existing nodes.
@@ -1340,7 +1340,7 @@ async def update_entity(deps: Deps, name: str, namespace: str, props: dict) -> d
 Run:
 
 ```bash
-pytest tests/integration/test_mcp_handlers.py::test_create_note_cria_entidade_deterministica_pesquisavel_por_alias tests/integration/test_mcp_handlers.py::test_update_note_metadata_only_renomeia_entidade_sem_duplicar_source_doc tests/integration/test_mcp_handlers.py::test_update_entity_cria_quando_entidade_nao_existe -v
+uv run pytest tests/integration/test_mcp_handlers.py::test_create_note_cria_entidade_deterministica_pesquisavel_por_alias tests/integration/test_mcp_handlers.py::test_update_note_metadata_only_renomeia_entidade_sem_duplicar_source_doc tests/integration/test_mcp_handlers.py::test_update_entity_cria_quando_entidade_nao_existe -v
 ```
 
 Expected: PASS for the three focused tests.
@@ -1454,7 +1454,7 @@ async def test_search_entities_acceptance_queries_for_curated_note_aliases(sessi
 Run:
 
 ```bash
-pytest tests/integration/test_pipeline.py::test_search_entities_acceptance_queries_for_curated_note_aliases -v
+uv run pytest tests/integration/test_pipeline.py::test_search_entities_acceptance_queries_for_curated_note_aliases -v
 ```
 
 Expected: PASS.
@@ -1501,7 +1501,7 @@ In `docs/mcp-api.md`, in the `Entidades e relações do grafo` list, replace the
 Run:
 
 ```bash
-pytest tests/test_semantic_entities.py tests/integration/test_graph.py tests/integration/test_pipeline.py tests/integration/test_mcp_handlers.py -v
+uv run pytest tests/test_semantic_entities.py tests/integration/test_graph.py tests/integration/test_pipeline.py tests/integration/test_mcp_handlers.py -v
 ```
 
 Expected: PASS.
@@ -1509,7 +1509,7 @@ Expected: PASS.
 Then run:
 
 ```bash
-pytest -q
+uv run pytest -q
 ```
 
 Expected: PASS for the full repository test suite.

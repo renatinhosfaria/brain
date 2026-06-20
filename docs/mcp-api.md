@@ -191,7 +191,7 @@ Documentos e reindexação:
 Entidades e relações do grafo:
 
 - `get_entity`: recupera uma entidade.
-- `search_entities`: busca entidades.
+- `search_entities`: busca entidades por nome, aliases, tags e caminhos de origem normalizados.
 - `get_related`: lista entidades relacionadas.
 - `update_entity`: atualiza propriedades de entidade.
 - `merge_entities`: mescla entidades.

@@ -30,7 +30,7 @@ async def test_upsert_e_get_entity(session):
     got = await age.get_entity(session, "Renato", "trabalho")
     assert got["name"] == "Renato"
     assert got["type"] == "pessoa"
-    assert got["props"] == {"papel": "dev"}
+    assert got["props"]["papel"] == "dev"
 
 
 async def test_relacao_e_get_related(session):
@@ -77,6 +77,41 @@ async def test_delete_entity(session):
     await age.upsert_entity(session, "Temp", "conceito", "pessoal")
     await age.delete_entity(session, "Temp", "pessoal")
     assert await age.get_entity(session, "Temp", "pessoal") is None
+
+
+async def test_delete_entities_by_source_doc_preserva_sources_excluidos(session):
+    await age.upsert_entity(
+        session,
+        "Curada",
+        "preferencia",
+        "curated",
+        {"source": "curated_note", "source_doc": "preferencias/x.md"},
+    )
+    await age.upsert_entity(
+        session,
+        "Extraida",
+        "conceito",
+        "curated",
+        {"source_doc": "preferencias/x.md"},
+    )
+    await age.upsert_entity(
+        session,
+        "Outro Doc",
+        "conceito",
+        "curated",
+        {"source": "curated_note", "source_doc": "preferencias/outro.md"},
+    )
+
+    await age.delete_entities_by_source_doc(
+        session,
+        "preferencias/x.md",
+        "curated",
+        exclude_sources={"curated_note"},
+    )
+
+    assert await age.get_entity(session, "Curada", "curated") is not None
+    assert await age.get_entity(session, "Extraida", "curated") is None
+    assert await age.get_entity(session, "Outro Doc", "curated") is not None
 
 
 async def test_merge_entities_move_relacoes(session):
@@ -516,3 +551,327 @@ async def test_get_relationship_paths_ordena_empate_por_intermediario(session):
             "depth": 2,
         },
     ]
+
+
+async def test_find_entity_by_source_doc_and_update_identity_preserves_relation(session):
+    await age.upsert_entity(
+        session,
+        "Nome Antigo",
+        "conceito",
+        "curated",
+        {"source_doc": "preferencias/x.md", "aliases": ["antigo"]},
+    )
+    await age.upsert_entity(session, "Vizinho", "conceito", "curated")
+    await age.upsert_relation(session, "Nome Antigo", "Vizinho", "relates_to", "curated")
+
+    found = await age.find_entity_by_source_doc(
+        session,
+        namespace="curated",
+        source_doc="preferencias/x.md",
+    )
+    assert found["name"] == "Nome Antigo"
+
+    await age.update_entity_identity(
+        session,
+        entity=found,
+        namespace="curated",
+        name="Nome Novo",
+        type="preferencia",
+        props={"source_doc": "preferencias/x.md", "aliases": ["novo"]},
+        commit=False,
+    )
+    await session.commit()
+
+    assert await age.get_entity(session, "Nome Antigo", "curated") is None
+    got = await age.get_entity(session, "Nome Novo", "curated")
+    assert got["type"] == "preferencia"
+    related = await age.get_related(session, "Nome Novo", "curated")
+    assert {"name": "Vizinho", "type": "conceito"} in related
+
+
+async def test_find_entity_by_source_doc_prefers_curated_note_over_llm_entity(session):
+    await age.upsert_entity(
+        session,
+        "Z Curada",
+        "preferencia",
+        "curated",
+        {
+            "source": "curated_note",
+            "source_doc": "preferencias/mesma.md",
+            "document_id": "doc-curated",
+        },
+    )
+    await age.upsert_entity(
+        session,
+        "A Extraida",
+        "conceito",
+        "curated",
+        {"source_doc": "preferencias/mesma.md"},
+    )
+
+    found = await age.find_entity_by_source_doc(
+        session,
+        namespace="curated",
+        source_doc="preferencias/mesma.md",
+    )
+
+    assert found["name"] == "Z Curada"
+
+
+async def test_find_entity_by_source_doc_prefers_exact_document_id(session):
+    await age.upsert_entity(
+        session,
+        "Documento A",
+        "preferencia",
+        "curated",
+        {
+            "source": "curated_note",
+            "source_doc": "preferencias/mesma.md",
+            "document_id": "doc-a",
+        },
+    )
+    await age.upsert_entity(
+        session,
+        "Documento Z",
+        "preferencia",
+        "curated",
+        {
+            "source": "curated_note",
+            "source_doc": "preferencias/mesma.md",
+            "document_id": "doc-z",
+        },
+    )
+
+    found = await age.find_entity_by_source_doc(
+        session,
+        namespace="curated",
+        source_doc="preferencias/mesma.md",
+        document_id="doc-z",
+    )
+
+    assert found["name"] == "Documento Z"
+
+
+async def test_search_entities_matches_aliases_tags_and_path_with_ranking(session):
+    await age.upsert_entity(
+        session,
+        "Stack técnica deve ser inferida por projeto",
+        "preferencia",
+        "curated",
+        {
+            "source_doc": "preferencias/stack-tecnica-por-projeto.md",
+            "repo_path": "preferencias/stack-tecnica-por-projeto.md",
+            "aliases": ["stack tecnica", "stack por projeto"],
+            "tags": ["arquitetura"],
+        },
+    )
+    await age.upsert_entity(
+        session,
+        "Outro",
+        "conceito",
+        "curated",
+        {
+            "source_doc": "preferencias/outro-stack-tecnica.md",
+            "repo_path": "preferencias/outro-stack-tecnica.md",
+            "aliases": [],
+            "tags": [],
+        },
+    )
+
+    by_alias = await age.search_entities(session, "stack tecnica", "curated")
+    assert by_alias[0]["name"] == "Stack técnica deve ser inferida por projeto"
+
+    by_tag = await age.search_entities(session, "arquitetura", "curated")
+    assert by_tag[0]["name"] == "Stack técnica deve ser inferida por projeto"
+
+    by_path = await age.search_entities(session, "outro stack tecnica", "curated")
+    assert any(entity["name"] == "Outro" for entity in by_path)
+
+
+async def test_search_entities_limit_applies_after_ranking(session):
+    await age.upsert_entity(
+        session,
+        "Alvo Exato",
+        "conceito",
+        "curated",
+        {"aliases": ["termo"]},
+    )
+    await age.upsert_entity(
+        session,
+        "Termo",
+        "conceito",
+        "curated",
+        {"aliases": []},
+    )
+
+    found = await age.search_entities(session, "termo", "curated", limit=1)
+
+    assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
+
+
+async def test_search_entities_name_match_not_excluded_by_path_candidate_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A caminho {idx:03d}",
+            "conceito",
+            "curated",
+            {
+                "source_doc": f"preferencias/termo-baixa-relevancia-{idx:03d}.md",
+                "repo_path": f"preferencias/termo-baixa-relevancia-{idx:03d}.md",
+            },
+            commit=False,
+        )
+    await age.upsert_entity(session, "Termo", "conceito", "curated", commit=False)
+    await session.commit()
+
+    found = await age.search_entities(session, "termo", "curated", limit=1)
+
+    assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
+
+
+async def test_search_entities_exact_name_not_excluded_by_name_contains_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A termo {idx:03d}",
+            "conceito",
+            "curated",
+            commit=False,
+        )
+    await age.upsert_entity(session, "Termo", "conceito", "curated", commit=False)
+    await session.commit()
+
+    found = await age.search_entities(session, "termo", "curated", limit=1)
+
+    assert found == [{"name": "Termo", "type": "conceito", "namespace": "curated"}]
+
+
+async def test_search_entities_exact_alias_not_excluded_by_alias_contains_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A alias parcial {idx:03d}",
+            "conceito",
+            "curated",
+            {"aliases": [f"term {idx:03d}"]},
+            commit=False,
+        )
+    await age.upsert_entity(
+        session,
+        "Zulu Alias Exato",
+        "conceito",
+        "curated",
+        {"aliases": ["term"]},
+        commit=False,
+    )
+    await session.commit()
+
+    found = await age.search_entities(session, "term", "curated", limit=1)
+
+    assert found == [
+        {"name": "Zulu Alias Exato", "type": "conceito", "namespace": "curated"}
+    ]
+
+
+async def test_search_entities_exact_tag_not_excluded_by_tag_contains_cap(session):
+    for idx in range(101):
+        await age.upsert_entity(
+            session,
+            f"A tag parcial {idx:03d}",
+            "conceito",
+            "curated",
+            {"tags": [f"term {idx:03d}"]},
+            commit=False,
+        )
+    await age.upsert_entity(
+        session,
+        "Zulu Tag Exata",
+        "conceito",
+        "curated",
+        {"tags": ["term"]},
+        commit=False,
+    )
+    await session.commit()
+
+    found = await age.search_entities(session, "term", "curated", limit=1)
+
+    assert found == [
+        {"name": "Zulu Tag Exata", "type": "conceito", "namespace": "curated"}
+    ]
+
+
+async def test_upsert_and_update_entity_store_normalized_search_text(session):
+    await age.upsert_entity(
+        session,
+        "Goiânia Stack",
+        "conceito",
+        "curated",
+        {
+            "source_doc": "preferencias/goiania-stack.md",
+            "repo_path": "preferencias/goiania-stack.md",
+            "aliases": ["Stack Técnica"],
+            "tags": ["Arquitetura"],
+        },
+    )
+
+    got = await age.get_entity(session, "Goiânia Stack", "curated")
+    search_text = got["props"]["search_text_normalized"]
+    assert "goiania stack" in search_text
+    assert "stack tecnica" in search_text
+    assert "arquitetura" in search_text
+    assert "preferencias goiania stack.md" in search_text
+    assert got["props"]["aliases_exact_normalized"] == "|stack tecnica|"
+    assert got["props"]["tags_exact_normalized"] == "|arquitetura|"
+
+    await age.update_entity(
+        session,
+        "Goiânia Stack",
+        "curated",
+        {
+            "source_doc": "preferencias/goiania-stack.md",
+            "aliases": ["Nome Atualizado"],
+            "tags": ["Decisão"],
+        },
+    )
+
+    updated = await age.get_entity(session, "Goiânia Stack", "curated")
+    updated_search_text = updated["props"]["search_text_normalized"]
+    assert "goiania stack" in updated_search_text
+    assert "nome atualizado" in updated_search_text
+    assert "decisao" in updated_search_text
+
+
+async def test_search_entities_uses_bounded_candidate_query(monkeypatch):
+    class EmptyRows:
+        def all(self):
+            return []
+
+    class FakeSession:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(str(statement))
+            return EmptyRows()
+
+    async def noop_prepare(session):
+        return None
+
+    monkeypatch.setattr(age, "_prepare", noop_prepare)
+    fake_session = FakeSession()
+
+    await age.search_entities(fake_session, "stack tecnica", "curated", limit=2)
+
+    candidate_queries = fake_session.statements
+    assert len(candidate_queries) >= 5
+    assert all("WHERE" in query for query in candidate_queries)
+    assert all("LIMIT 100" in query for query in candidate_queries)
+    assert any("n.name_normalized =" in query for query in candidate_queries)
+    assert any("STARTS WITH" in query for query in candidate_queries)
+    assert any("n.name" in query for query in candidate_queries)
+    assert any("aliases_exact_normalized" in query for query in candidate_queries)
+    assert any("aliases_search_text_normalized" in query for query in candidate_queries)
+    assert any("tags_exact_normalized" in query for query in candidate_queries)
+    assert any("n.props.search_text_normalized" in query for query in candidate_queries)
+    assert any("n.source_doc" in query for query in candidate_queries)

@@ -51,6 +51,21 @@ class FactEntityLLM:
         return {"facts": [{"content": "gosta de python", "confidence": 0.8}]}
 
 
+class SameNameCuratedLLM:
+    async def complete_json(self, system, user):
+        if "entidades" in system:
+            return {
+                "entities": [
+                    {
+                        "name": "Stack técnica deve ser inferida por projeto",
+                        "type": "conceito",
+                    }
+                ],
+                "relations": [],
+            }
+        return {"facts": []}
+
+
 @pytest_asyncio.fixture
 async def session(async_dsn):
     engine = make_engine(async_dsn)
@@ -197,3 +212,260 @@ async def test_reindex_remove_entidades_antigas_do_mesmo_documento(session):
 
     assert await age.get_entity(session, "Antigo", "t") is None
     assert await age.get_entity(session, "Novo", "t") is not None
+
+
+async def test_index_document_cria_entidade_deterministica_de_nota_curada(session):
+    content = "# Stack técnica deve ser inferida por projeto\n\nCorpo."
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        _settings(),
+        namespace="curated",
+        repo_path="preferencias/stack-tecnica-por-projeto.md",
+        content=content,
+        commit_sha="abc",
+        meta={"metadata": {"type": "preference", "tags": ["stack"]}},
+    )
+
+    found = await age.search_entities(session, "stack tecnica", "curated")
+    assert found[0]["name"] == "Stack técnica deve ser inferida por projeto"
+    ent = await age.get_entity(session, "Stack técnica deve ser inferida por projeto", "curated")
+    assert ent["type"] == "preferencia"
+    assert ent["props"]["source_doc"] == "preferencias/stack-tecnica-por-projeto.md"
+
+
+async def test_index_document_entidade_deterministica_prevalece_sobre_llm_mesmo_nome(session):
+    content = "# Stack técnica deve ser inferida por projeto\n\nCorpo."
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        SameNameCuratedLLM(),
+        _settings(),
+        namespace="curated",
+        repo_path="preferencias/stack-tecnica-por-projeto.md",
+        content=content,
+        commit_sha="abc",
+        meta={
+            "metadata": {
+                "type": "preference",
+                "tags": ["stack"],
+                "aliases": ["stack por projeto"],
+            }
+        },
+    )
+
+    ent = await age.get_entity(session, "Stack técnica deve ser inferida por projeto", "curated")
+    assert ent["type"] == "preferencia"
+    assert ent["props"]["source"] == "curated_note"
+    assert "stack" in ent["props"]["tags"]
+    assert "stack por projeto" in ent["props"]["aliases"]
+
+
+async def test_index_document_content_hash_igual_sincroniza_metadata_sem_rechunk(session):
+    settings = _settings()
+    content = "# Nome Antigo\n\nMesmo corpo."
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path="preferencias/metadata.md",
+        content=content,
+        commit_sha="old",
+        meta={"metadata": {"title": "Nome Antigo", "type": "preference"}},
+    )
+
+    changed = await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path="preferencias/metadata.md",
+        content=content,
+        commit_sha="new",
+        meta={
+            "metadata": {
+                "title": "Nome Novo",
+                "type": "decision",
+                "tags": ["renomeado"],
+            }
+        },
+    )
+
+    assert changed is False
+    assert await age.get_entity(session, "Nome Antigo", "curated") is None
+    ent = await age.get_entity(session, "Nome Novo", "curated")
+    assert ent is not None
+    assert ent["type"] == "decisao"
+    assert "renomeado" in ent["props"]["tags"]
+    found = await age.search_entities(session, "renomeado", "curated")
+    assert found[0]["name"] == "Nome Novo"
+
+
+async def test_index_document_reindex_preserva_entidade_deterministica_e_relacoes(session):
+    settings = _settings()
+    repo_path = "preferencias/renomeavel.md"
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path=repo_path,
+        content="# Nome Antigo\n\nCorpo antigo.",
+        commit_sha="old",
+        meta={"metadata": {"title": "Nome Antigo", "type": "preference"}},
+    )
+    await age.upsert_entity(session, "Vizinho", "conceito", "curated")
+    await age.upsert_relation(session, "Vizinho", "Nome Antigo", "relates_to", "curated")
+    await session.commit()
+
+    changed = await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        settings,
+        namespace="curated",
+        repo_path=repo_path,
+        content="# Nome Novo\n\nCorpo novo.",
+        commit_sha="new",
+        meta={
+            "metadata": {
+                "title": "Nome Novo",
+                "type": "decision",
+                "tags": ["renomeado"],
+            }
+        },
+    )
+
+    assert changed is True
+    assert await age.get_entity(session, "Nome Antigo", "curated") is None
+    ent = await age.get_entity(session, "Nome Novo", "curated")
+    assert ent["type"] == "decisao"
+    assert ent["props"]["source"] == "curated_note"
+    assert "renomeado" in ent["props"]["tags"]
+    related = await age.get_related(session, "Nome Novo", "curated")
+    assert {"name": "Vizinho", "type": "conceito"} in related
+
+
+async def test_index_document_nao_cria_entidade_deterministica_para_agents(session):
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        _settings(),
+        namespace="curated",
+        repo_path="_agents/chatgpt/raw.md",
+        content="# Raw\n\nNao deve virar entidade.",
+        commit_sha="abc",
+    )
+
+    assert await age.search_entities(session, "Raw", "curated") == []
+
+
+async def test_index_document_agents_nao_prepara_grafo_para_sync_deterministico(
+    session,
+    monkeypatch,
+):
+    async def fail_ensure_graph(*args, **kwargs):
+        raise AssertionError("ensure_graph nao deveria ser chamado para _agents sem LLM")
+
+    monkeypatch.setattr(pipeline.age, "ensure_graph", fail_ensure_graph)
+
+    await pipeline.index_document(
+        session,
+        FakeEmbedder(),
+        None,
+        _settings(),
+        namespace="curated",
+        repo_path="_agents/chatgpt/raw.md",
+        content="# Raw\n\nNao deve virar entidade.",
+        commit_sha="abc",
+    )
+
+
+async def test_search_entities_acceptance_queries_for_curated_note_aliases(session):
+    settings = _settings()
+    cases = [
+        (
+            "preferencias/stack-tecnica-por-projeto.md",
+            "# Stack técnica deve ser inferida por projeto\n\nCorpo.",
+            {"metadata": {"title": "Stack técnica deve ser inferida por projeto", "type": "preference"}},
+            ["Stack técnica por projeto", "stack tecnica"],
+            "Stack técnica deve ser inferida por projeto",
+        ),
+        (
+            "preferencias/regras-env-e-migrations-por-projeto.md",
+            "# Regras de .env e migrations dependem do projeto\n\nCorpo.",
+            {"metadata": {"title": "Regras de .env e migrations dependem do projeto", "type": "preference"}},
+            ["env migrations", "migrations por projeto"],
+            "Regras de .env e migrations dependem do projeto",
+        ),
+        (
+            "preferencias/privacidade-credenciais-e-acoes-externas.md",
+            "# Privacidade, credenciais e ações externas\n\nCorpo.",
+            {"metadata": {"title": "Privacidade, credenciais e ações externas", "type": "preference"}},
+            ["Privacidade", "credenciais"],
+            "Privacidade, credenciais e ações externas",
+        ),
+        (
+            "preferencias/perfil-ceo.md",
+            "# Perfil CEO\n\nCorpo.",
+            {"metadata": {"title": "Perfil CEO", "aliases": ["Hermes CEO", "ceo hermes"]}},
+            ["Hermes CEO"],
+            "Perfil CEO",
+        ),
+        (
+            "projetos/famaagent.md",
+            "# FamaAgent\n\nProjeto.",
+            {"metadata": {"title": "FamaAgent", "type": "project"}},
+            ["FamaAgent"],
+            "FamaAgent",
+        ),
+        (
+            "projetos/mcp-fama.md",
+            "# MCP-Fama\n\nProjeto.",
+            {"metadata": {"title": "MCP-Fama", "type": "project", "aliases": ["mcp-fama"]}},
+            ["mcp-fama"],
+            "MCP-Fama",
+        ),
+        (
+            "projetos/evolution-go.md",
+            "# Evolution API\n\nProjeto.",
+            {"metadata": {"title": "Evolution API", "type": "project", "aliases": ["Evolution-go"]}},
+            ["Evolution-go"],
+            "Evolution API",
+        ),
+        (
+            "projetos/paperclip-openclaw.md",
+            "# OpenClaw\n\nProjeto.",
+            {"metadata": {"title": "OpenClaw", "type": "project", "aliases": ["Paperclip"]}},
+            ["Paperclip"],
+            "OpenClaw",
+        ),
+    ]
+
+    for repo_path, content, meta, queries, _expected_name in cases:
+        await pipeline.index_document(
+            session,
+            FakeEmbedder(),
+            None,
+            settings,
+            namespace="curated",
+            repo_path=repo_path,
+            content=content,
+            commit_sha="abc",
+            meta=meta,
+        )
+
+    for _repo_path, _content, _meta, queries, expected_name in cases:
+        for query in queries:
+            found = await age.search_entities(session, query, "curated")
+            assert found, query
+            assert found[0]["name"] == expected_name

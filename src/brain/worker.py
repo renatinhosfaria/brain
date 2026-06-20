@@ -6,7 +6,7 @@ from brain.config import get_settings
 from brain.graph import age
 from brain.indexing.embeddings import Embedder
 from brain.extraction.llm import LLMClient
-from brain.ingestion import pipeline
+from brain.ingestion import git_writer, pipeline
 from brain import outbox
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.repo_paths import normalize_repo_path
@@ -16,6 +16,25 @@ from brain.storage.db import make_engine, make_session_factory
 log = structlog.get_logger()
 
 
+def _curated_meta_from_frontmatter(namespace: str, content: str) -> dict | None:
+    if namespace != "curated":
+        return None
+    frontmatter = git_writer.parse_frontmatter(content)
+    metadata = (
+        frontmatter.get("metadata")
+        if isinstance(frontmatter.get("metadata"), dict)
+        else None
+    )
+    source_ids = (
+        frontmatter.get("source_agent_note_ids")
+        if isinstance(frontmatter.get("source_agent_note_ids"), list)
+        else None
+    )
+    if metadata is None and source_ids is None:
+        return None
+    return {"metadata": metadata or {}, "source_agent_note_ids": source_ids or []}
+
+
 async def handle_job(session, embedder, llm, settings, job) -> None:
     p = job.payload
     if job.type in ("index_document", "reindex"):
@@ -23,10 +42,11 @@ async def handle_job(session, embedder, llm, settings, job) -> None:
             settings.repo_cache_path, p["repo_path"], require_markdown=True
         )
         content = document_path.read_text(encoding="utf-8")
+        meta = _curated_meta_from_frontmatter(p["namespace"], content)
         await pipeline.index_document(
             session, embedder, llm, settings,
             namespace=p["namespace"], repo_path=repo_path,
-            content=content, commit_sha=p.get("commit_sha"),
+            content=content, commit_sha=p.get("commit_sha"), meta=meta,
         )
     elif job.type == "delete_document":
         repo_path, _ = normalize_repo_path(

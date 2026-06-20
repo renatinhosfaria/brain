@@ -2197,3 +2197,86 @@ async def test_rotate_agent_client_mantem_token_se_profile_git_falha(deps, monke
     async with deps.session_factory() as s:
         after = await repo.get_agent_client(s, slug="codex")
     assert after.token_hash == old_hash
+
+
+async def test_create_note_cria_entidade_deterministica_pesquisavel_por_alias(deps):
+    await _as_curator(
+        handlers.create_note,
+        deps,
+        "preferencias/regras-env-e-migrations-por-projeto.md",
+        "# Regras de .env e migrations dependem do projeto\n\nCorpo.",
+        metadata={
+            "title": "Regras de .env e migrations dependem do projeto",
+            "type": "preference",
+            "tags": ["env", "migrations"],
+        },
+    )
+
+    found = await _as_curator(handlers.search_entities, deps, "env migrations", "curated")
+
+    assert found[0]["name"] == "Regras de .env e migrations dependem do projeto"
+
+
+async def test_update_note_metadata_only_renomeia_entidade_sem_duplicar_source_doc(deps):
+    created = await _as_curator(
+        handlers.create_note,
+        deps,
+        "preferencias/perfil-ceo.md",
+        "# Perfil CEO\n\nCorpo.",
+        metadata={"title": "Perfil CEO", "aliases": ["Hermes CEO"]},
+    )
+
+    await _as_curator(
+        handlers.update_note,
+        deps,
+        created["id"],
+        "# Perfil CEO\n\nCorpo.",
+        metadata={"title": "Perfil CEO Atualizado", "aliases": ["Hermes CEO"]},
+    )
+
+    found = await _as_curator(handlers.search_entities, deps, "Hermes CEO", "curated")
+    assert found[0]["name"] == "Perfil CEO Atualizado"
+
+    async with deps.session_factory() as s:
+        entities = await handlers.age.search_entities(s, "perfil ceo", "curated")
+    matching_names = {entity["name"] for entity in entities}
+    assert "Perfil CEO Atualizado" in matching_names
+    assert "Perfil CEO" not in matching_names
+
+
+async def test_update_entity_cria_quando_entidade_nao_existe(deps):
+    out = await _as_curator(
+        handlers.update_entity,
+        deps,
+        "Entidade Manual",
+        "curated",
+        {"aliases": ["manual"], "source_doc": "manual.md"},
+    )
+
+    assert out == {"updated": True}
+    found = await _as_curator(handlers.search_entities, deps, "manual", "curated")
+    assert found[0]["name"] == "Entidade Manual"
+
+
+async def test_update_entity_preserva_tipo_existente_quando_props_omite_tipo(deps):
+    await _as_curator(
+        handlers.update_entity,
+        deps,
+        "Projeto Manual",
+        "curated",
+        {"type": "projeto", "aliases": ["brain"]},
+    )
+
+    out = await _as_curator(
+        handlers.update_entity,
+        deps,
+        "Projeto Manual",
+        "curated",
+        {"aliases": ["manual"]},
+    )
+
+    assert out == {"updated": True}
+    got = await _as_curator(handlers.get_entity, deps, "Projeto Manual", "curated")
+    assert got["type"] == "projeto"
+    found = await _as_curator(handlers.search_entities, deps, "manual", "curated")
+    assert found[0]["name"] == "Projeto Manual"
