@@ -20,6 +20,17 @@
 ## Patterns That Don't Work
 - (acumular aqui)
 
+## Avaliação 2026-06-22 (estado atual — design MUDOU de "memory provider" p/ "vault curado")
+- O design evoluiu: hoje é serviço FastAPI+MCP sobre um **vault Markdown curado** (repo `brain-vault`), com inbox `_agents/` + curador **Hermes**. As notas antigas deste napkin sobre `remember`/`metadata` são do design ANTIGO (memory provider) — parcialmente obsoletas.
+- **memories/extract_facts = subsistema REMOVIDO (2026-06-22)**: era órfão (nada enfileirava `extract_facts`, tools MCP nunca registradas em `server.py`). Removidos: modelo Memory, repos, handlers, `remember`, `pipeline.extract_and_store_facts`, `extraction/facts.py`, job EXTRACT_FACTS, testes; migration `0004_drop_memories` dropa a tabela. PRESERVADA a primitiva `source_memory` no grafo AGE (proveniência genérica, agora não preenchida). Commits `3cd1761` (refactor) + `4bd8924` (docs). Validado: 110 unit + 280 integração verdes.
+- **20 commits locais NÃO pushados** (origin/main em 1fa75f3 / 2026-06-19; HEAD local 9d08dc1 / 2026-06-20). Sem GITHUB_TOKEN no ambiente → trabalho recente (semantic entities) só existe local. RISCO de perda.
+- **Sem CI/CD** (sem .github/workflows). **Sem README na raiz** (só docs/). **Ruff não formalizado**: 14 `noqa` no código + `.ruff_cache/` no gitignore, mas ruff não está no pyproject nem mypy.
+- **brain-vault sem README/MOC/índice** — taxonomia (projetos/processos/decisoes/preferencias/pessoas/organizacoes/systems/logs/_agents) não documentada; navegação humana/Obsidian sem mapa.
+- **Frontmatter de nota curada redundante**: `source_agent_note_ids` aparece dentro de `metadata:` E na raiz (handlers `_curated_frontmatter`).
+- **Sem reranking** (busca = cosine + grafo, ordena por score) e **sem rate limiting** no MCP/HTTP. Auth = bearer estático (SHA-256+Fernet), não OAuth 2.1 (spec MCP nova). `.env` NÃO é tracked (ok).
+- `/root/brain/brain/` é LIXO local (0 arquivos tracked; sobra do achatamento). Pode apagar do ambiente; não afeta o repo.
+- Testes: `uv run pytest tests/ --ignore=tests/integration` → 112 passam (~10s). Integração exige imagem postgres custom (testcontainers).
+
 ## Lacunas/bugs ainda ABERTOS (não corrigidos)
 - `remember` (handlers.py:51) ACEITA o parâmetro `metadata` mas NUNCA o usa/grava — silenciosamente descartado. A tabela `documents` (models.py) não tem coluna de autor; só `memories.meta` (jsonb) existe e também não é preenchido por extract_and_store_facts. Resultado: nota de conversa registra QUANDO (nome do arquivo + commit + created_at) mas não QUEM (commit é sempre brain-bot; só o namespace marca contexto). O texto do .md (git_writer.render_markdown) também não inclui timestamp/autor no corpo. Se for pedir "quem criou/quando", corrigir: cabeçalho no .md + persistir metadata.
 
