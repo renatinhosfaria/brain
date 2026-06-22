@@ -72,6 +72,14 @@ Não coloque valores secretos em documentação, logs ou commits. As tabelas aba
 | `EXTRACTION_MODEL` | Modelo usado para extração de fatos. |
 | `CHUNK_MAX_TOKENS` | Tamanho máximo, em tokens, de cada chunk indexado. |
 | `CHUNK_OVERLAP_TOKENS` | Sobreposição, em tokens, entre chunks adjacentes. |
+| `RERANK_ENABLED` | Habilita o reranking do top-k vetorial via LLM em `search`/`deep_search`. Padrão desabilitado. |
+| `RERANK_CANDIDATES` | Tamanho do conjunto de candidatos buscado antes do reranking, quando habilitado. |
+
+### Limites de uso (MCP)
+
+| Variável | Controle |
+| --- | --- |
+| `MCP_RATE_LIMIT_PER_MINUTE` | Limite de requisições por minuto, por principal (curador/cliente), nas ferramentas MCP. `0` desabilita. O estado é mantido em memória no processo da API. |
 
 ### Ajustes de fila e outbox
 

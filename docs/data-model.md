@@ -155,7 +155,13 @@ Além das entidades extraídas por LLM, notas curadas no namespace `curated` ger
 
 A extração de entidades e relações ocorre a partir do LLM de extração durante a indexação de documentos. As entidades extraídas recebem `source_doc` com o `repo_path` da nota curada de origem.
 
-`deep_search` combina busca textual/vetorial com travessia do grafo. A etapa de grafo usa `get_relationship_paths` para recuperar entidades e relações conectadas às sementes extraídas ou encontradas.
+### Temporalidade
+
+Entidades e relações carregam `valid_at` (instante em que passaram a valer) e `invalid_at` (instante em que deixaram de valer; ausente enquanto válidas). Na reindexação de um documento, as entidades da versão anterior são **invalidadas** (recebem `invalid_at`) em vez de apagadas, preservando o histórico; as que permanecem no documento são reafirmadas pelo `upsert`, que mantém o `valid_at` original e limpa o `invalid_at`. A deleção de documento (`delete_document`) continua removendo fisicamente as entidades de origem.
+
+A travessia do grafo filtra por validade: sem `as_of`, considera apenas o que está válido agora; com `as_of`, considera o que era válido naquele instante (`valid_at <= as_of` e `invalid_at` ausente ou posterior). Registros anteriores à temporalidade (sem `valid_at`) são tratados como válidos por compatibilidade.
+
+`deep_search` combina busca textual/vetorial com travessia do grafo. A etapa de grafo usa `get_relationship_paths` para recuperar entidades e relações conectadas às sementes extraídas ou encontradas, aplicando o filtro temporal acima.
 
 O comportamento de namespace é explícito: quando um namespace é informado, ele limita a consulta e as sementes ao mesmo namespace. Quando o namespace é omitido, a busca pode ser global no grafo, respeitando o namespace associado a cada semente encontrada.
 

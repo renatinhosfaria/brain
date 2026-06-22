@@ -24,6 +24,10 @@ O webhook do GitHub em `POST /webhook/github` valida HMAC com `WEBHOOK_SECRET` e
 
 A outbox para Hermes usa HMAC com `HERMES_WEBHOOK_SECRET` para assinar eventos enviados ao destino configurado.
 
+## Rate Limiting
+
+As ferramentas MCP aplicam um limite de requisições por principal (curador ou cliente) quando `MCP_RATE_LIMIT_PER_MINUTE` é maior que zero. O controle usa um token bucket em memória por principal e protege contra uso abusivo ou laços de cliente. Por ser estado em processo, o limite vale por instância da API; o deploy padrão usa uma única instância do MCP.
+
 ## Permissões
 
 | Principal | Pode fazer | Não pode fazer |

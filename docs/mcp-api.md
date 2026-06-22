@@ -84,7 +84,7 @@ Limites de fronteira: clientes recebem apenas conteúdo curado indexado. Notas b
 ### `deep_search`
 
 ```text
-deep_search(query: str, limit: int = 10, depth: int = 1, max_entities: int = 3, rel_types: list[str] | None = None, filters: dict | None = None, namespace: str | None = None) -> dict
+deep_search(query: str, limit: int = 10, depth: int = 1, max_entities: int = 3, rel_types: list[str] | None = None, filters: dict | None = None, namespace: str | None = None, as_of: str | None = None) -> dict
 ```
 
 Propósito: combinar busca semântica sobre conteúdo curado com contexto do grafo para retornar documentos, entidades relacionadas e metadados da expansão.
@@ -98,8 +98,11 @@ Parâmetros de entrada:
 - `rel_types`: lista opcional de tipos de relação; lista vazia equivale a filtro ausente.
 - `filters`: filtros opcionais para a busca semântica.
 - `namespace`: namespace opcional para limitar a consulta no grafo.
+- `as_of`: instante ISO 8601 opcional para consulta temporal do grafo. Sem `as_of`, a travessia considera apenas entidades/relações válidas no momento (`invalid_at` ausente). Com `as_of`, considera o que era válido naquele instante (`valid_at <= as_of` e `invalid_at` ausente ou posterior a `as_of`).
 
 Formato de saída: dicionário com `query`, `results`, `graph.entities`, `graph.relationships` e `meta`.
+
+Reranking: quando `RERANK_ENABLED` está ativo, o top-k vetorial é reordenado por relevância via LLM antes de cortar em `limit`; a operação degrada com segurança para o ranqueamento vetorial em caso de falha. Vale também para `search`.
 
 Permissões: disponível para `client` e `curator`.
 
