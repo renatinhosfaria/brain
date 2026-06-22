@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Testes unitários
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instala uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Instala dependências
+        run: uv sync
+
+      - name: pytest (unit)
+        run: uv run pytest tests --ignore=tests/integration -q
+
+  integration:
+    name: Testes de integração
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instala uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Instala dependências
+        run: uv sync
+
+      - name: Builda imagem Postgres (pgvector + Apache AGE)
+        run: docker build -t brain-postgres:local docker/postgres
+
+      - name: pytest (integração)
+        env:
+          # Ryuk (container de limpeza do testcontainers) é dispensável no runner efêmero.
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: uv run pytest tests/integration -q
