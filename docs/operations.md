@@ -163,7 +163,6 @@ O worker consome a fila persistida no PostgreSQL e processa estes tipos de job:
 | `index_document` | Indexa ou reindexa um documento Markdown no banco e nos índices derivados. |
 | `reindex` | Reexecuta indexação para conteúdo já conhecido ou solicitado para reconstrução. |
 | `delete_document` | Remove os registros associados a um documento excluído. |
-| `extract_facts` | Extrai fatos estruturados a partir do conteúdo indexado. |
 
 A fila reivindica jobs pendentes com bloqueio transacional e `FOR UPDATE SKIP LOCKED`, permitindo múltiplos consumidores sem processar o mesmo item simultaneamente. Falhas incrementam tentativas e reprogramam o job com backoff exponencial limitado a 300 segundos. Ao atingir o limite configurado por `MAX_JOB_ATTEMPTS`, o job é marcado como falho.
 

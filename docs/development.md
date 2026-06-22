@@ -96,7 +96,6 @@ uv run pytest tests/integration/test_graph.py -q
 - Mantenha funções de repositório focadas em persistência.
 - Mantenha a validação de `repo_path` centralizada por `normalize_repo_path`.
 - Não indexe `_agents/`.
-- Não exponha `memories` pela busca MCP pública.
 - Use testes de integração ao tocar em DB, fila, worker, MCP ou AGE.
 - Atualize a documentação ao mudar arquitetura, contratos públicos MCP, deployment, modelo de dados ou comportamento de segurança.
 

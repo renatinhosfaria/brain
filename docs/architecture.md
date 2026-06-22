@@ -95,7 +95,7 @@ flowchart LR
 - `brain.auth`: resolve tokens bearer em principals de curador ou cliente e mantém o principal atual durante a execução dos handlers MCP.
 - `brain.mcp.server`: registra as ferramentas FastMCP e delega contratos públicos para os handlers.
 - `brain.mcp.handlers`: aplica permissão por principal, valida entradas, orquestra escrita Git, busca, curadoria, notas brutas, clientes, links e ferramentas administrativas.
-- `brain.storage.repositories`: centraliza operações SQLAlchemy sobre documentos, chunks, fila, outbox, notas, clientes, memories e links.
+- `brain.storage.repositories`: centraliza operações SQLAlchemy sobre documentos, chunks, fila, outbox, notas, clientes e links.
 - `brain.ingestion.pipeline`: indexa documentos Markdown, calcula chunks e embeddings, atualiza documentos, extrai entidades e grava o grafo AGE.
 - `brain.search.retriever`: implementa `search` e `deep_search` sobre chunks curados e, quando aplicável, contexto de grafo.
 - `brain.graph.age`: encapsula criação, atualização, busca e percurso de entidades e relacionamentos no Apache AGE.
@@ -237,7 +237,6 @@ Quando não há jobs de ingestão, o worker tenta entregar um evento do outbox. 
 
 - Notas curadas são legíveis e pesquisáveis por ferramentas MCP públicas de leitura e busca.
 - `_agents/` é inbox bruto de clientes e não é indexado para busca pública.
-- `memories` são persistidas, mas não são retornadas pela busca pública MCP.
 - Ferramentas administrativas de grafo são exclusivas do curador.
 - `/health` é público, `/status` usa `BRAIN_AUTH_TOKEN`, `/webhook/github` exige `X-Hub-Signature-256`, e `/mcp` usa principals de curador ou cliente.
 

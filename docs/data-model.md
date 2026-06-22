@@ -43,12 +43,6 @@ erDiagram
         int ordinal
         vector embedding
     }
-    MEMORIES {
-        uuid id
-        string namespace
-        string source
-        float confidence
-    }
     AGENT_CLIENTS {
         uuid id
         string slug
@@ -100,16 +94,6 @@ Campos importantes: `id`, `document_id`, `ordinal`, `text`, `embedding` com `Vec
 Ciclo de vida: gerado a partir de `documents` durante reindexação. A ordenação por `ordinal` preserva a sequência dos trechos dentro do documento. Registros são substituídos quando o documento é reprocessado.
 
 Classificação: índice vetorial derivado de `documents`.
-
-### `memories`
-
-Responsabilidade: persistir fatos extraídos de conversas ou outras fontes operacionais para uso interno do sistema.
-
-Campos importantes: `id`, `namespace`, `content`, `kind`, `source`, `embedding` com `Vector(2000)`, `confidence`, `supersedes_id`, `metadata`, `created_at` e `updated_at`.
-
-Ciclo de vida: criado por extração de fatos e pode superseder outro registro por meio de `supersedes_id`. Também pode alimentar entidades e relações no grafo AGE quando a extração está habilitada.
-
-Classificação: fatos persistidos, não expostos pela busca MCP pública.
 
 ### `ingestion_jobs`
 
@@ -165,11 +149,11 @@ Classificação: índice derivado de links das notas curadas.
 
 O grafo AGE usado pelo Brain se chama `brain`. A inicialização do PostgreSQL cria as extensões `vector` e `age`, carrega AGE, define o `search_path` e cria esse grafo.
 
-Os nós de entidade são gerenciados por `brain.graph.age` com label `Entity`. Relações entre entidades usam arestas `REL`, com o tipo semântico salvo na propriedade `type`. As entidades carregam propriedades como `name`, `type`, `namespace`, `props`, `source_doc` e `source_memory`, permitindo rastrear a origem em documentos ou memórias.
+Os nós de entidade são gerenciados por `brain.graph.age` com label `Entity`. Relações entre entidades usam arestas `REL`, com o tipo semântico salvo na propriedade `type`. As entidades carregam propriedades como `name`, `type`, `namespace`, `props` e `source_doc`, permitindo rastrear a origem nos documentos curados. A propriedade genérica `source_memory` permanece suportada por compatibilidade, mas não é mais preenchida desde a remoção do subsistema de memórias.
 
 Além das entidades extraídas por LLM, notas curadas no namespace `curated` geram uma entidade determinística por documento Markdown elegível. Essa entidade usa título/metadados/path como fonte de nome, aliases e tags pesquisáveis, persiste `source_doc`/`repo_path`/`document_id` em `props` e pode ser reconstruída por reindexação individual do documento.
 
-A extração de entidades e relações ocorre a partir do LLM de extração durante a indexação de documentos ou durante a extração de fatos. Na indexação documental, entidades extraídas recebem `source_doc` com o `repo_path`; na extração de fatos, entidades podem receber `source_memory` com o identificador da memória persistida.
+A extração de entidades e relações ocorre a partir do LLM de extração durante a indexação de documentos. As entidades extraídas recebem `source_doc` com o `repo_path` da nota curada de origem.
 
 `deep_search` combina busca textual/vetorial com travessia do grafo. A etapa de grafo usa `get_relationship_paths` para recuperar entidades e relações conectadas às sementes extraídas ou encontradas.
 
@@ -209,3 +193,4 @@ O grafo AGE derivado de documentos pode ser reconstruído por reindexação com 
 - [Migração inicial](../migrations/versions/0001_inicial.py)
 - [Migração de `run_after` em jobs](../migrations/versions/0002_job_run_after.py)
 - [Migração de inbox e notas curadas](../migrations/versions/0003_agent_inbox_curated_notes.py)
+- [Migração que remove a tabela `memories`](../migrations/versions/0004_drop_memories.py)
