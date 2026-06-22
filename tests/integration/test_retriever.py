@@ -122,12 +122,6 @@ async def test_search_nao_retorna_memorias_ou_agents(session):
         text="documento legado",
         seed=0.12,
     )
-    await repo.add_memory(
-        session,
-        namespace="curated",
-        content="memoria legada proxima",
-        embedding=_vec(0.11),
-    )
     await session.commit()
 
     emb = FakeEmbedder({"consulta": _vec(0.11)})
@@ -152,12 +146,6 @@ async def test_deep_search_nao_retorna_memorias_ou_agents_em_resultados_textuais
         repo_path="_agents/chatgpt-web/raw.md",
         text="nota bruta de agente",
         seed=0.10,
-    )
-    await repo.add_memory(
-        session,
-        namespace="curated",
-        content="memoria legada proxima",
-        embedding=_vec(0.11),
     )
     await session.commit()
 
@@ -261,30 +249,6 @@ async def test_search_limita_limit_muito_alto(session):
 
     assert len(out["results"]) == 50
     assert {r["namespace"] for r in out["results"]} == {"curated"}
-
-
-async def test_search_nao_retorna_memorias_mesmo_com_filtro_source_memory(session):
-    doc = await repo.upsert_document(
-        session, namespace="curated", repo_path="a.md", title=None,
-        raw_content="x", content_hash="h", commit_sha=None,
-    )
-    await repo.replace_chunks(
-        session, doc.id, [{"ordinal": 0, "text": "doc perto", "token_count": 1}], [_vec(0.10)]
-    )
-    await repo.add_memory(session, namespace="t", content="mem perto", embedding=_vec(0.11))
-    await session.commit()
-
-    emb = FakeEmbedder({"consulta": _vec(0.10)})
-    out = await search(
-        session,
-        emb,
-        "consulta",
-        namespace="t",
-        limit=10,
-        filters={"source": "memory"},
-    )
-
-    assert out["results"] == []
 
 
 async def test_include_graph_traz_relacionados(session):

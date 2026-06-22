@@ -40,17 +40,6 @@ class SwitchingEntityLLM:
         return {"facts": []}
 
 
-class FactEntityLLM:
-    async def complete_json(self, system, user):
-        if "entidades" in system:
-            assert "gosta de python" in user
-            return {
-                "entities": [{"name": "python", "type": "tecnologia"}],
-                "relations": [],
-            }
-        return {"facts": [{"content": "gosta de python", "confidence": 0.8}]}
-
-
 class SameNameCuratedLLM:
     async def complete_json(self, system, user):
         if "entidades" in system:
@@ -160,41 +149,6 @@ async def test_index_document_mesmo_conteudo_atualiza_meta_commit_e_preserva_chu
     assert after_doc.commit_sha == "new"
     assert after_doc.meta == {"version": 2}
     assert [chunk.id for chunk in after_chunks] == [chunk.id for chunk in before_chunks]
-
-
-async def test_extract_and_store_facts(session):
-    facts = await pipeline.extract_and_store_facts(
-        session, FakeEmbedder(), FakeLLM(), namespace="p",
-        messages=[{"role": "user", "content": "eu uso python"}],
-        metadata={"author": "Renato"},
-    )
-    assert facts[0]["content"] == "gosta de python"
-    mems = await repo.list_memories(session, "p")
-    assert len(mems) == 1
-    assert mems[0].meta == {"author": "Renato"}
-
-
-async def test_extract_and_store_facts_cria_entidades_das_memorias(session):
-    await pipeline.extract_and_store_facts(
-        session, FakeEmbedder(), FactEntityLLM(), namespace="p",
-        messages=[{"role": "user", "content": "eu uso python"}],
-    )
-
-    ent = await age.get_entity(session, "python", "p")
-    assert ent is not None
-    assert ent["props"]["source"] == "memory"
-    assert ent["props"]["source_memory"]
-
-
-async def test_extract_and_store_facts_nao_duplica_fatos_identicos(session):
-    for _ in range(2):
-        await pipeline.extract_and_store_facts(
-            session, FakeEmbedder(), FactEntityLLM(), namespace="p",
-            messages=[{"role": "user", "content": "eu uso python"}],
-        )
-
-    mems = await repo.list_memories(session, "p")
-    assert [m.content for m in mems] == ["gosta de python"]
 
 
 async def test_reindex_remove_entidades_antigas_do_mesmo_documento(session):

@@ -161,19 +161,6 @@ def _agent_client_dict(client) -> dict | None:
     }
 
 
-def _mem_dict(m) -> dict | None:
-    if m is None:
-        return None
-    return {
-        "id": str(m.id),
-        "namespace": m.namespace,
-        "content": m.content,
-        "confidence": m.confidence,
-        "source": m.source,
-        "metadata": m.meta,
-    }
-
-
 def _doc_dict(d) -> dict | None:
     if d is None:
         return None
@@ -490,24 +477,6 @@ async def _transition_agent_note(
         out = _agent_note_dict(note)
         await s.commit()
         return out
-
-
-# ---------- Memória & recall ----------
-async def remember(deps: Deps, namespace: str, messages: list[dict], metadata: dict | None = None) -> dict:
-    _require_curator()
-    s = deps.settings
-    rel = git_writer.write_conversation(
-        s.repo_cache_path, s.conversations_dir, namespace, messages,
-        timestamp=_now_stamp(), author_name=s.git_author_name,
-        author_email=s.git_author_email, push=s.git_push_enabled,
-    )
-    job_facts = await deps.queue.enqueue(
-        JobType.EXTRACT_FACTS.value, {"namespace": namespace, "messages": messages}
-    )
-    job_index = await deps.queue.enqueue(
-        JobType.INDEX_DOCUMENT.value, {"namespace": namespace, "repo_path": rel}
-    )
-    return {"note_path": rel, "job_ids": [str(job_facts), str(job_index)]}
 
 
 async def search(
@@ -945,55 +914,6 @@ async def fail_agent_note(
         allowed_statuses={"pending", "in_review"},
         error=error,
     )
-
-
-async def get_memory(deps: Deps, id: str) -> dict | None:
-    _require_curator()
-    async with deps.session_factory() as s:
-        return _mem_dict(await repo.get_memory(s, uuid.UUID(id)))
-
-
-async def list_memories(deps: Deps, namespace: str | None = None) -> list[dict]:
-    _require_curator()
-    async with deps.session_factory() as s:
-        return [_mem_dict(m) for m in await repo.list_memories(s, namespace)]
-
-
-async def update_memory(deps: Deps, id: str, content: str | None = None) -> dict | None:
-    _require_curator()
-    async with deps.session_factory() as s:
-        embedding = None
-        if content is not None:
-            (embedding,) = await deps.embedder.embed([content])
-        m = await repo.update_memory(s, uuid.UUID(id), content=content, embedding=embedding)
-        await s.commit()
-        return _mem_dict(m)
-
-
-async def move_memory(deps: Deps, id: str, namespace: str) -> dict | None:
-    _require_curator()
-    async with deps.session_factory() as s:
-        m = await repo.move_memory(s, uuid.UUID(id), namespace)
-        await s.commit()
-        return _mem_dict(m)
-
-
-async def delete_memory(deps: Deps, id: str) -> dict:
-    _require_curator()
-    async with deps.session_factory() as s:
-        ok = await repo.delete_memory(s, uuid.UUID(id))
-        await s.commit()
-        return {"deleted": ok}
-
-
-async def merge_memories(deps: Deps, ids: list[str], into: str | None = None) -> dict:
-    _require_curator()
-    async with deps.session_factory() as s:
-        target = await repo.merge_memories(
-            s, [uuid.UUID(i) for i in ids], uuid.UUID(into) if into else None
-        )
-        await s.commit()
-        return {"into": str(target)}
 
 
 # ---------- Documentos ----------

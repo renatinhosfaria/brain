@@ -73,7 +73,8 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
                 )
             ).scalars()
         )
-    assert {"documents", "chunks", "memories", "ingestion_jobs", "namespaces"} <= set(tables)
+    assert {"documents", "chunks", "ingestion_jobs", "namespaces"} <= set(tables)
+    assert "memories" not in set(tables)
     expected = {
         "agent_clients",
         "agent_notes",
@@ -174,4 +175,4 @@ def test_alembic_upgrade_de_legacy_0002_cria_inbox(sync_dsn, async_dsn, monkeypa
         "note_links",
     } <= tables
     assert has_run_after == 1
-    assert version == "0003"
+    assert version == "0004"

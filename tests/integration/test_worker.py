@@ -66,17 +66,6 @@ async def ctx(async_dsn, tmp_path):
     await engine.dispose()
 
 
-async def test_worker_processa_extract_facts(ctx):
-    sf, queue, settings, _ = ctx
-    await queue.enqueue(JobType.EXTRACT_FACTS.value, {
-        "namespace": "p", "messages": [{"role": "user", "content": "eu uso python"}]
-    })
-    assert await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings) is True
-    async with sf() as s:
-        mems = await repo.list_memories(s, "p")
-    assert len(mems) == 1
-
-
 async def test_worker_processa_index_document(ctx):
     sf, queue, settings, tmp = ctx
     (tmp / "a.md").write_text("# Nota\ncorpo", encoding="utf-8")

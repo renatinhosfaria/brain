@@ -7,7 +7,6 @@ from dataclasses import dataclass
 class JobType(str, enum.Enum):
     INDEX_DOCUMENT = "index_document"
     DELETE_DOCUMENT = "delete_document"
-    EXTRACT_FACTS = "extract_facts"
     REINDEX = "reindex"
 
 

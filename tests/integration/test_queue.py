@@ -43,7 +43,7 @@ async def test_skip_locked_nao_entrega_o_mesmo_job(sf):
 
 async def test_fail_reenfileira_ate_o_limite(sf):
     q = PostgresJobQueue(sf)
-    jid = await q.enqueue(JobType.EXTRACT_FACTS.value, {})
+    jid = await q.enqueue(JobType.INDEX_DOCUMENT.value, {})
     # 1a tentativa
     await q.claim_next("w1")
     await q.fail(jid, "boom", max_attempts=2)
@@ -69,7 +69,7 @@ async def test_fail_reenfileira_ate_o_limite(sf):
 
 async def test_fail_define_backoff_exponencial(sf):
     q = PostgresJobQueue(sf)
-    jid = await q.enqueue(JobType.EXTRACT_FACTS.value, {})
+    jid = await q.enqueue(JobType.INDEX_DOCUMENT.value, {})
     await q.claim_next("w1")
     await q.fail(jid, "boom", max_attempts=3)
 

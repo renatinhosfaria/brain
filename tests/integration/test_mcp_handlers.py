@@ -106,30 +106,10 @@ def _assert_safe_client(client: dict) -> None:
     assert client["token_prefix"]
 
 
-async def test_remember_grava_nota_e_enfileira(deps):
-    out = await _as_curator(
-        handlers.remember, deps, "trabalho", [{"role": "user", "content": "lembrar disso"}]
-    )
-    assert out["note_path"].startswith("conversas/trabalho/")
-    assert len(out["job_ids"]) == 2
-
-
 async def test_namespaces_crud(deps):
     await _as_curator(handlers.create_namespace, deps, "t", "trabalho")
     names = [n["name"] for n in await _as_curator(handlers.list_namespaces, deps)]
     assert "t" in names
-
-
-async def test_memoria_crud_via_handlers(deps):
-    async with deps.session_factory() as s:
-        m = await repo.add_memory(s, namespace="p", content="gosta de chá", embedding=[0.2] * 2000)
-        await s.commit()
-        mid = str(m.id)
-    got = await _as_curator(handlers.get_memory, deps, mid)
-    assert got["content"] == "gosta de chá"
-    await _as_curator(handlers.move_memory, deps, mid, "trabalho")
-    assert (await _as_curator(handlers.get_memory, deps, mid))["namespace"] == "trabalho"
-    assert (await _as_curator(handlers.delete_memory, deps, mid))["deleted"] is True
 
 
 async def test_reindex_enfileira(deps):
@@ -757,12 +737,6 @@ async def test_search_curadas_filtra_prefixo_e_get_note_abre_resultado(deps):
             [{"ordinal": 0, "text": "conteudo bruto de agente", "token_count": 1}],
             [[0.2] * 2000],
         )
-        await repo.add_memory(
-            s,
-            namespace="curated",
-            content="memoria legada",
-            embedding=[0.2] * 2000,
-        )
         await s.commit()
 
     client_out = await _as_client(
@@ -935,13 +909,6 @@ async def test_principal_client_nao_gerencia_agent_clients(deps):
 def _curator_only_call(case: str, deps):
     memory_id = "00000000-0000-0000-0000-000000000000"
     calls = {
-        "remember": ("remember", (deps, "trabalho", [{"role": "user", "content": "x"}]), {}),
-        "get_memory": ("get_memory", (deps, memory_id), {}),
-        "list_memories": ("list_memories", (deps,), {}),
-        "update_memory": ("update_memory", (deps, memory_id, "novo"), {}),
-        "move_memory": ("move_memory", (deps, memory_id, "trabalho"), {}),
-        "delete_memory": ("delete_memory", (deps, memory_id), {}),
-        "merge_memories": ("merge_memories", (deps, [memory_id]), {}),
         "list_unresolved_links": ("list_unresolved_links", (deps,), {}),
         "resolve_note_link": ("resolve_note_link", (deps, memory_id, "projetos/brain.md"), {}),
         "get_document": ("get_document", (deps, memory_id), {}),
@@ -986,13 +953,6 @@ def _curator_only_call(case: str, deps):
 @pytest.mark.parametrize(
     "case",
     [
-        "remember",
-        "get_memory",
-        "list_memories",
-        "update_memory",
-        "move_memory",
-        "delete_memory",
-        "merge_memories",
         "list_unresolved_links",
         "resolve_note_link",
         "get_document",

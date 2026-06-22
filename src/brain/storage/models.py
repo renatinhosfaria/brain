@@ -4,7 +4,6 @@ import uuid
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     DateTime,
-    Float,
     ForeignKey,
     Integer,
     String,
@@ -67,28 +66,6 @@ class Chunk(Base):
     token_count: Mapped[int] = mapped_column(Integer)
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
-
-
-class Memory(Base):
-    __tablename__ = "memories"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    namespace: Mapped[str] = mapped_column(String, index=True)
-    content: Mapped[str] = mapped_column(Text)
-    kind: Mapped[str] = mapped_column(String, default="fact")
-    source: Mapped[str] = mapped_column(String, default="conversation")
-    embedding: Mapped[list[float]] = mapped_column(Vector(EMBED_DIM))
-    confidence: Mapped[float] = mapped_column(Float, default=1.0)
-    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("memories.id"), nullable=True
-    )
-    meta: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
 
 
 class IngestionJob(Base):

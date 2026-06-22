@@ -1,5 +1,4 @@
 from brain.extraction.entities import extract_entities
-from brain.extraction.facts import extract_facts
 from brain.graph import age
 from brain.indexing.chunker import chunk_markdown
 from brain.ingestion.git_sync import content_hash
@@ -170,39 +169,3 @@ async def index_document(
     return True
 
 
-async def extract_and_store_facts(
-    session, embedder, llm, *, namespace, messages, metadata: dict | None = None
-) -> list[dict]:
-    facts = await extract_facts(llm, messages)
-    stored = []
-    for f in facts:
-        if await repo.get_memory_by_content(session, namespace, f["content"]):
-            continue
-        (emb,) = await embedder.embed([f["content"]])
-        mem = await repo.add_memory(
-            session,
-            namespace=namespace,
-            content=f["content"],
-            embedding=emb,
-            confidence=f["confidence"],
-            meta=metadata or {},
-        )
-        stored.append(mem)
-
-    if stored:
-        await age.ensure_graph(session)
-    for mem in stored:
-        ents = await extract_entities(llm, mem.content)
-        for e in ents["entities"]:
-            await age.upsert_entity(
-                session,
-                e["name"],
-                e["type"],
-                namespace,
-                {"source": "memory", "source_memory": str(mem.id)},
-            )
-        for r in ents["relations"]:
-            await age.upsert_relation(session, r["source"], r["target"], r["type"], namespace)
-
-    await session.commit()
-    return facts

@@ -75,7 +75,7 @@ def test_status_lista_jobs_failed(async_dsn, tmp_path, prepared_db):
         engine = make_engine(async_dsn)
         sf = make_session_factory(engine)
         queue = PostgresJobQueue(sf)
-        job_id = await queue.enqueue(JobType.EXTRACT_FACTS.value, {"namespace": "p"})
+        job_id = await queue.enqueue(JobType.INDEX_DOCUMENT.value, {"namespace": "p"})
         await queue.claim_next("worker-1")
         await queue.fail(job_id, "boom", max_attempts=1)
         await engine.dispose()
@@ -91,7 +91,7 @@ def test_status_lista_jobs_failed(async_dsn, tmp_path, prepared_db):
     assert body["failed_jobs"] == [
         {
             "id": str(job_id),
-            "type": JobType.EXTRACT_FACTS.value,
+            "type": JobType.INDEX_DOCUMENT.value,
             "attempts": 1,
             "last_error": "boom",
         }

@@ -57,15 +57,6 @@ async def handle_job(session, embedder, llm, settings, job) -> None:
             await age.delete_entities_by_source_doc(session, repo_path, doc.namespace)
         await repo.delete_document_by_path(session, repo_path)
         await session.commit()
-    elif job.type == "extract_facts":
-        await pipeline.extract_and_store_facts(
-            session,
-            embedder,
-            llm,
-            namespace=p["namespace"],
-            messages=p["messages"],
-            metadata=p.get("metadata"),
-        )
     else:
         raise ValueError(f"tipo de job desconhecido: {job.type}")
 

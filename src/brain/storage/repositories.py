@@ -2,7 +2,7 @@ import datetime as dt
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from brain.storage.models import (
@@ -10,7 +10,6 @@ from brain.storage.models import (
     AgentNote,
     Chunk,
     Document,
-    Memory,
     Namespace,
     NoteLink,
     OutboxEvent,
@@ -110,139 +109,12 @@ async def delete_document_by_path(session, repo_path: str) -> bool:
     return True
 
 
-# ---------- Memórias ----------
-async def add_memory(
-    session,
-    *,
-    namespace: str,
-    content: str,
-    embedding: list[float],
-    confidence: float = 1.0,
-    source: str = "conversation",
-    meta: dict | None = None,
-    supersedes_id: uuid.UUID | None = None,
-) -> Memory:
-    mem = Memory(
-        namespace=namespace,
-        content=content,
-        embedding=embedding,
-        confidence=confidence,
-        source=source,
-        meta=meta or {},
-        supersedes_id=supersedes_id,
-    )
-    session.add(mem)
-    await session.flush()
-    return mem
-
-
-async def get_memory(session, id: uuid.UUID) -> Memory | None:
-    return (await session.execute(select(Memory).where(Memory.id == id))).scalar_one_or_none()
-
-
-async def get_memory_by_content(session, namespace: str, content: str) -> Memory | None:
-    normalized = content.strip().lower()
-    if not normalized:
-        return None
-    stmt = select(Memory).where(
-        Memory.namespace == namespace,
-        func.lower(func.trim(Memory.content)) == normalized,
-        Memory.supersedes_id.is_(None),
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
-def _apply_memory_filters(stmt, filters: dict | None):
-    filters = filters or {}
-    if not filters.get("include_superseded"):
-        stmt = stmt.where(Memory.supersedes_id.is_(None))
-    source = filters.get("source")
-    if source and source not in {"memory", "document"}:
-        stmt = stmt.where(Memory.source == source)
-    if kind := filters.get("kind"):
-        stmt = stmt.where(Memory.kind == kind)
-    if (min_confidence := filters.get("min_confidence")) is not None:
-        stmt = stmt.where(Memory.confidence >= float(min_confidence))
-    if (max_confidence := filters.get("max_confidence")) is not None:
-        stmt = stmt.where(Memory.confidence <= float(max_confidence))
-    if metadata := filters.get("metadata"):
-        stmt = stmt.where(Memory.meta.contains(metadata))
-    return stmt
-
-
 def _apply_document_filters(stmt, filters: dict | None):
     if not filters:
         return stmt
     if repo_path := filters.get("repo_path"):
         stmt = stmt.where(Document.repo_path == repo_path)
     return stmt
-
-
-async def list_memories(
-    session, namespace: str | None = None, filters: dict | None = None
-) -> list[Memory]:
-    stmt = select(Memory)
-    if namespace:
-        stmt = stmt.where(Memory.namespace == namespace)
-    stmt = _apply_memory_filters(stmt, filters)
-    return list((await session.execute(stmt.order_by(Memory.created_at.desc()))).scalars().all())
-
-
-async def update_memory(
-    session, id: uuid.UUID, *, content: str | None = None, embedding: list[float] | None = None
-) -> Memory | None:
-    mem = await get_memory(session, id)
-    if mem is None:
-        return None
-    if content is not None:
-        mem.content = content
-    if embedding is not None:
-        mem.embedding = embedding
-    await session.flush()
-    return mem
-
-
-async def move_memory(session, id: uuid.UUID, namespace: str) -> Memory | None:
-    mem = await get_memory(session, id)
-    if mem is None:
-        return None
-    mem.namespace = namespace
-    await session.flush()
-    return mem
-
-
-async def delete_memory(session, id: uuid.UUID) -> bool:
-    mem = await get_memory(session, id)
-    if mem is None:
-        return False
-    ids_to_delete = {id}
-    frontier = {id}
-    while frontier:
-        rows = (
-            await session.execute(
-                select(Memory.id).where(Memory.supersedes_id.in_(frontier))
-            )
-        ).scalars().all()
-        new_ids = set(rows) - ids_to_delete
-        ids_to_delete.update(new_ids)
-        frontier = new_ids
-    await session.execute(delete(Memory).where(Memory.id.in_(ids_to_delete)))
-    await session.flush()
-    return True
-
-
-async def merge_memories(
-    session, ids: list[uuid.UUID], into: uuid.UUID | None = None
-) -> uuid.UUID:
-    target = into or ids[0]
-    for mid in ids:
-        if mid == target:
-            continue
-        mem = await get_memory(session, mid)
-        if mem is not None:
-            mem.supersedes_id = target
-    await session.flush()
-    return target
 
 
 # ---------- Busca vetorial ----------
@@ -322,32 +194,6 @@ async def search_chunks(
             "ref": r.repo_path,
             "path": r.repo_path,
             "repo_path": r.repo_path,
-            "namespace": r.namespace,
-        }
-        for r in rows
-    ]
-
-
-async def search_memories(
-    session,
-    query_embedding: list[float],
-    namespace: str | None,
-    limit: int,
-    filters: dict | None = None,
-) -> list[dict]:
-    dist = Memory.embedding.cosine_distance(query_embedding).label("distance")
-    stmt = select(Memory.id, Memory.content, dist, Memory.namespace)
-    if namespace:
-        stmt = stmt.where(Memory.namespace == namespace)
-    stmt = _apply_memory_filters(stmt, filters)
-    stmt = stmt.order_by(dist).limit(limit)
-    rows = (await session.execute(stmt)).all()
-    return [
-        {
-            "text": r.content,
-            "score": 1.0 - float(r.distance),
-            "source": "memory",
-            "ref": str(r.id),
             "namespace": r.namespace,
         }
         for r in rows
