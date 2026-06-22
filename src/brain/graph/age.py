@@ -1,7 +1,7 @@
 import json
-from collections.abc import Iterable
 import re
 import unicodedata
+from collections.abc import Iterable
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,16 +119,11 @@ def _normalize_match_text(value: object) -> str:
     if value is None:
         return ""
     text_value = str(value).casefold()
-    text_value = "".join(
-        " " if unicodedata.category(ch) == "Pd" else ch for ch in text_value
-    )
+    text_value = "".join(" " if unicodedata.category(ch) == "Pd" else ch for ch in text_value)
     decomposed = unicodedata.normalize("NFKD", text_value)
-    without_accents = "".join(
-        ch for ch in decomposed if not unicodedata.combining(ch)
-    )
+    without_accents = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     cleaned = "".join(
-        ch if ch.isalnum() or ch.isspace() or ch == "." else " "
-        for ch in without_accents
+        ch if ch.isalnum() or ch.isspace() or ch == "." else " " for ch in without_accents
     )
     return " ".join(cleaned.split())
 
@@ -136,11 +131,10 @@ def _normalize_match_text(value: object) -> str:
 def _as_string_list(value: object) -> list[str]:
     if value is None:
         return []
+    values: Iterable[object]
     if isinstance(value, str):
         values = [value]
-    elif isinstance(value, Iterable) and not isinstance(
-        value, (bytes, bytearray, dict)
-    ):
+    elif isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray, dict)):
         values = value
     else:
         values = [value]
@@ -163,9 +157,7 @@ def _props_with_search_text(name: str, props: dict | None) -> dict:
         enriched.get("aliases_normalized")
     )
     aliases_normalized = _dedupe_strings(
-        normalized
-        for value in alias_values
-        if (normalized := _normalize_match_text(value))
+        normalized for value in alias_values if (normalized := _normalize_match_text(value))
     )
     if aliases_normalized:
         enriched["aliases_normalized"] = aliases_normalized
@@ -178,16 +170,12 @@ def _props_with_search_text(name: str, props: dict | None) -> dict:
         enriched.get("tags_normalized")
     )
     tags_normalized = _dedupe_strings(
-        normalized
-        for value in tag_values
-        if (normalized := _normalize_match_text(value))
+        normalized for value in tag_values if (normalized := _normalize_match_text(value))
     )
     if tags_normalized:
         enriched["tags_normalized"] = tags_normalized
     enriched["tags_search_text_normalized"] = " ".join(tags_normalized)
-    enriched["tags_exact_normalized"] = (
-        f"|{'|'.join(tags_normalized)}|" if tags_normalized else ""
-    )
+    enriched["tags_exact_normalized"] = f"|{'|'.join(tags_normalized)}|" if tags_normalized else ""
 
     path_values = []
     for key in (
@@ -200,18 +188,12 @@ def _props_with_search_text(name: str, props: dict | None) -> dict:
     ):
         path_values.extend(_as_string_list(enriched.get(key)))
     path_values_normalized = _dedupe_strings(
-        normalized
-        for value in path_values
-        if (normalized := _normalize_match_text(value))
+        normalized for value in path_values if (normalized := _normalize_match_text(value))
     )
     if enriched.get("source_doc") is not None:
-        enriched["source_doc_normalized"] = _normalize_match_text(
-            enriched.get("source_doc")
-        )
+        enriched["source_doc_normalized"] = _normalize_match_text(enriched.get("source_doc"))
     if enriched.get("repo_path") is not None:
-        enriched["repo_path_normalized"] = _normalize_match_text(
-            enriched.get("repo_path")
-        )
+        enriched["repo_path_normalized"] = _normalize_match_text(enriched.get("repo_path"))
     if enriched.get("path") is not None:
         enriched["path_normalized"] = _normalize_match_text(enriched.get("path"))
     enriched["path_search_text_normalized"] = " ".join(path_values_normalized)
@@ -222,15 +204,11 @@ def _props_with_search_text(name: str, props: dict | None) -> dict:
         *tags_normalized,
         *path_values_normalized,
     ]
-    for key in (
-        "search_text_normalized",
-    ):
+    for key in ("search_text_normalized",):
         values.extend(_as_string_list(enriched.get(key)))
 
     normalized_values = [
-        normalized
-        for value in values
-        if (normalized := _normalize_match_text(value))
+        normalized for value in values if (normalized := _normalize_match_text(value))
     ]
     enriched["search_text_normalized"] = " ".join(_dedupe_strings(normalized_values))
     return enriched
@@ -246,9 +224,7 @@ def _normalize_seed_entries(
         if isinstance(seed, dict):
             name = str(seed.get("name") or "").strip()
             seed_namespace = seed.get("namespace")
-            seed_namespace = (
-                str(seed_namespace).strip() if seed_namespace is not None else ""
-            )
+            seed_namespace = str(seed_namespace).strip() if seed_namespace is not None else ""
         else:
             name = str(seed or "").strip()
             seed_namespace = namespace or ""
@@ -392,9 +368,7 @@ async def find_entity_by_source_doc(
 
     def rank(candidate: dict) -> tuple[int, int, str]:
         props = candidate["props"]
-        document_id_matches = (
-            document_id is not None and props.get("document_id") == document_id
-        )
+        document_id_matches = document_id is not None and props.get("document_id") == document_id
         return (
             0 if props.get("source") == "curated_note" else 1,
             0 if document_id_matches else 1,
@@ -411,9 +385,8 @@ async def search_entities(
     limit: int | None = None,
 ) -> list[dict]:
     await _prepare(session)
-    if limit is not None:
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError("limit deve ser um inteiro positivo")
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        raise ValueError("limit deve ser um inteiro positivo")
     query_normalized = _normalize_match_text(query)
     candidate_limit = max(limit * 20, 100) if limit is not None else 500
     namespace_match = (
@@ -433,7 +406,8 @@ async def search_entities(
             f"$cy$) AS (name agtype, type agtype, namespace agtype, "
             f"props agtype, source_doc agtype)"
         )
-        return (await session.execute(text(q))).all()
+        # SQLAlchemy tipa .all() como Sequence[Row]; aqui é consumido como tuplas.
+        return (await session.execute(text(q))).all()  # type: ignore[return-value]
 
     if query_normalized:
         query_lit = _lit(query)
@@ -518,8 +492,7 @@ async def search_entities(
         tag_values = [
             _normalize_match_text(tag)
             for tag in (
-                _as_string_list(props.get("tags"))
-                + _as_string_list(props.get("tags_normalized"))
+                _as_string_list(props.get("tags")) + _as_string_list(props.get("tags_normalized"))
             )
         ]
         path_values = [
@@ -557,10 +530,7 @@ async def search_entities(
             query_normalized in alias for alias in alias_values
         ):
             rank = 5
-        elif any(
-            query_normalized in value
-            for value in tag_values + path_values + search_values
-        ):
+        elif any(query_normalized in value for value in tag_values + path_values + search_values):
             rank = 6
         else:
             continue
@@ -612,9 +582,7 @@ async def get_relationship_paths(
     seed_entries = _normalize_seed_entries(seeds, namespace)
     relationships: list[dict] = []
     relationship_keys: set[tuple[str, str, str, str, str, int]] = set()
-    relationship_entities: dict[
-        tuple[str, str, str, str, str, int], tuple[dict, dict]
-    ] = {}
+    relationship_entities: dict[tuple[str, str, str, str, str, int], tuple[dict, dict]] = {}
 
     allowed_types_literal = _lit(sorted(allowed_types))
     should_stop = False
@@ -692,7 +660,14 @@ async def get_relationship_paths(
 
                 parsed_rels: list[
                     tuple[
-                        int, str, str, str, object | None, object | None, object | None, object | None
+                        int,
+                        str,
+                        str,
+                        str,
+                        object | None,
+                        object | None,
+                        object | None,
+                        object | None,
                     ]
                 ] = []
                 path_ok = True
@@ -708,9 +683,7 @@ async def get_relationship_paths(
                     from_node = node_by_id.get(rel.get("start_id")) or node_by_id.get(
                         rel.get("startid")
                     )
-                    to_node = node_by_id.get(rel.get("end_id")) or node_by_id.get(
-                        rel.get("endid")
-                    )
+                    to_node = node_by_id.get(rel.get("end_id")) or node_by_id.get(rel.get("endid"))
                     if from_node is None or to_node is None:
                         path_ok = False
                         break
@@ -809,7 +782,7 @@ async def get_relationship_paths(
     )
     limited_relationships = relationships[:bounded_limit]
 
-    entities_by_key: dict[tuple[str, str], dict] = {}
+    entities_by_key: dict[tuple, dict] = {}
     for rel in limited_relationships:
         rel_key = (
             rel["from"],
@@ -829,9 +802,11 @@ async def get_relationship_paths(
                 entities_by_key[(entity["name"], entity_namespace)] = entity
                 continue
 
-            if entity["depth"] < existing["depth"]:
-                entities_by_key[(entity["name"], entity_namespace)] = entity
-            elif entity["depth"] == existing["depth"] and entity["seed"] < existing["seed"]:
+            if (
+                entity["depth"] < existing["depth"]
+                or entity["depth"] == existing["depth"]
+                and entity["seed"] < existing["seed"]
+            ):
                 entities_by_key[(entity["name"], entity_namespace)] = entity
 
     entities = list(entities_by_key.values())
@@ -962,11 +937,7 @@ async def delete_entities_by_source_memory(
     session: AsyncSession, memory_id: str, namespace: str | None = None
 ) -> None:
     await _prepare(session)
-    namespace_filter = (
-        f"n.namespace = {_lit(namespace)} AND "
-        if namespace is not None
-        else ""
-    )
+    namespace_filter = f"n.namespace = {_lit(namespace)} AND " if namespace is not None else ""
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MATCH (n:Entity) "

@@ -5,9 +5,13 @@ from sqlalchemy import text
 def test_extensoes_vector_e_age_presentes(sync_dsn):
     engine = sa.create_engine(sync_dsn)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT extname FROM pg_extension WHERE extname IN ('vector', 'age')")
-        ).scalars().all()
+        rows = (
+            conn.execute(
+                text("SELECT extname FROM pg_extension WHERE extname IN ('vector', 'age')")
+            )
+            .scalars()
+            .all()
+        )
     assert set(rows) == {"vector", "age"}
 
 
@@ -24,6 +28,8 @@ def test_vector_aceita_2000_dims(sync_dsn):
     engine = sa.create_engine(sync_dsn)
     with engine.connect() as conn:
         conn.execute(text("CREATE TEMP TABLE t (v vector(2000))"))
-        conn.execute(text("INSERT INTO t (v) VALUES (:v)"), {"v": "[" + ",".join(["0"] * 2000) + "]"})
+        conn.execute(
+            text("INSERT INTO t (v) VALUES (:v)"), {"v": "[" + ",".join(["0"] * 2000) + "]"}
+        )
         n = conn.execute(text("SELECT count(*) FROM t")).scalar()
     assert n == 1

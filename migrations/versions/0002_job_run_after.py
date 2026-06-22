@@ -3,6 +3,7 @@
 Revision ID: 0002
 Revises: 0001
 """
+
 from alembic import op
 
 revision = "0002"
@@ -13,8 +14,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute(
-        "ALTER TABLE ingestion_jobs "
-        "ADD COLUMN IF NOT EXISTS run_after TIMESTAMP WITH TIME ZONE"
+        "ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS run_after TIMESTAMP WITH TIME ZONE"
     )
 
 

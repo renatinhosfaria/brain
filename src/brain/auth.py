@@ -29,7 +29,7 @@ def verify_bearer_token(authorization_header: str | None, *, expected: str) -> N
     prefix = "Bearer "
     if not authorization_header.startswith(prefix):
         raise AuthError("Formato esperado: 'Bearer <token>'")
-    token = authorization_header[len(prefix):]
+    token = authorization_header[len(prefix) :]
     # Comparação em tempo constante para evitar timing attacks
     if not hmac.compare_digest(token, expected):
         raise AuthError("Token inválido")

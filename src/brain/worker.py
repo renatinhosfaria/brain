@@ -2,12 +2,12 @@ import asyncio
 
 import structlog
 
+from brain import outbox
 from brain.config import get_settings
+from brain.extraction.llm import LLMClient
 from brain.graph import age
 from brain.indexing.embeddings import Embedder
-from brain.extraction.llm import LLMClient
 from brain.ingestion import git_writer, pipeline
-from brain import outbox
 from brain.queue.postgres_queue import PostgresJobQueue
 from brain.repo_paths import normalize_repo_path
 from brain.storage import repositories as repo
@@ -21,9 +21,7 @@ def _curated_meta_from_frontmatter(namespace: str, content: str) -> dict | None:
         return None
     frontmatter = git_writer.parse_frontmatter(content)
     metadata = (
-        frontmatter.get("metadata")
-        if isinstance(frontmatter.get("metadata"), dict)
-        else None
+        frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else None
     )
     source_ids = (
         frontmatter.get("source_agent_note_ids")
@@ -44,9 +42,15 @@ async def handle_job(session, embedder, llm, settings, job) -> None:
         content = document_path.read_text(encoding="utf-8")
         meta = _curated_meta_from_frontmatter(p["namespace"], content)
         await pipeline.index_document(
-            session, embedder, llm, settings,
-            namespace=p["namespace"], repo_path=repo_path,
-            content=content, commit_sha=p.get("commit_sha"), meta=meta,
+            session,
+            embedder,
+            llm,
+            settings,
+            namespace=p["namespace"],
+            repo_path=repo_path,
+            content=content,
+            commit_sha=p.get("commit_sha"),
+            meta=meta,
         )
     elif job.type == "delete_document":
         repo_path, _ = normalize_repo_path(

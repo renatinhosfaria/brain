@@ -1,4 +1,4 @@
-from brain.indexing.chunker import chunk_markdown, count_tokens
+from brain.indexing.chunker import chunk_markdown
 
 
 def test_texto_vazio_retorna_lista_vazia():

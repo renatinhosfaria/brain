@@ -8,7 +8,11 @@ _RETRYABLE_ERRORS = (APIConnectionError, APITimeoutError, RateLimitError, Timeou
 
 class Embedder:
     def __init__(
-        self, client, model: str, dim: int, retry_attempts: int = 3  # noqa: ANN001
+        self,
+        client,
+        model: str,
+        dim: int,
+        retry_attempts: int = 3,  # noqa: ANN001
     ) -> None:
         self._client = client
         self._model = model

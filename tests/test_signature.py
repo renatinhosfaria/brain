@@ -26,11 +26,14 @@ def test_assinatura_outbox_usa_timestamp_ponto_e_body_bruto():
     body = b'{"note_id":"note-1","status":"created"}'
     timestamp = "2026-06-17T12:00:00+00:00"
 
-    expected = "sha256=" + hmac.new(
-        b"segredo",
-        timestamp.encode() + b"." + body,
-        hashlib.sha256,
-    ).hexdigest()
+    expected = (
+        "sha256="
+        + hmac.new(
+            b"segredo",
+            timestamp.encode() + b"." + body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
     assert sign_webhook("segredo", timestamp, body) == expected
 
@@ -38,10 +41,13 @@ def test_assinatura_outbox_usa_timestamp_ponto_e_body_bruto():
 def test_assinatura_outbox_compatibilidade_hermes_usa_body_bruto():
     body = b'{"note_id":"note-1","status":"created"}'
 
-    expected = "sha256=" + hmac.new(
-        b"segredo",
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+    expected = (
+        "sha256="
+        + hmac.new(
+            b"segredo",
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
     assert sign_webhook_body("segredo", body) == expected

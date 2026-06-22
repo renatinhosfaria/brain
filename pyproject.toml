@@ -28,6 +28,8 @@ dev = [
     "testcontainers[postgres]>=4.8",
     "anyio>=4.6",
     "psycopg2-binary>=2.9.12",
+    "ruff>=0.15.18",
+    "mypy>=2.1.0",
 ]
 
 [build-system]
@@ -41,3 +43,25 @@ packages = ["src/brain"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM", "BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations são geradas/declarativas; não impomos estilo de linha nelas.
+"migrations/**" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+ignore_missing_imports = true
+# Adoção incremental: começamos pragmáticos e apertamos com o tempo.
+check_untyped_defs = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+no_implicit_optional = true

@@ -10,6 +10,7 @@ def _system_prompt(max_entities: int) -> str:
 
 
 def _entity_name(item) -> str | None:  # noqa: ANN001
+    value: object
     if isinstance(item, str):
         value = item
     elif isinstance(item, dict):

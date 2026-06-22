@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from brain.ingestion import git_sync
-from brain.ingestion.git_sync import changed_files, clone_or_pull, content_hash, head_sha
+from brain.ingestion.git_sync import changed_files, clone_or_pull, content_hash
 
 
 def _git(args, cwd):

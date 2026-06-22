@@ -8,7 +8,7 @@ from pathlib import Path
 def _git_env(token: str | None = None) -> dict[str, str] | None:
     if not token:
         return None
-    credential = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    credential = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
     env = os.environ.copy()
     env.update(
         {
@@ -48,7 +48,9 @@ def _head_sha_or_none(dest: str | Path) -> str | None:
         return None
 
 
-def clone_or_pull(repo_url: str, dest: str | Path, token: str | None = None) -> tuple[str | None, str]:
+def clone_or_pull(
+    repo_url: str, dest: str | Path, token: str | None = None
+) -> tuple[str | None, str]:
     """Retorna (sha_antes, sha_depois). sha_antes é None no primeiro clone."""
     dest = Path(dest)
     if (dest / ".git").exists():

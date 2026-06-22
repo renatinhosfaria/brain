@@ -4,8 +4,8 @@ Revision ID: 0003
 Revises: 0002
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision = "0003"

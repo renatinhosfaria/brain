@@ -14,10 +14,9 @@ from brain.mcp import handlers
 from brain.mcp.handlers import Deps
 from brain.mcp.server import create_mcp_server
 from brain.queue.postgres_queue import PostgresJobQueue
+from brain.storage import repositories as repo
 from brain.storage.db import make_engine, make_session_factory
 from brain.storage.models import AgentNote, Base, Chunk, NoteLink, OutboxEvent
-from brain.storage import repositories as repo
-
 
 CURATOR = auth.Principal("curator", "hermes", "Hermes")
 CLIENT = auth.Principal("client", "chatgpt-web", "ChatGPT Web")
@@ -56,10 +55,15 @@ async def deps(async_dsn, tmp_path):
     vault = tmp_path / "vault"
     _init_repo(vault)
     settings = Settings(
-        database_url=async_dsn, openai_api_key="x", github_token="x",
-        brain_auth_token="x", brain_curator_token="curator",
-        webhook_secret="x", repo_url="x",
-        repo_cache_path=str(vault), git_push_enabled=False,
+        database_url=async_dsn,
+        openai_api_key="x",
+        github_token="x",
+        brain_auth_token="x",
+        brain_curator_token="curator",
+        webhook_secret="x",
+        repo_url="x",
+        repo_cache_path=str(vault),
+        git_push_enabled=False,
         brain_token_encryption_key=Fernet.generate_key().decode(),
     )
     yield Deps(sf, FakeEmbedder(), None, PostgresJobQueue(sf), settings)
@@ -237,7 +241,9 @@ async def test_create_note_recupera_arquivo_existente_sem_documento_apos_falha_i
 ):
     deps.settings.git_push_enabled = True
     push_calls = []
-    monkeypatch.setattr(handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args))
+    monkeypatch.setattr(
+        handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args)
+    )
     monkeypatch.setattr(
         handlers.git_writer,
         "_push_with_retry",
@@ -319,7 +325,9 @@ async def test_create_note_commit_falha_restaura_worktree_e_retry_nao_indexa_unc
 ):
     deps.settings.git_push_enabled = True
     push_calls = []
-    monkeypatch.setattr(handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args))
+    monkeypatch.setattr(
+        handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args)
+    )
     original_commit_path = handlers.git_writer._commit_path
     commit_calls = 0
 
@@ -373,7 +381,9 @@ async def test_create_note_commit_falha_restaura_worktree_e_retry_nao_indexa_unc
 
 
 async def test_update_note_substitui_markdown_inteiro_e_reindexa(deps):
-    created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo.")
+    created = await _as_curator(
+        handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo."
+    )
 
     updated = await _as_curator(
         handlers.update_note,
@@ -593,9 +603,7 @@ async def test_resolve_note_link_exige_alvo_curado_existente_e_nao_agents(deps):
         "# MCP\n\nProtocolo.",
     )
     async with deps.session_factory() as s:
-        link = (
-            await s.execute(select(NoteLink).where(NoteLink.target == "MCP"))
-        ).scalar_one()
+        link = (await s.execute(select(NoteLink).where(NoteLink.target == "MCP"))).scalar_one()
         link_id = str(link.id)
         raw = await repo.upsert_document(
             s,
@@ -627,13 +635,15 @@ async def test_resolve_note_link_exige_alvo_curado_existente_e_nao_agents(deps):
     assert [item["target"] for item in unresolved["items"]] == []
 
 
-async def test_update_note_falha_indexacao_mantem_get_note_db_e_retry_reconcilia(
-    deps, monkeypatch
-):
-    created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo.")
+async def test_update_note_falha_indexacao_mantem_get_note_db_e_retry_reconcilia(deps, monkeypatch):
+    created = await _as_curator(
+        handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nAntigo."
+    )
     deps.settings.git_push_enabled = True
     push_calls = []
-    monkeypatch.setattr(handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args))
+    monkeypatch.setattr(
+        handlers.git_writer, "push_repo", lambda *args, **kwargs: push_calls.append(args)
+    )
     monkeypatch.setattr(
         handlers.git_writer,
         "_push_with_retry",
@@ -677,7 +687,9 @@ async def test_update_note_falha_indexacao_mantem_get_note_db_e_retry_reconcilia
 
 
 async def test_get_note_retorna_apenas_curated_notes(deps):
-    created = await _as_curator(handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nCurado.")
+    created = await _as_curator(
+        handlers.create_note, deps, "projetos/brain.md", "# Brain\n\nCurado."
+    )
     async with deps.session_factory() as s:
         raw = await repo.upsert_document(
             s,
@@ -1764,7 +1776,9 @@ async def test_agent_note_transicoes_terminais_concorrentes_so_uma_vence(deps, m
     monkeypatch.setattr(repo, "get_agent_note", gated_get_agent_note)
 
     results = await asyncio.gather(
-        _as_curator(handlers.complete_agent_note, deps, submitted["note_id"], {"winner": "complete"}),
+        _as_curator(
+            handlers.complete_agent_note, deps, submitted["note_id"], {"winner": "complete"}
+        ),
         _as_curator(handlers.reject_agent_note, deps, submitted["note_id"], "concorrente"),
         return_exceptions=True,
     )
@@ -1781,9 +1795,7 @@ async def test_agent_note_transicoes_terminais_concorrentes_so_uma_vence(deps, m
     assert note.completed_at is not None
 
 
-async def test_submit_agent_note_mesmo_timestamp_e_titulo_cria_paths_distintos(
-    deps, monkeypatch
-):
+async def test_submit_agent_note_mesmo_timestamp_e_titulo_cria_paths_distintos(deps, monkeypatch):
     await _create_client_as_curator(deps)
     monkeypatch.setattr(handlers, "_now_stamp", lambda: "20260617T183000000000")
 
@@ -1945,9 +1957,7 @@ async def test_submit_agent_note_push_usa_github_token(deps, monkeypatch):
     ]
 
 
-async def test_create_agent_client_persiste_db_e_git_local_quando_push_falha(
-    deps, monkeypatch
-):
+async def test_create_agent_client_persiste_db_e_git_local_quando_push_falha(deps, monkeypatch):
     deps.settings.git_push_enabled = True
     token = "brain_client_codex_created-secret"
 
@@ -2009,9 +2019,7 @@ async def test_create_agent_client_push_usa_github_token(deps, monkeypatch):
     ]
 
 
-async def test_rotate_agent_client_persiste_token_e_git_local_quando_push_falha(
-    deps, monkeypatch
-):
+async def test_rotate_agent_client_persiste_token_e_git_local_quando_push_falha(deps, monkeypatch):
     await _create_client_as_curator(deps, slug="codex", name="Codex")
     async with deps.session_factory() as s:
         before = await repo.get_agent_client(s, slug="codex")

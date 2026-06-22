@@ -178,8 +178,8 @@ async def deep_search(
             seeds = llm_seeds
             seed_strategy = "llm"
 
-    graph = {"entities": [], "relationships": []}
-    namespaces = []
+    graph: dict[str, list] = {"entities": [], "relationships": []}
+    namespaces: list = []
     if seeds:
         graph = await age.get_relationship_paths(
             session,
@@ -191,10 +191,7 @@ async def deep_search(
         )
         seed_keys = {(seed["name"], seed["namespace"]) for seed in seeds}
         for entity in graph["entities"]:
-            if (
-                entity["depth"] == 0
-                and (entity["name"], entity.get("namespace")) in seed_keys
-            ):
+            if entity["depth"] == 0 and (entity["name"], entity.get("namespace")) in seed_keys:
                 entity["matched_by"] = seed_strategy
             else:
                 entity["matched_by"] = "relationship"

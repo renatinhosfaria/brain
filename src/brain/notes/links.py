@@ -1,6 +1,5 @@
 import re
 
-
 _OBSIDIAN_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 

@@ -1,7 +1,6 @@
 import re
 from pathlib import Path
 
-
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 

@@ -48,8 +48,6 @@ def chunk_markdown(text: str, max_tokens: int = 512, overlap: int = 64) -> list[
     ordinal = 0
     for section in _split_by_headings(text):
         for piece, token_count in _split_by_tokens(section, max_tokens, overlap):
-            chunks.append(
-                {"ordinal": ordinal, "text": piece, "token_count": token_count}
-            )
+            chunks.append({"ordinal": ordinal, "text": piece, "token_count": token_count})
             ordinal += 1
     return chunks

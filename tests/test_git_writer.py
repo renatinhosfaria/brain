@@ -2,8 +2,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
 from brain.ingestion import git_writer
-from brain.ingestion.git_writer import render_markdown, write_conversation, _slugify
+from brain.ingestion.git_writer import _slugify, render_markdown, write_conversation
 
 
 def _git(args, cwd):
@@ -36,20 +37,24 @@ def test_render_markdown():
 
 
 def test_render_messages_markdown_usa_markdown_simples():
-    md = git_writer.render_messages_markdown([
-        {"role": "user", "content": "oi"},
-        {"role": "assistant", "content": "ola"},
-    ])
+    md = git_writer.render_messages_markdown(
+        [
+            {"role": "user", "content": "oi"},
+            {"role": "assistant", "content": "ola"},
+        ]
+    )
     assert md == "**user:** oi\n\n**assistant:** ola\n"
 
 
 def test_render_frontmatter_omite_campos_none():
-    md = git_writer.render_frontmatter({
-        "type": "curated_note",
-        "title": "Brain",
-        "empty": None,
-        "metadata": {"source": "test"},
-    })
+    md = git_writer.render_frontmatter(
+        {
+            "type": "curated_note",
+            "title": "Brain",
+            "empty": None,
+            "metadata": {"source": "test"},
+        }
+    )
 
     assert md.startswith("---\n")
     assert "type: curated_note" in md
@@ -198,9 +203,7 @@ def test_write_agent_client_profile_rollback_create_quando_commit_falha(tmp_path
     assert _git(["status", "--short"], repo).stdout == ""
 
 
-def test_write_agent_client_profile_mantem_commit_local_quando_push_falha(
-    tmp_path, monkeypatch
-):
+def test_write_agent_client_profile_mantem_commit_local_quando_push_falha(tmp_path, monkeypatch):
     repo = tmp_path / "vault"
     _init_repo(repo)
 
@@ -224,9 +227,7 @@ def test_write_agent_client_profile_mantem_commit_local_quando_push_falha(
         )
 
     assert (repo / rel).exists()
-    assert "token_prefix: brain_client_chatgpt-web" in (repo / rel).read_text(
-        encoding="utf-8"
-    )
+    assert "token_prefix: brain_client_chatgpt-web" in (repo / rel).read_text(encoding="utf-8")
     committed = _git(["show", f"HEAD:{rel}"], repo).stdout
     assert "token_prefix: brain_client_chatgpt-web" in committed
     assert _git(["status", "--short"], repo).stdout == ""
@@ -356,10 +357,7 @@ def test_write_agent_note_mantem_commit_local_quando_push_falha(tmp_path, monkey
 
     monkeypatch.setattr(git_writer, "_push_with_retry", fail_push)
 
-    rel = (
-        "_agents/chatgpt-web/2026/06/17/"
-        "20260617T183000000000-resumo-agent-note-1.md"
-    )
+    rel = "_agents/chatgpt-web/2026/06/17/20260617T183000000000-resumo-agent-note-1.md"
     with pytest.raises(RuntimeError, match="push failed after local commit"):
         git_writer.write_agent_note(
             repo,
@@ -376,9 +374,7 @@ def test_write_agent_note_mantem_commit_local_quando_push_falha(tmp_path, monkey
         )
 
     assert (repo / rel).exists()
-    assert "Conteudo que deve ficar commitado." in (repo / rel).read_text(
-        encoding="utf-8"
-    )
+    assert "Conteudo que deve ficar commitado." in (repo / rel).read_text(encoding="utf-8")
     committed = _git(["show", f"HEAD:{rel}"], repo).stdout
     assert "Conteudo que deve ficar commitado." in committed
     assert _git(["status", "--short"], repo).stdout == ""
@@ -446,7 +442,10 @@ def test_push_with_retry_configura_upstream_no_primeiro_push(tmp_path):
 
     git_writer._push_with_retry(local, retries=1)
 
-    assert _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], local).stdout.strip() == "origin/main"
+    assert (
+        _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], local).stdout.strip()
+        == "origin/main"
+    )
     assert _git(["show", "main:note.md"], remote).stdout == "primeiro commit\n"
 
 
@@ -630,7 +629,9 @@ def test_write_conversation_cria_arquivo_e_commit(tmp_path):
     repo = tmp_path / "vault"
     _init_repo(repo)
     rel = write_conversation(
-        repo, "conversas", "trabalho",
+        repo,
+        "conversas",
+        "trabalho",
         [{"role": "user", "content": "preciso lembrar disso"}],
         timestamp="20260604T120000",
         author_name="brain-bot",

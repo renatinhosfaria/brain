@@ -332,9 +332,7 @@ async def create_agent_note(
 
 
 async def get_agent_note(session, id: uuid.UUID) -> AgentNote | None:
-    return (
-        await session.execute(select(AgentNote).where(AgentNote.id == id))
-    ).scalar_one_or_none()
+    return (await session.execute(select(AgentNote).where(AgentNote.id == id))).scalar_one_or_none()
 
 
 async def list_agent_notes(

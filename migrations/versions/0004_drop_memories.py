@@ -10,10 +10,10 @@ servidor. O grafo AGE preserva a propriedade genérica `source_memory` nas
 entidades; apenas a tabela relacional é descartada aqui.
 """
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from alembic import op
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision = "0004"
 down_revision = "0003"
@@ -39,8 +39,7 @@ def downgrade() -> None:
         sa.Column("source", sa.String(), nullable=False, server_default="conversation"),
         sa.Column("embedding", Vector(EMBED_DIM), nullable=False),
         sa.Column("confidence", sa.Float(), nullable=False, server_default="1.0"),
-        sa.Column("supersedes_id", UUID(as_uuid=True),
-                  sa.ForeignKey("memories.id"), nullable=True),
+        sa.Column("supersedes_id", UUID(as_uuid=True), sa.ForeignKey("memories.id"), nullable=True),
         sa.Column("metadata", JSONB(), nullable=False, server_default="{}"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),

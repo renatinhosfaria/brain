@@ -27,19 +27,23 @@ class PostgresJobQueue(JobQueue):
     async def claim_next(self, worker_id: str) -> Job | None:
         async with self._sf() as s:
             row = (
-                await s.execute(
-                    text(
-                        "UPDATE ingestion_jobs SET status='running', locked_by=:w, "
-                        "locked_at=now(), run_after=NULL, attempts=attempts+1 "
-                        "WHERE id = ("
-                        "  SELECT id FROM ingestion_jobs WHERE status='pending' "
-                        "  AND (run_after IS NULL OR run_after <= now()) "
-                        "  ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1"
-                        ") RETURNING id, type, payload, attempts"
-                    ),
-                    {"w": worker_id},
+                (
+                    await s.execute(
+                        text(
+                            "UPDATE ingestion_jobs SET status='running', locked_by=:w, "
+                            "locked_at=now(), run_after=NULL, attempts=attempts+1 "
+                            "WHERE id = ("
+                            "  SELECT id FROM ingestion_jobs WHERE status='pending' "
+                            "  AND (run_after IS NULL OR run_after <= now()) "
+                            "  ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1"
+                            ") RETURNING id, type, payload, attempts"
+                        ),
+                        {"w": worker_id},
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             await s.commit()
         if row is None:
             return None
@@ -68,7 +72,8 @@ class PostgresJobQueue(JobQueue):
                     "last_error=:e, locked_by=NULL, locked_at=NULL, "
                     "run_after = CASE "
                     "  WHEN attempts >= :m THEN NULL "
-                    "  ELSE now() + make_interval(secs => LEAST(300, CAST(power(2, attempts) AS integer))) "
+                    "  ELSE now() + make_interval(secs => "
+                    "LEAST(300, CAST(power(2, attempts) AS integer))) "
                     "END "
                     "WHERE id=:id"
                 ),
@@ -87,4 +92,4 @@ class PostgresJobQueue(JobQueue):
                 {"sec": older_than_seconds},
             )
             await s.commit()
-            return res.rowcount
+            return res.rowcount  # type: ignore[attr-defined]

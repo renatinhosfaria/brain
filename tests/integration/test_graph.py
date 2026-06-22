@@ -16,10 +16,11 @@ async def session(async_dsn):
         await age.ensure_graph(s)
         # limpa o grafo entre execuções
         from sqlalchemy import text
+
         await age._prepare(s)
-        await s.execute(text(
-            "SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)"
-        ))
+        await s.execute(
+            text("SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)")
+        )
         await s.commit()
         yield s
     await engine.dispose()
@@ -212,10 +213,7 @@ async def test_get_relationship_paths_global_retorna_lista_unica_com_namespace(s
             "depth": 1,
         },
     ]
-    assert {
-        (entity["name"], entity["namespace"])
-        for entity in out["entities"]
-    } == {
+    assert {(entity["name"], entity["namespace"]) for entity in out["entities"]} == {
         ("brain", "curated"),
         ("Hermes", "curated"),
         ("brain", "trabalho"),
@@ -348,8 +346,10 @@ async def test_get_relationship_paths_nao_atravessa_relacao_cross_namespace(sess
         await session.execute(
             text(
                 f"SELECT * FROM cypher('brain', $cy$ "
-                f"MATCH (a:Entity {{name: {age._lit('brain')}, namespace: {age._lit('curated')}}}), "
-                f"(b:Entity {{name: {age._lit('Tenant Secret')}, namespace: {age._lit('tenant-b')}}}) "
+                f"MATCH (a:Entity {{name: {age._lit('brain')}, "
+                f"namespace: {age._lit('curated')}}}), "
+                f"(b:Entity {{name: {age._lit('Tenant Secret')}, "
+                f"namespace: {age._lit('tenant-b')}}}) "
                 f"MERGE (a)-[r:REL {{type: {age._lit('leaks_to')}}}]->(b) "
                 f"RETURN r.type $cy$) AS (type agtype)"
             )
@@ -359,7 +359,8 @@ async def test_get_relationship_paths_nao_atravessa_relacao_cross_namespace(sess
         await session.execute(
             text(
                 f"SELECT * FROM cypher('brain', $cy$ "
-                f"MATCH (a:Entity {{name: {age._lit('Tenant Secret')}, namespace: {age._lit('tenant-b')}}}), "
+                f"MATCH (a:Entity {{name: {age._lit('Tenant Secret')}, "
+                f"namespace: {age._lit('tenant-b')}}}), "
                 f"(b:Entity {{name: {age._lit('Public Leak')}, namespace: {age._lit('curated')}}}) "
                 f"MERGE (a)-[r:REL {{type: {age._lit('leaks_back')}}}]->(b) "
                 f"RETURN r.type $cy$) AS (type agtype)"
@@ -375,9 +376,7 @@ async def test_get_relationship_paths_nao_atravessa_relacao_cross_namespace(sess
     assert {"Tenant Secret", "Public Leak"}.isdisjoint(
         {entity["name"] for entity in out["entities"]}
     )
-    assert {"leaks_to", "leaks_back"}.isdisjoint(
-        {rel["type"] for rel in out["relationships"]}
-    )
+    assert {"leaks_to", "leaks_back"}.isdisjoint({rel["type"] for rel in out["relationships"]})
     assert out["relationships"] == [
         {
             "from": "brain",
@@ -769,9 +768,7 @@ async def test_search_entities_exact_alias_not_excluded_by_alias_contains_cap(se
 
     found = await age.search_entities(session, "term", "curated", limit=1)
 
-    assert found == [
-        {"name": "Zulu Alias Exato", "type": "conceito", "namespace": "curated"}
-    ]
+    assert found == [{"name": "Zulu Alias Exato", "type": "conceito", "namespace": "curated"}]
 
 
 async def test_search_entities_exact_tag_not_excluded_by_tag_contains_cap(session):
@@ -796,9 +793,7 @@ async def test_search_entities_exact_tag_not_excluded_by_tag_contains_cap(sessio
 
     found = await age.search_entities(session, "term", "curated", limit=1)
 
-    assert found == [
-        {"name": "Zulu Tag Exata", "type": "conceito", "namespace": "curated"}
-    ]
+    assert found == [{"name": "Zulu Tag Exata", "type": "conceito", "namespace": "curated"}]
 
 
 async def test_upsert_and_update_entity_store_normalized_search_text(session):

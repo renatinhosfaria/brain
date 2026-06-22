@@ -4,15 +4,12 @@ from testcontainers.postgres import PostgresContainer
 
 @pytest.fixture(scope="session")
 def pg_container():
-    container = (
-        PostgresContainer(
-            image="brain-postgres:local",
-            username="brain",
-            password="brain",
-            dbname="brain",
-        )
-        .with_command("postgres -c shared_preload_libraries=age")
-    )
+    container = PostgresContainer(
+        image="brain-postgres:local",
+        username="brain",
+        password="brain",
+        dbname="brain",
+    ).with_command("postgres -c shared_preload_libraries=age")
     with container as pg:
         yield pg
 

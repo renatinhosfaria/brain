@@ -2,8 +2,8 @@ import hashlib
 import hmac
 
 import anyio
-import pytest_asyncio
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
@@ -27,11 +27,16 @@ async def prepared_db(async_dsn):
 
 def _settings(async_dsn, tmp_path) -> Settings:
     return Settings(
-        database_url=async_dsn, openai_api_key="x", github_token="x",
-        brain_auth_token="tok", brain_curator_token="curator-token",
+        database_url=async_dsn,
+        openai_api_key="x",
+        github_token="x",
+        brain_auth_token="tok",
+        brain_curator_token="curator-token",
         brain_token_encryption_key=Fernet.generate_key().decode(),
-        webhook_secret="seg", repo_url="https://x/y.git",
-        repo_cache_path=str(tmp_path), git_push_enabled=False,
+        webhook_secret="seg",
+        repo_url="https://x/y.git",
+        repo_cache_path=str(tmp_path),
+        git_push_enabled=False,
     )
 
 
@@ -101,7 +106,9 @@ def test_status_lista_jobs_failed(async_dsn, tmp_path, prepared_db):
 def test_webhook_rejeita_assinatura_invalida(async_dsn, tmp_path, prepared_db):
     app = create_app(*build_deps(_settings(async_dsn, tmp_path)))
     with TestClient(app) as client:
-        r = client.post("/webhook/github", content=b"{}", headers={"X-Hub-Signature-256": "sha256=x"})
+        r = client.post(
+            "/webhook/github", content=b"{}", headers={"X-Hub-Signature-256": "sha256=x"}
+        )
     assert r.status_code == 401
 
 
@@ -150,7 +157,8 @@ def test_mcp_streamable_http_exposto_em_mcp(async_dsn, tmp_path, prepared_db):
 def test_webhook_enfileira_jobs(async_dsn, tmp_path, prepared_db, monkeypatch):
     monkeypatch.setattr(main.git_sync, "clone_or_pull", lambda *a, **k: ("old", "new"))
     monkeypatch.setattr(
-        main.git_sync, "changed_files",
+        main.git_sync,
+        "changed_files",
         lambda *a, **k: [("A", "trabalho/nota.md"), ("D", "trabalho/old.md")],
     )
     app = create_app(*build_deps(_settings(async_dsn, tmp_path)))

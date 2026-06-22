@@ -59,7 +59,7 @@ class _PrincipalAuth:
         headers = dict(scope.get("headers", []))
         authorization = headers.get(b"authorization", b"").decode()
         prefix = "Bearer "
-        if not authorization.startswith(prefix) or not authorization[len(prefix):]:
+        if not authorization.startswith(prefix) or not authorization[len(prefix) :]:
             await self._unauthorized(send)
             return
 
@@ -67,7 +67,7 @@ class _PrincipalAuth:
         async with self.sf() as session:
             try:
                 principal = await auth.resolve_principal(
-                    session, self.settings, authorization[len(prefix):]
+                    session, self.settings, authorization[len(prefix) :]
                 )
             except auth.AuthError:
                 await session.rollback()
@@ -86,10 +86,13 @@ class _PrincipalAuth:
                     auth.reset_current_principal(principal_token)
 
     async def _unauthorized(self, send: Send) -> None:
-        await send({
-            "type": "http.response.start", "status": 401,
-            "headers": [(b"content-type", b"text/plain")],
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
         await send({"type": "http.response.body", "body": b"Unauthorized"})
 
 
@@ -123,7 +126,7 @@ def create_app(deps: Deps, sf) -> FastAPI:
         try:
             async with sf() as s:
                 await s.execute(text("SELECT 1"))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("health_database_unavailable", error=str(exc))
             return JSONResponse(
                 {"status": "error", "database": "unavailable"},
@@ -136,16 +139,22 @@ def create_app(deps: Deps, sf) -> FastAPI:
         if request.headers.get("Authorization") != f"Bearer {settings.brain_auth_token}":
             return Response(status_code=401)
         async with sf() as s:
-            rows = (await s.execute(
-                text("SELECT status, count(*) FROM ingestion_jobs GROUP BY status")
-            )).all()
-            failed_rows = (await s.execute(
-                text(
-                    "SELECT id, type, attempts, last_error "
-                    "FROM ingestion_jobs WHERE status='failed' "
-                    "ORDER BY updated_at DESC LIMIT 20"
+            rows = (
+                await s.execute(text("SELECT status, count(*) FROM ingestion_jobs GROUP BY status"))
+            ).all()
+            failed_rows = (
+                (
+                    await s.execute(
+                        text(
+                            "SELECT id, type, attempts, last_error "
+                            "FROM ingestion_jobs WHERE status='failed' "
+                            "ORDER BY updated_at DESC LIMIT 20"
+                        )
+                    )
                 )
-            )).mappings().all()
+                .mappings()
+                .all()
+            )
         job_counts = {"pending": 0, "running": 0, "done": 0, "failed": 0}
         job_counts.update({r[0]: r[1] for r in rows})
         return {

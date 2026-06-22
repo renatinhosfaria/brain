@@ -115,9 +115,7 @@ async def index_document(
             meta=replacement_meta,
             document_id=str(existing.id),
         )
-        exclude_sources = (
-            {"curated_note"} if replacement_payload["status"] != "skipped" else None
-        )
+        exclude_sources = {"curated_note"} if replacement_payload["status"] != "skipped" else None
         await age.ensure_graph(session, commit=False)
         await age.delete_entities_by_source_doc(
             session,
@@ -167,5 +165,3 @@ async def index_document(
     if commit:
         await session.commit()
     return True
-
-

@@ -7,12 +7,16 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from brain import auth
+from brain.config import Settings
+from brain.extraction.llm import LLMClient
 from brain.graph import age
-from brain.ingestion import git_writer
-from brain.ingestion import pipeline
+from brain.indexing.embeddings import Embedder
+from brain.ingestion import git_writer, pipeline
 from brain.notes.links import extract_obsidian_links
-from brain.queue.base import JobType
+from brain.queue.base import JobQueue, JobType
 from brain.repo_paths import normalize_repo_path
 from brain.search.retriever import deep_search as _deep_search
 from brain.search.retriever import search as _search
@@ -21,11 +25,11 @@ from brain.storage import repositories as repo
 
 @dataclass
 class Deps:
-    session_factory: object
-    embedder: object
-    llm: object
-    queue: object
-    settings: object
+    session_factory: async_sessionmaker[AsyncSession]
+    embedder: Embedder
+    llm: LLMClient
+    queue: JobQueue
+    settings: Settings
 
 
 def _now_stamp() -> str:
@@ -423,6 +427,7 @@ async def _index_curated_note(
                 content=content,
             )
             out = _curated_note_dict(doc)
+            assert out is not None
             await s.commit()
             return out
         except Exception:
@@ -475,6 +480,7 @@ async def _transition_agent_note(
             raise ValueError(f"cannot {action} agent note with status {current.status}")
         await s.refresh(note)
         out = _agent_note_dict(note)
+        assert out is not None
         await s.commit()
         return out
 
@@ -693,10 +699,7 @@ async def list_vault_tree(
         if candidate == base and not rel_prefix:
             continue
         relative_to_base = candidate.relative_to(base).as_posix()
-        if relative_to_base == ".":
-            depth = 1
-        else:
-            depth = len(relative_to_base.split("/"))
+        depth = 1 if relative_to_base == "." else len(relative_to_base.split("/"))
         if max_depth is not None and depth > max_depth:
             continue
         if candidate.is_dir():
@@ -732,6 +735,7 @@ async def resolve_note_link(deps: Deps, link_id: str, target_path: str) -> dict:
         if link is None:
             raise ValueError(f"note link not found: {link_id}")
         out = _note_link_dict(link)
+        assert out is not None
         await s.commit()
         return out
 
@@ -930,7 +934,8 @@ async def get_document(deps: Deps, id_or_path: str) -> dict | None:
 async def list_documents(deps: Deps, namespace: str | None = None) -> list[dict]:
     _require_curator()
     async with deps.session_factory() as s:
-        return [_doc_dict(d) for d in await repo.list_documents(s, namespace)]
+        docs = await repo.list_documents(s, namespace)
+        return [out for d in docs if (out := _doc_dict(d)) is not None]
 
 
 async def reindex(deps: Deps, repo_path: str, namespace: str) -> dict:
@@ -996,6 +1001,7 @@ async def create_agent_client(
                 push=False,
             )
             out = _agent_client_dict(client)
+            assert out is not None
             await s.commit()
         except Exception:
             await s.rollback()
@@ -1010,7 +1016,8 @@ async def create_agent_client(
 async def list_agent_clients(deps: Deps) -> list[dict]:
     _require_curator()
     async with deps.session_factory() as s:
-        return [_agent_client_dict(c) for c in await repo.list_agent_clients(s)]
+        clients = await repo.list_agent_clients(s)
+        return [out for c in clients if (out := _agent_client_dict(c)) is not None]
 
 
 async def get_agent_client(deps: Deps, slug: str) -> dict | None:
@@ -1050,6 +1057,8 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
                 token_hash=auth.hash_token(token),
                 token_encrypted=auth.encrypt_token(token, key),
             )
+            if client is None:
+                raise ValueError(f"agent client not found: {slug}")
             await s.refresh(client)
             fields = _profile_fields(client)
             profile_path = git_writer.write_agent_client_profile(
@@ -1068,6 +1077,7 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
                 push=False,
             )
             out = _agent_client_dict(client)
+            assert out is not None
             await s.commit()
         except Exception:
             await s.rollback()
@@ -1088,6 +1098,7 @@ async def disable_agent_client(deps: Deps, slug: str) -> dict:
         await s.refresh(client)
         await s.commit()
         out = _agent_client_dict(client)
+        assert out is not None
         out["disabled"] = True
         return out
 
@@ -1151,4 +1162,6 @@ async def create_namespace(deps: Deps, name: str, description: str | None = None
 async def list_namespaces(deps: Deps) -> list[dict]:
     _require_curator()
     async with deps.session_factory() as s:
-        return [{"name": n.name, "description": n.description} for n in await repo.list_namespaces(s)]
+        return [
+            {"name": n.name, "description": n.description} for n in await repo.list_namespaces(s)
+        ]

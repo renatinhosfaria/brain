@@ -64,10 +64,11 @@ async def session(async_dsn):
     async with factory() as s:
         await age.ensure_graph(s)
         from sqlalchemy import text
+
         await age._prepare(s)
-        await s.execute(text(
-            "SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)"
-        ))
+        await s.execute(
+            text("SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)")
+        )
         await s.commit()
         yield s
     await engine.dispose()

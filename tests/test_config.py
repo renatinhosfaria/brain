@@ -1,5 +1,6 @@
-import pytest
 from pathlib import Path
+
+import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
@@ -99,9 +100,7 @@ def test_settings_curator_bootstrap_fields():
 
 
 def test_env_example_documenta_curadoria_e_webhook_hermes():
-    env_example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
-        encoding="utf-8"
-    )
+    env_example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
 
     for line in [
         "BRAIN_CURATOR_SLUG=hermes",
@@ -115,8 +114,7 @@ def test_env_example_documenta_curadoria_e_webhook_hermes():
 
     assert "BRAIN_TOKEN_ENCRYPTION_KEY must be a Fernet key" in env_example
     assert (
-        'python -c "from cryptography.fernet import Fernet; '
-        'print(Fernet.generate_key().decode())"'
+        'python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
     ) in env_example
     assert "BRAIN_AUTH_TOKEN protects /status only" in env_example
     assert "MCP auth uses BRAIN_CURATOR_TOKEN or agent-client tokens" in env_example

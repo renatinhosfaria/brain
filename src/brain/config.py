@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     def reject_example_placeholders(cls, value: str, info: ValidationInfo) -> str:
         if info.field_name == "database_url" and "troque-me" in value:
             raise ValueError("configure DATABASE_URL; valor de placeholder nao permitido")
-        if value in _PLACEHOLDER_VALUES.get(info.field_name, set()):
+        if value in _PLACEHOLDER_VALUES.get(info.field_name or "", set()):
             raise ValueError(f"configure {info.field_name}; valor de placeholder nao permitido")
         return value
 
@@ -90,4 +90,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    # pydantic-settings popula os campos a partir do ambiente/.env em runtime.
+    return Settings()  # type: ignore[call-arg]

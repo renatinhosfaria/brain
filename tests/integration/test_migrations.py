@@ -1,8 +1,8 @@
 import subprocess
 
 import sqlalchemy as sa
-from sqlalchemy import text
 from cryptography.fernet import Fernet
+from sqlalchemy import text
 
 
 def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
@@ -34,14 +34,17 @@ def test_alembic_upgrade_cria_tabelas(sync_dsn, async_dsn, monkeypatch):
 
     result = subprocess.run(
         ["uv", "run", "alembic", "upgrade", "head"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 0, result.stderr
 
     with engine.connect() as conn:
-        tables = conn.execute(
-            text("SELECT tablename FROM pg_tables WHERE schemaname='public'")
-        ).scalars().all()
+        tables = (
+            conn.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public'"))
+            .scalars()
+            .all()
+        )
         timestamp_nullability = {
             (table_name, column_name): is_nullable
             for table_name, column_name, is_nullable in conn.execute(

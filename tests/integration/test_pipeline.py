@@ -1,7 +1,6 @@
 import pytest_asyncio
 from cryptography.fernet import Fernet
-from sqlalchemy import select
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from brain.config import Settings
 from brain.graph import age
@@ -13,10 +12,14 @@ from brain.storage.models import Base, Chunk
 
 def _settings() -> Settings:
     return Settings(
-        database_url="x", openai_api_key="x", github_token="x",
-        brain_auth_token="x", brain_curator_token="curator",
+        database_url="x",
+        openai_api_key="x",
+        github_token="x",
+        brain_auth_token="x",
+        brain_curator_token="curator",
         brain_token_encryption_key=Fernet.generate_key().decode(),
-        webhook_secret="x", repo_url="x",
+        webhook_secret="x",
+        repo_url="x",
     )
 
 
@@ -65,9 +68,9 @@ async def session(async_dsn):
     async with factory() as s:
         await age.ensure_graph(s)
         await age._prepare(s)
-        await s.execute(text(
-            "SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)"
-        ))
+        await s.execute(
+            text("SELECT * FROM cypher('brain', $cy$ MATCH (n) DETACH DELETE n $cy$) AS (v agtype)")
+        )
         await s.commit()
         yield s
     await engine.dispose()
@@ -75,8 +78,14 @@ async def session(async_dsn):
 
 async def test_index_document_cria_doc_chunks_e_entidades(session):
     created = await pipeline.index_document(
-        session, FakeEmbedder(), FakeLLM(), _settings(),
-        namespace="t", repo_path="a.md", content="# Nota\nconteúdo sobre brain", commit_sha="abc",
+        session,
+        FakeEmbedder(),
+        FakeLLM(),
+        _settings(),
+        namespace="t",
+        repo_path="a.md",
+        content="# Nota\nconteúdo sobre brain",
+        commit_sha="abc",
     )
     assert created is True
     doc = await repo.get_document(session, repo_path="a.md")
@@ -99,7 +108,9 @@ async def test_index_document_sem_llm_indexa_doc_e_chunks_sem_entidades(session)
 
     assert created is True
     doc = await repo.get_document(session, repo_path="projetos/brain.md")
-    chunks = list((await session.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars())
+    chunks = list(
+        (await session.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars()
+    )
     ent = await age.get_entity(session, "brain", "curated")
 
     assert doc is not None
@@ -110,22 +121,31 @@ async def test_index_document_sem_llm_indexa_doc_e_chunks_sem_entidades(session)
 
 
 async def test_index_document_idempotente(session):
-    args = dict(namespace="t", repo_path="a.md", content="# X\ncorpo", commit_sha=None)
-    assert await pipeline.index_document(session, FakeEmbedder(), FakeLLM(), _settings(), **args) is True
-    assert await pipeline.index_document(session, FakeEmbedder(), FakeLLM(), _settings(), **args) is False
+    args = {"namespace": "t", "repo_path": "a.md", "content": "# X\ncorpo", "commit_sha": None}
+    assert (
+        await pipeline.index_document(session, FakeEmbedder(), FakeLLM(), _settings(), **args)
+        is True
+    )
+    assert (
+        await pipeline.index_document(session, FakeEmbedder(), FakeLLM(), _settings(), **args)
+        is False
+    )
 
 
 async def test_index_document_mesmo_conteudo_atualiza_meta_commit_e_preserva_chunks(session):
-    args = dict(namespace="t", repo_path="a.md", content="# X\ncorpo")
-    assert await pipeline.index_document(
-        session,
-        FakeEmbedder(),
-        FakeLLM(),
-        _settings(),
-        **args,
-        commit_sha="old",
-        meta={"version": 1},
-    ) is True
+    args = {"namespace": "t", "repo_path": "a.md", "content": "# X\ncorpo"}
+    assert (
+        await pipeline.index_document(
+            session,
+            FakeEmbedder(),
+            FakeLLM(),
+            _settings(),
+            **args,
+            commit_sha="old",
+            meta={"version": 1},
+        )
+        is True
+    )
     doc = await repo.get_document(session, repo_path="a.md")
     before_chunks = list(
         (await session.execute(select(Chunk).where(Chunk.document_id == doc.id))).scalars()
@@ -154,14 +174,26 @@ async def test_index_document_mesmo_conteudo_atualiza_meta_commit_e_preserva_chu
 async def test_reindex_remove_entidades_antigas_do_mesmo_documento(session):
     settings = _settings()
     await pipeline.index_document(
-        session, FakeEmbedder(), SwitchingEntityLLM(), settings,
-        namespace="t", repo_path="a.md", content="# Nota\nantigo", commit_sha="old",
+        session,
+        FakeEmbedder(),
+        SwitchingEntityLLM(),
+        settings,
+        namespace="t",
+        repo_path="a.md",
+        content="# Nota\nantigo",
+        commit_sha="old",
     )
     assert await age.get_entity(session, "Antigo", "t") is not None
 
     await pipeline.index_document(
-        session, FakeEmbedder(), SwitchingEntityLLM(), settings,
-        namespace="t", repo_path="a.md", content="# Nota\nnovo", commit_sha="new",
+        session,
+        FakeEmbedder(),
+        SwitchingEntityLLM(),
+        settings,
+        namespace="t",
+        repo_path="a.md",
+        content="# Nota\nnovo",
+        commit_sha="new",
     )
 
     assert await age.get_entity(session, "Antigo", "t") is None
@@ -350,21 +382,36 @@ async def test_search_entities_acceptance_queries_for_curated_note_aliases(sessi
         (
             "preferencias/stack-tecnica-por-projeto.md",
             "# Stack técnica deve ser inferida por projeto\n\nCorpo.",
-            {"metadata": {"title": "Stack técnica deve ser inferida por projeto", "type": "preference"}},
+            {
+                "metadata": {
+                    "title": "Stack técnica deve ser inferida por projeto",
+                    "type": "preference",
+                }
+            },
             ["Stack técnica por projeto", "stack tecnica"],
             "Stack técnica deve ser inferida por projeto",
         ),
         (
             "preferencias/regras-env-e-migrations-por-projeto.md",
             "# Regras de .env e migrations dependem do projeto\n\nCorpo.",
-            {"metadata": {"title": "Regras de .env e migrations dependem do projeto", "type": "preference"}},
+            {
+                "metadata": {
+                    "title": "Regras de .env e migrations dependem do projeto",
+                    "type": "preference",
+                }
+            },
             ["env migrations", "migrations por projeto"],
             "Regras de .env e migrations dependem do projeto",
         ),
         (
             "preferencias/privacidade-credenciais-e-acoes-externas.md",
             "# Privacidade, credenciais e ações externas\n\nCorpo.",
-            {"metadata": {"title": "Privacidade, credenciais e ações externas", "type": "preference"}},
+            {
+                "metadata": {
+                    "title": "Privacidade, credenciais e ações externas",
+                    "type": "preference",
+                }
+            },
             ["Privacidade", "credenciais"],
             "Privacidade, credenciais e ações externas",
         ),
@@ -392,7 +439,13 @@ async def test_search_entities_acceptance_queries_for_curated_note_aliases(sessi
         (
             "projetos/evolution-go.md",
             "# Evolution API\n\nProjeto.",
-            {"metadata": {"title": "Evolution API", "type": "project", "aliases": ["Evolution-go"]}},
+            {
+                "metadata": {
+                    "title": "Evolution API",
+                    "type": "project",
+                    "aliases": ["Evolution-go"],
+                }
+            },
             ["Evolution-go"],
             "Evolution API",
         ),
@@ -405,7 +458,7 @@ async def test_search_entities_acceptance_queries_for_curated_note_aliases(sessi
         ),
     ]
 
-    for repo_path, content, meta, queries, _expected_name in cases:
+    for repo_path, content, meta, _queries, _expected_name in cases:
         await pipeline.index_document(
             session,
             FakeEmbedder(),

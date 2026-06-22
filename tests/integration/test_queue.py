@@ -61,9 +61,9 @@ async def test_fail_reenfileira_ate_o_limite(sf):
     # agora atingiu o limite -> failed, não reaparece
     assert await q.claim_next("w1") is None
     async with sf() as s:
-        status = (await s.execute(
-            text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": jid}
-        )).scalar_one()
+        status = (
+            await s.execute(text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": jid})
+        ).scalar_one()
     assert status == "failed"
 
 
@@ -74,10 +74,12 @@ async def test_fail_define_backoff_exponencial(sf):
     await q.fail(jid, "boom", max_attempts=3)
 
     async with sf() as s:
-        run_after = (await s.execute(
-            text("SELECT run_after FROM ingestion_jobs WHERE id=:id"),
-            {"id": jid},
-        )).scalar_one()
+        run_after = (
+            await s.execute(
+                text("SELECT run_after FROM ingestion_jobs WHERE id=:id"),
+                {"id": jid},
+            )
+        ).scalar_one()
 
     assert run_after is not None
     assert await q.claim_next("w2") is None
@@ -89,7 +91,7 @@ async def test_complete_marca_done(sf):
     await q.claim_next("w1")
     await q.complete(jid)
     async with sf() as s:
-        status = (await s.execute(
-            text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": jid}
-        )).scalar_one()
+        status = (
+            await s.execute(text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": jid})
+        ).scalar_one()
     assert status == "done"

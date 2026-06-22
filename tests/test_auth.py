@@ -4,8 +4,8 @@ import pytest
 from cryptography.fernet import Fernet
 
 from brain import auth
+from brain.auth import AuthError, verify_bearer_token
 from brain.storage import repositories as repo
-from brain.auth import verify_bearer_token, AuthError
 
 
 def test_token_valido_passa():

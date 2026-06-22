@@ -1,10 +1,9 @@
-from collections.abc import Iterable, Sequence
-from pathlib import PurePosixPath
 import re
 import unicodedata
+from collections.abc import Iterable, Sequence
+from pathlib import PurePosixPath
 
 from brain.graph import age
-
 
 _MARKDOWN_SUFFIXES = (".md", ".markdown")
 _TYPE_MAP = {
@@ -175,9 +174,7 @@ def _normalize_text(value: object, *, strip_accents: bool) -> str:
     text = _clean_str(value).casefold()
     if strip_accents:
         text = "".join(
-            ch
-            for ch in unicodedata.normalize("NFKD", text)
-            if not unicodedata.combining(ch)
+            ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch)
         )
     text = re.sub(r"[-\u2010-\u2015]+", " ", text)
 
@@ -185,9 +182,7 @@ def _normalize_text(value: object, *, strip_accents: bool) -> str:
     for idx, ch in enumerate(text):
         if ch == "_" or ch == "/":
             chars.append(" ")
-        elif ch == "." and _keeps_dot(text, idx):
-            chars.append(ch)
-        elif ch.isalnum() or ch.isspace():
+        elif ch == "." and _keeps_dot(text, idx) or ch.isalnum() or ch.isspace():
             chars.append(ch)
         else:
             chars.append(" ")
@@ -290,9 +285,7 @@ def _metadata_value_parts(value: object) -> list[str]:
         return [cleaned]
     return [
         part
-        for part in (
-            _clean_str(part) for part in _METADATA_VALUE_DELIMITER.split(cleaned)
-        )
+        for part in (_clean_str(part) for part in _METADATA_VALUE_DELIMITER.split(cleaned))
         if part
     ]
 
@@ -442,11 +435,7 @@ def _add_env_migration_aliases(
 
     projeto_idx = _first_index(norms, {"projeto"})
     por_idx = _first_index(norms, {"por"})
-    if (
-        por_idx is not None
-        and projeto_idx is not None
-        and migrations_idx < por_idx < projeto_idx
-    ):
+    if por_idx is not None and projeto_idx is not None and migrations_idx < por_idx < projeto_idx:
         _add_alias(aliases, seen, "migrations por projeto")
 
 
@@ -503,18 +492,14 @@ def _add_alias(
     normalized = normalize_entity_text(alias)
     if not normalized:
         return
-    if (
-        not force
-        and len(normalized.split()) == 1
-        and normalized in _GENERIC_SINGLE_ALIASES
-    ):
+    if not force and len(normalized.split()) == 1 and normalized in _GENERIC_SINGLE_ALIASES:
         return
     if alias not in seen:
         seen.add(alias)
         aliases.append(alias)
 
 
-def _normalized_unique(values: Iterable[object]) -> list[str]:
+def _normalized_unique(values: Iterable[str]) -> list[str]:
     return _unique(normalize_entity_text(value) for value in values)
 
 

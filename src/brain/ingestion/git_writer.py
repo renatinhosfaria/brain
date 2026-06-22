@@ -10,7 +10,6 @@ import yaml
 
 from brain.ingestion.git_sync import _git_env
 
-
 _AGENT_TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}(\d{0,6})?$")
 _CURATED_NOTE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _CURATED_NOTE_LOCKS_GUARD = threading.Lock()
@@ -110,9 +109,7 @@ def render_markdown(
         if timestamp is not None:
             header.append(f'timestamp: "{timestamp}"')
         if metadata:
-            header.append(
-                "metadata: " + json.dumps(metadata, ensure_ascii=False, sort_keys=True)
-            )
+            header.append("metadata: " + json.dumps(metadata, ensure_ascii=False, sort_keys=True))
         header.append("---")
         header.append("")
     return "\n".join([*header, render_messages_markdown(messages)])
@@ -311,9 +308,13 @@ def _commit_path(
     _git(["add", "--", rel], dest)
     _git(
         [
-            "-c", f"user.name={author_name}",
-            "-c", f"user.email={author_email}",
-            "commit", "-m", message,
+            "-c",
+            f"user.name={author_name}",
+            "-c",
+            f"user.email={author_email}",
+            "commit",
+            "-m",
+            message,
         ],
         dest,
     )
@@ -410,7 +411,10 @@ def write_agent_note(
     title_source = title or content or note_id
     file_slug = slugify(title_source, fallback="note")
     note_slug = slugify(note_id, fallback="note-id")
-    rel = f"{safe_inbox_dir}/{safe_client_slug}/{yyyy}/{mm}/{dd}/{timestamp}-{file_slug}-{note_slug}.md"
+    rel = (
+        f"{safe_inbox_dir}/{safe_client_slug}/{yyyy}/{mm}/{dd}/"
+        f"{timestamp}-{file_slug}-{note_slug}.md"
+    )
     path = _safe_repo_path(dest, rel)
     existed = path.exists()
     previous_content = path.read_text(encoding="utf-8") if existed else None
@@ -527,7 +531,10 @@ def write_conversation(
     token: str | None = None,
     retries: int = 3,
 ) -> str:
-    """Grava a conversa como .md, faz commit (autor brain-bot) e opcionalmente push. Retorna o repo_path relativo."""
+    """Grava a conversa como .md, faz commit (autor brain-bot) e opcionalmente push.
+
+    Retorna o repo_path relativo.
+    """
     dest = Path(dest)
     safe_conversations_dir = _validate_relative_path(conversations_dir)
     safe_namespace = _validate_relative_path(namespace)

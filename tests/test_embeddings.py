@@ -25,9 +25,7 @@ class _FlakyEmbeddings:
         self.calls += 1
         if self.calls == 1:
             raise TimeoutError("temporario")
-        return await _FakeEmbeddings().create(
-            model=model, input=input, dimensions=dimensions
-        )
+        return await _FakeEmbeddings().create(model=model, input=input, dimensions=dimensions)
 
 
 class _FlakyClient:

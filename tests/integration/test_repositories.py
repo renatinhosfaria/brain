@@ -31,19 +31,30 @@ def _vec(seed: float) -> list[float]:
 
 async def test_upsert_documento_e_replace_chunks(session):
     doc = await repo.upsert_document(
-        session, namespace="t", repo_path="a.md", title="A",
-        raw_content="oi", content_hash="h1", commit_sha=None,
+        session,
+        namespace="t",
+        repo_path="a.md",
+        title="A",
+        raw_content="oi",
+        content_hash="h1",
+        commit_sha=None,
     )
     await repo.replace_chunks(
-        session, doc.id,
+        session,
+        doc.id,
         [{"ordinal": 0, "text": "oi", "token_count": 1}],
         [_vec(0.1)],
     )
     await session.commit()
     # upsert idempotente: novo conteúdo substitui chunks
     doc2 = await repo.upsert_document(
-        session, namespace="t", repo_path="a.md", title="A",
-        raw_content="tchau", content_hash="h2", commit_sha=None,
+        session,
+        namespace="t",
+        repo_path="a.md",
+        title="A",
+        raw_content="tchau",
+        content_hash="h2",
+        commit_sha=None,
     )
     assert doc2.id == doc.id
     await repo.replace_chunks(
@@ -88,13 +99,21 @@ async def test_upsert_document_persiste_metadata_sem_quebrar_chamadas_existentes
 
 async def test_busca_vetorial_retorna_mais_proximo(session):
     doc = await repo.upsert_document(
-        session, namespace="t", repo_path="a.md", title=None,
-        raw_content="x", content_hash="h", commit_sha=None,
+        session,
+        namespace="t",
+        repo_path="a.md",
+        title=None,
+        raw_content="x",
+        content_hash="h",
+        commit_sha=None,
     )
     await repo.replace_chunks(
-        session, doc.id,
-        [{"ordinal": 0, "text": "perto", "token_count": 1},
-         {"ordinal": 1, "text": "longe", "token_count": 1}],
+        session,
+        doc.id,
+        [
+            {"ordinal": 0, "text": "perto", "token_count": 1},
+            {"ordinal": 1, "text": "longe", "token_count": 1},
+        ],
         [_vec(0.10), _vec(0.99)],
     )
     await session.commit()
@@ -411,17 +430,23 @@ async def test_outbox_event_reclama_running_stale(session):
     assert claimed.locked_at == now
     assert claimed.locked_by == "worker-1"
 
-    assert await repo.claim_next_outbox_event(
-        session,
-        now + dt.timedelta(minutes=10),
-        worker_id="worker-2",
-    ) is None
-    assert await repo.claim_next_outbox_event(
-        session,
-        now + dt.timedelta(minutes=10),
-        worker_id="worker-2",
-        stale_before=now - dt.timedelta(seconds=1),
-    ) is None
+    assert (
+        await repo.claim_next_outbox_event(
+            session,
+            now + dt.timedelta(minutes=10),
+            worker_id="worker-2",
+        )
+        is None
+    )
+    assert (
+        await repo.claim_next_outbox_event(
+            session,
+            now + dt.timedelta(minutes=10),
+            worker_id="worker-2",
+            stale_before=now - dt.timedelta(seconds=1),
+        )
+        is None
+    )
 
     reclaimed = await repo.claim_next_outbox_event(
         session,
@@ -469,24 +494,33 @@ async def test_outbox_mark_ignora_claim_stale_apos_reclaim_e_delivered(session):
     assert delivered.status == "delivered"
     assert delivered.attempts == 2
 
-    assert await repo.mark_outbox_retrying(
-        session,
-        event.id,
-        error="worker-a retry atrasado",
-        run_after=worker_b_now + dt.timedelta(minutes=5),
-        claim=worker_a_claim,
-    ) is None
-    assert await repo.mark_outbox_failed(
-        session,
-        event.id,
-        error="worker-a failed atrasado",
-        claim=worker_a_claim,
-    ) is None
-    assert await repo.mark_outbox_delivered(
-        session,
-        event.id,
-        claim=worker_a_claim,
-    ) is None
+    assert (
+        await repo.mark_outbox_retrying(
+            session,
+            event.id,
+            error="worker-a retry atrasado",
+            run_after=worker_b_now + dt.timedelta(minutes=5),
+            claim=worker_a_claim,
+        )
+        is None
+    )
+    assert (
+        await repo.mark_outbox_failed(
+            session,
+            event.id,
+            error="worker-a failed atrasado",
+            claim=worker_a_claim,
+        )
+        is None
+    )
+    assert (
+        await repo.mark_outbox_delivered(
+            session,
+            event.id,
+            claim=worker_a_claim,
+        )
+        is None
+    )
     await session.commit()
 
     stored = (

@@ -7,8 +7,8 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from sqlalchemy import select, text
 
-from brain.graph import age
 from brain.config import Settings
+from brain.graph import age
 from brain.outbox import sign_webhook, sign_webhook_body
 from brain.queue.base import JobType
 from brain.queue.postgres_queue import PostgresJobQueue
@@ -32,19 +32,21 @@ class FakeLLM:
 
 async def _get_outbox_event(session_factory, event_id):
     async with session_factory() as s:
-        return (
-            await s.execute(select(OutboxEvent).where(OutboxEvent.id == event_id))
-        ).scalar_one()
+        return (await s.execute(select(OutboxEvent).where(OutboxEvent.id == event_id))).scalar_one()
 
 
 async def _get_job_state(session_factory, job_id):
     async with session_factory() as s:
         return (
-            await s.execute(
-                text("SELECT status, last_error FROM ingestion_jobs WHERE id=:id"),
-                {"id": job_id},
+            (
+                await s.execute(
+                    text("SELECT status, last_error FROM ingestion_jobs WHERE id=:id"),
+                    {"id": job_id},
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
 
 @pytest_asyncio.fixture
@@ -55,11 +57,16 @@ async def ctx(async_dsn, tmp_path):
         await conn.run_sync(Base.metadata.create_all)
     sf = make_session_factory(engine)
     settings = Settings(
-        database_url=async_dsn, openai_api_key="x", github_token="x",
-        brain_auth_token="x", brain_curator_token="curator",
+        database_url=async_dsn,
+        openai_api_key="x",
+        github_token="x",
+        brain_auth_token="x",
+        brain_curator_token="curator",
         brain_token_encryption_key=Fernet.generate_key().decode(),
-        webhook_secret="x", repo_url="x",
-        hermes_webhook_url=None, hermes_webhook_secret=None,
+        webhook_secret="x",
+        repo_url="x",
+        hermes_webhook_url=None,
+        hermes_webhook_secret=None,
         repo_cache_path=str(tmp_path),
     )
     yield sf, PostgresJobQueue(sf), settings, tmp_path
@@ -91,11 +98,15 @@ async def test_worker_nao_indexa_agents_como_documento_curado(ctx):
 
     async with sf() as s:
         row = (
-            await s.execute(
-                text("SELECT status, last_error FROM ingestion_jobs WHERE id=:id"),
-                {"id": jid},
+            (
+                await s.execute(
+                    text("SELECT status, last_error FROM ingestion_jobs WHERE id=:id"),
+                    {"id": jid},
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         doc = await repo.get_document(s, repo_path="_agents/codex/raw.md")
     assert doc is None
     assert row["status"] == "failed"
@@ -111,9 +122,7 @@ async def test_worker_nao_indexa_agents_como_documento_curado(ctx):
         (".\\_agents\\codex\\raw.md", "agent notes are not indexed as curated documents"),
     ],
 )
-async def test_worker_rejeita_agents_com_paths_nao_normalizados(
-    ctx, repo_path, expected_error
-):
+async def test_worker_rejeita_agents_com_paths_nao_normalizados(ctx, repo_path, expected_error):
     sf, queue, settings, tmp = ctx
     settings = settings.model_copy(update={"max_job_attempts": 1})
     agent_path = tmp / "_agents" / "codex" / "raw.md"
@@ -165,9 +174,7 @@ async def test_worker_rejeita_agents_por_path_absoluto_dentro_do_repo(ctx):
         (":/projetos/brain.md", "repo_path cannot use pathspec magic"),
     ],
 )
-async def test_worker_rejeita_repo_paths_invalidos_para_indexacao(
-    ctx, repo_path, expected_error
-):
+async def test_worker_rejeita_repo_paths_invalidos_para_indexacao(ctx, repo_path, expected_error):
     sf, queue, settings, tmp = ctx
     settings = settings.model_copy(update={"max_job_attempts": 1})
     (tmp / "projetos").mkdir()
@@ -370,14 +377,16 @@ async def test_worker_job_desconhecido_vai_para_failed(ctx):
         await run_once(sf, queue, FakeEmbedder(), FakeLLM(), settings)
         async with sf() as s:
             await s.execute(
-                text("UPDATE ingestion_jobs SET run_after=now() - interval '1 second' WHERE id=:id"),
+                text(
+                    "UPDATE ingestion_jobs SET run_after=now() - interval '1 second' WHERE id=:id"
+                ),
                 {"id": jid},
             )
             await s.commit()
     async with sf() as s:
-        status = (await s.execute(
-            text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": jid}
-        )).scalar_one()
+        status = (
+            await s.execute(text("SELECT status FROM ingestion_jobs WHERE id=:id"), {"id": jid})
+        ).scalar_one()
     assert status == "failed"
 
 
@@ -411,14 +420,17 @@ async def test_worker_entrega_outbox_hermes_e_marca_delivered(ctx):
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
-        assert await run_once(
-            sf,
-            queue,
-            FakeEmbedder(),
-            FakeLLM(),
-            settings,
-            outbox_client=client,
-        ) is True
+        assert (
+            await run_once(
+                sf,
+                queue,
+                FakeEmbedder(),
+                FakeLLM(),
+                settings,
+                outbox_client=client,
+            )
+            is True
+        )
 
     assert len(requests) == 1
     request = requests[0]
@@ -474,14 +486,17 @@ async def test_worker_outbox_hermes_reagenda_non_2xx(ctx):
     before_dispatch = dt.datetime.now(dt.UTC)
     transport = httpx.MockTransport(lambda request: httpx.Response(500))
     async with httpx.AsyncClient(transport=transport) as client:
-        assert await run_once(
-            sf,
-            queue,
-            FakeEmbedder(),
-            FakeLLM(),
-            settings,
-            outbox_client=client,
-        ) is True
+        assert (
+            await run_once(
+                sf,
+                queue,
+                FakeEmbedder(),
+                FakeLLM(),
+                settings,
+                outbox_client=client,
+            )
+            is True
+        )
 
     stored = await _get_outbox_event(sf, event_id)
     assert stored.status == "retrying"
@@ -514,14 +529,17 @@ async def test_worker_outbox_hermes_marca_failed_ao_esgotar_tentativas(ctx):
 
     transport = httpx.MockTransport(lambda request: httpx.Response(503))
     async with httpx.AsyncClient(transport=transport) as client:
-        assert await run_once(
-            sf,
-            queue,
-            FakeEmbedder(),
-            FakeLLM(),
-            settings,
-            outbox_client=client,
-        ) is True
+        assert (
+            await run_once(
+                sf,
+                queue,
+                FakeEmbedder(),
+                FakeLLM(),
+                settings,
+                outbox_client=client,
+            )
+            is True
+        )
 
     stored = await _get_outbox_event(sf, event_id)
     assert stored.status == "failed"
@@ -575,14 +593,17 @@ async def test_worker_outbox_erro_inesperado_reagenda_e_limpa_lock(ctx):
     before_dispatch = dt.datetime.now(dt.UTC)
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
-        assert await run_once(
-            sf,
-            queue,
-            FakeEmbedder(),
-            FakeLLM(),
-            settings,
-            outbox_client=client,
-        ) is True
+        assert (
+            await run_once(
+                sf,
+                queue,
+                FakeEmbedder(),
+                FakeLLM(),
+                settings,
+                outbox_client=client,
+            )
+            is True
+        )
 
     stored = await _get_outbox_event(sf, event_id)
     assert stored.status == "retrying"
@@ -621,15 +642,18 @@ async def test_worker_outbox_reclama_running_stale(ctx):
 
     transport = httpx.MockTransport(lambda request: httpx.Response(204))
     async with httpx.AsyncClient(transport=transport) as client:
-        assert await run_once(
-            sf,
-            queue,
-            FakeEmbedder(),
-            FakeLLM(),
-            settings,
-            worker_id="new-worker",
-            outbox_client=client,
-        ) is True
+        assert (
+            await run_once(
+                sf,
+                queue,
+                FakeEmbedder(),
+                FakeLLM(),
+                settings,
+                worker_id="new-worker",
+                outbox_client=client,
+            )
+            is True
+        )
 
     stored = await _get_outbox_event(sf, event_id)
     assert stored.status == "delivered"
@@ -658,14 +682,17 @@ async def test_worker_outbox_sem_secret_mantem_evento_pending(ctx, secret):
 
     transport = httpx.MockTransport(lambda request: httpx.Response(204))
     async with httpx.AsyncClient(transport=transport) as client:
-        assert await run_once(
-            sf,
-            queue,
-            FakeEmbedder(),
-            FakeLLM(),
-            settings,
-            outbox_client=client,
-        ) is False
+        assert (
+            await run_once(
+                sf,
+                queue,
+                FakeEmbedder(),
+                FakeLLM(),
+                settings,
+                outbox_client=client,
+            )
+            is False
+        )
 
     stored = await _get_outbox_event(sf, event_id)
     assert stored.status == "pending"

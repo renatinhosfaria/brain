@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
-class JobType(str, enum.Enum):
+class JobType(enum.StrEnum):
     INDEX_DOCUMENT = "index_document"
     DELETE_DOCUMENT = "delete_document"
     REINDEX = "reindex"
