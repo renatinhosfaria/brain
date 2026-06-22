@@ -5,6 +5,7 @@ from brain.mcp.handlers import Deps
 
 
 def create_mcp_server(deps: Deps) -> FastMCP:
+    handlers.configure_rate_limiter(deps.settings)
     mcp = FastMCP("brain", stateless_http=True, streamable_http_path="/")
 
     @mcp.tool()
@@ -20,6 +21,7 @@ def create_mcp_server(deps: Deps) -> FastMCP:
         rel_types: list[str] | None = None,
         filters: dict | None = None,
         namespace: str | None = None,
+        as_of: str | None = None,
     ) -> dict:
         return await handlers.deep_search(
             deps,
@@ -30,6 +32,7 @@ def create_mcp_server(deps: Deps) -> FastMCP:
             rel_types=rel_types,
             filters=filters,
             namespace=namespace,
+            as_of=as_of,
         )
 
     @mcp.tool()

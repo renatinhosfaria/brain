@@ -1,6 +1,28 @@
 from brain.extraction.query_entities import extract_query_entities
 from brain.graph import age
+from brain.search.rerank import rerank as _rerank
 from brain.storage import repositories as repo
+
+
+async def _ranked_chunks(
+    session,
+    query: str,
+    qvec,
+    limit: int,
+    filters: dict | None,
+    *,
+    llm=None,
+    rerank_enabled: bool = False,
+    rerank_candidates: int = 20,
+) -> list[dict]:
+    """Busca chunks curados e, quando habilitado, reordena via LLM (top-k → top_n)."""
+    do_rerank = rerank_enabled and llm is not None
+    pool = repo.normalize_search_limit(max(limit, rerank_candidates)) if do_rerank else limit
+    chunk_hits = await repo.search_chunks(session, qvec, "curated", pool, filters=filters)
+    ranked = sorted(chunk_hits, key=lambda r: r["score"], reverse=True)
+    if do_rerank:
+        return await _rerank(llm, query, ranked, top_n=limit)
+    return ranked[:limit]
 
 
 async def search(
@@ -12,14 +34,25 @@ async def search(
     filters: dict | None = None,
     namespace: str | None = None,
     include_graph: bool = False,
+    llm=None,
+    rerank_enabled: bool = False,
+    rerank_candidates: int = 20,
 ) -> dict:
     limit = repo.normalize_search_limit(limit)
     source_filter = (filters or {}).get("source")
     if source_filter not in (None, "document", "curated", "note"):
         return {"results": [], "graph": []}
     (qvec,) = await embedder.embed([query])
-    chunk_hits = await repo.search_chunks(session, qvec, "curated", limit, filters=filters)
-    results = sorted(chunk_hits, key=lambda r: r["score"], reverse=True)[:limit]
+    results = await _ranked_chunks(
+        session,
+        query,
+        qvec,
+        limit,
+        filters,
+        llm=llm,
+        rerank_enabled=rerank_enabled,
+        rerank_candidates=rerank_candidates,
+    )
 
     graph: list[dict] = []
     if include_graph and namespace:
@@ -117,6 +150,9 @@ async def deep_search(
     rel_types: list[str] | None = None,
     filters: dict | None = None,
     namespace: str | None = None,
+    rerank_enabled: bool = False,
+    rerank_candidates: int = 20,
+    as_of: str | None = None,
 ) -> dict:
     limit = repo.normalize_search_limit(limit)
     resolved_max_entities = _valid_max_entities(max_entities)
@@ -139,8 +175,16 @@ async def deep_search(
         }
 
     (qvec,) = await embedder.embed([query])
-    chunk_hits = await repo.search_chunks(session, qvec, "curated", limit, filters=filters)
-    results = sorted(chunk_hits, key=lambda r: r["score"], reverse=True)[:limit]
+    results = await _ranked_chunks(
+        session,
+        query,
+        qvec,
+        limit,
+        filters,
+        llm=llm,
+        rerank_enabled=rerank_enabled,
+        rerank_candidates=rerank_candidates,
+    )
 
     if resolved_max_entities == 0:
         return {
@@ -188,6 +232,7 @@ async def deep_search(
             depth=depth,
             rel_types=rel_types,
             limit=50,
+            as_of=as_of,
         )
         seed_keys = {(seed["name"], seed["namespace"]) for seed in seeds}
         for entity in graph["entities"]:

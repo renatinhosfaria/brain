@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     max_job_attempts: int = 5
     job_stale_seconds: int = 300
 
+    # MCP rate limiting (0 = desabilitado). Limite por principal, por minuto.
+    mcp_rate_limit_per_minute: int = 0
+
+    # Reranking opcional do top-k vetorial via LLM (opt-in).
+    rerank_enabled: bool = False
+    rerank_candidates: int = 20
+
     @field_validator(
         "database_url",
         "openai_api_key",

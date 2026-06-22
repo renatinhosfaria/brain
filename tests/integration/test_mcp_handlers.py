@@ -1442,6 +1442,7 @@ async def test_mcp_deep_search_public_schema(deps):
         "rel_types",
         "filters",
         "namespace",
+        "as_of",
     }
     assert deep_search_tool.inputSchema["required"] == ["query"]
 

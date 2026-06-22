@@ -17,6 +17,7 @@ from brain.indexing.embeddings import Embedder
 from brain.ingestion import git_writer, pipeline
 from brain.notes.links import extract_obsidian_links
 from brain.queue.base import JobQueue, JobType
+from brain.ratelimit import RateLimiter, RateLimitExceeded
 from brain.repo_paths import normalize_repo_path
 from brain.search.retriever import deep_search as _deep_search
 from brain.search.retriever import search as _search
@@ -32,6 +33,26 @@ class Deps:
     settings: Settings
 
 
+# Rate limiter por principal, configurado ao montar o servidor MCP.
+# Permanece None (desabilitado) quando os handlers são usados fora do servidor,
+# como em testes que chamam os handlers diretamente.
+_rate_limiter: RateLimiter | None = None
+
+
+def configure_rate_limiter(settings: Settings) -> None:
+    global _rate_limiter
+    per_minute = settings.mcp_rate_limit_per_minute
+    if per_minute and per_minute > 0:
+        _rate_limiter = RateLimiter(capacity=per_minute, refill_per_second=per_minute / 60.0)
+    else:
+        _rate_limiter = None
+
+
+def _enforce_rate_limit(principal: auth.Principal) -> None:
+    if _rate_limiter is not None and not _rate_limiter.allow(f"{principal.type}:{principal.slug}"):
+        raise RateLimitExceeded("rate limit exceeded")
+
+
 def _now_stamp() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%f")
 
@@ -40,6 +61,7 @@ def _require_curator():
     p = auth.get_current_principal()
     if p.type != "curator":
         raise PermissionError("curator required")
+    _enforce_rate_limit(p)
     return p
 
 
@@ -47,17 +69,21 @@ def _require_client():
     p = auth.get_current_principal()
     if p.type != "client":
         raise PermissionError("client required")
+    _enforce_rate_limit(p)
     return p
 
 
 def _require_client_or_curator():
-    return auth.get_current_principal()
+    p = auth.get_current_principal()
+    _enforce_rate_limit(p)
+    return p
 
 
 def _require_deep_search_principal():
     p = auth.get_current_principal()
     if p.type not in {"client", "curator"}:
         raise PermissionError("client or curator required")
+    _enforce_rate_limit(p)
     return p
 
 
@@ -522,6 +548,9 @@ async def search(
             filters=filters if isinstance(filters, dict) else None,
             namespace=namespace if isinstance(namespace, str) else None,
             include_graph=include_graph,
+            llm=deps.llm,
+            rerank_enabled=deps.settings.rerank_enabled,
+            rerank_candidates=deps.settings.rerank_candidates,
         )
 
 
@@ -535,6 +564,7 @@ async def deep_search(
     rel_types: list[str] | None = None,
     filters: dict | None = None,
     namespace: str | None = None,
+    as_of: str | None = None,
 ) -> dict:
     _require_deep_search_principal()
     resolved_limit = repo.normalize_search_limit(10 if limit is None else limit)
@@ -547,6 +577,7 @@ async def deep_search(
     )
     resolved_rel_types = _normalize_rel_types(rel_types)
     resolved_namespace = _normalize_optional_namespace(namespace)
+    resolved_as_of = as_of.strip() if isinstance(as_of, str) and as_of.strip() else None
 
     async with deps.session_factory() as s:
         return await _deep_search(
@@ -560,6 +591,9 @@ async def deep_search(
             rel_types=resolved_rel_types,
             filters=filters if isinstance(filters, dict) else None,
             namespace=resolved_namespace,
+            rerank_enabled=deps.settings.rerank_enabled,
+            rerank_candidates=deps.settings.rerank_candidates,
+            as_of=resolved_as_of,
         )
 
 

@@ -196,8 +196,13 @@ async def test_reindex_remove_entidades_antigas_do_mesmo_documento(session):
         commit_sha="new",
     )
 
-    assert await age.get_entity(session, "Antigo", "t") is None
-    assert await age.get_entity(session, "Novo", "t") is not None
+    # Reindex invalida (soft) a entidade da versão anterior em vez de apagá-la.
+    antigo = await age.get_entity(session, "Antigo", "t")
+    assert antigo is not None
+    assert antigo["invalid_at"] is not None
+    novo = await age.get_entity(session, "Novo", "t")
+    assert novo is not None
+    assert novo["invalid_at"] is None
 
 
 async def test_index_document_cria_entidade_deterministica_de_nota_curada(session):

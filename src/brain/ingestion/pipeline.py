@@ -117,7 +117,10 @@ async def index_document(
         )
         exclude_sources = {"curated_note"} if replacement_payload["status"] != "skipped" else None
         await age.ensure_graph(session, commit=False)
-        await age.delete_entities_by_source_doc(
+        # Invalida (soft) as entidades da versão anterior em vez de apagá-las,
+        # preservando o histórico temporal; as que permanecerem são reafirmadas
+        # pelo upsert subsequente.
+        await age.invalidate_entities_by_source_doc(
             session,
             repo_path,
             existing.namespace,

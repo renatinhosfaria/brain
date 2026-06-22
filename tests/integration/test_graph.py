@@ -1,3 +1,5 @@
+import datetime as dt
+
 import pytest_asyncio
 
 from brain.graph import age
@@ -32,6 +34,44 @@ async def test_upsert_e_get_entity(session):
     assert got["name"] == "Renato"
     assert got["type"] == "pessoa"
     assert got["props"]["papel"] == "dev"
+
+
+async def test_upsert_define_valid_at_e_mantem_invalid_at_nulo(session):
+    await age.upsert_entity(session, "Alfa", "conceito", "t", {"source_doc": "x.md"})
+    got = await age.get_entity(session, "Alfa", "t")
+    assert got["valid_at"] is not None
+    assert got["invalid_at"] is None
+
+
+async def test_temporalidade_invalidacao_e_as_of(session):
+    now = dt.datetime.now(dt.UTC)
+    between = (now + dt.timedelta(hours=1)).isoformat()
+    later = (now + dt.timedelta(days=1)).isoformat()
+    after = (now + dt.timedelta(days=2)).isoformat()
+
+    await age.upsert_entity(session, "Alfa", "conceito", "t", {"source_doc": "x.md"})
+    await age.upsert_entity(session, "Beta", "conceito", "t", {"source_doc": "x.md"})
+    await age.upsert_relation(session, "Alfa", "Beta", "rel", "t")
+
+    # Invalida as entidades do doc x.md a partir de `later`.
+    await age.invalidate_entities_by_source_doc(session, "x.md", "t", at=later)
+    alfa = await age.get_entity(session, "Alfa", "t")
+    assert alfa is not None  # preservada (histórico)
+    assert alfa["invalid_at"] == later
+
+    seeds = [{"name": "Alfa", "namespace": "t"}]
+
+    # Agora: Alfa inválida -> não alcança Beta.
+    g_now = await age.get_relationship_paths(session, seeds, "t", depth=1)
+    assert all(e["name"] != "Beta" for e in g_now["entities"])
+
+    # as_of entre valid_at e invalid_at: válida -> alcança Beta.
+    g_past = await age.get_relationship_paths(session, seeds, "t", depth=1, as_of=between)
+    assert any(e["name"] == "Beta" for e in g_past["entities"])
+
+    # as_of depois de invalid_at: inválida de novo.
+    g_after = await age.get_relationship_paths(session, seeds, "t", depth=1, as_of=after)
+    assert all(e["name"] != "Beta" for e in g_after["entities"])
 
 
 async def test_relacao_e_get_related(session):

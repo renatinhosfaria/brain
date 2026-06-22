@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import re
 import unicodedata
@@ -8,6 +9,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 GRAPH = "brain"
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(dt.UTC).isoformat()
+
+
+def _validity_predicate(var: str, as_of: str | None) -> str:
+    """Predicado Cypher de validade temporal para um nó/aresta `var`.
+
+    Sem `as_of`, retorna apenas o que está válido agora (invalid_at ausente).
+    Com `as_of`, retorna o que era válido naquele instante (valid_at <= as_of e
+    invalid_at ausente ou posterior a as_of). `valid_at IS NULL` é tolerado para
+    manter compatibilidade com registros anteriores à temporalidade.
+    """
+    if as_of is None:
+        return f"{var}.invalid_at IS NULL"
+    lit = _lit(as_of)
+    return (
+        f"({var}.valid_at IS NULL OR {var}.valid_at <= {lit}) "
+        f"AND ({var}.invalid_at IS NULL OR {var}.invalid_at > {lit})"
+    )
 
 
 async def _prepare(session: AsyncSession) -> None:
@@ -32,7 +54,11 @@ def _lit(value: object) -> str:
 
 
 def _unwrap(agtype_value: object):
+    if agtype_value is None:
+        return None
     s = str(agtype_value)
+    if s == "null":
+        return None
     try:
         return json.loads(s)
     except (ValueError, TypeError):
@@ -265,10 +291,12 @@ async def upsert_entity(
     props = _props_with_search_text(name, props)
     source_doc = props.get("source_doc")
     source_memory = props.get("source_memory")
+    now = _now_iso()
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MERGE (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
-        f"SET n.type = {_lit(type)}, n.props = {_lit(props)}, "
+        f"SET n.valid_at = coalesce(n.valid_at, {_lit(now)}), n.invalid_at = NULL, "
+        f"n.type = {_lit(type)}, n.props = {_lit(props)}, "
         f"n.source_doc = {_lit(source_doc)}, "
         f"n.source_memory = {_lit(source_memory)}, "
         f"n.name_normalized = {_lit(props.get('name_normalized'))}, "
@@ -297,11 +325,13 @@ async def upsert_relation(
     commit: bool = True,
 ) -> None:
     await _prepare(session)
+    now = _now_iso()
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MATCH (a:Entity {{name: {_lit(source)}, namespace: {_lit(namespace)}}}), "
         f"(b:Entity {{name: {_lit(target)}, namespace: {_lit(namespace)}}}) "
         f"MERGE (a)-[r:REL {{type: {_lit(rel_type)}}}]->(b) "
+        f"SET r.valid_at = coalesce(r.valid_at, {_lit(now)}), r.invalid_at = NULL "
         f"RETURN r $cy$) AS (r agtype)"
     )
     await session.execute(text(q))
@@ -314,12 +344,19 @@ async def get_entity(session: AsyncSession, name: str, namespace: str) -> dict |
     q = (
         f"SELECT * FROM cypher('brain', $cy$ "
         f"MATCH (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
-        f"RETURN n.name, n.type, n.props $cy$) AS (name agtype, type agtype, props agtype)"
+        f"RETURN n.name, n.type, n.props, n.valid_at, n.invalid_at $cy$) "
+        f"AS (name agtype, type agtype, props agtype, valid_at agtype, invalid_at agtype)"
     )
     row = (await session.execute(text(q))).first()
     if row is None:
         return None
-    return {"name": _unwrap(row[0]), "type": _unwrap(row[1]), "props": _unwrap(row[2])}
+    return {
+        "name": _unwrap(row[0]),
+        "type": _unwrap(row[1]),
+        "props": _unwrap(row[2]),
+        "valid_at": _unwrap(row[3]),
+        "invalid_at": _unwrap(row[4]),
+    }
 
 
 async def find_entity_by_source_doc(
@@ -574,6 +611,7 @@ async def get_relationship_paths(
     depth: int = 1,
     rel_types: list[str] | None = None,
     limit: int = 50,
+    as_of: str | None = None,
 ) -> dict:
     await _prepare(session)
     bounded_depth = max(1, int(depth))
@@ -614,9 +652,11 @@ async def get_relationship_paths(
                 if allowed_types
                 else []
             )
-            where_clause = ""
-            if rel_type_filters:
-                where_clause = "WHERE " + " AND ".join(rel_type_filters) + " "
+            node_vars = ["s", *intermediate_nodes, "n"]
+            validity_filters = [_validity_predicate(node, as_of) for node in node_vars]
+            validity_filters += [_validity_predicate(edge, as_of) for edge in edge_vars]
+            all_filters = rel_type_filters + validity_filters
+            where_clause = ("WHERE " + " AND ".join(all_filters) + " ") if all_filters else ""
             # Deterministic pagination before Python slicing: names (including intermediaries)
             # and edge types are used to break ties when multiple paths share n.name.
             node_names_expr = [f"{node}.name" for node in intermediate_nodes]
@@ -927,6 +967,41 @@ async def delete_entities_by_source_doc(
         f"WHERE n.source_doc = {_lit(repo_path)} "
         f"{source_filter}"
         f"DETACH DELETE n $cy$) AS (v agtype)"
+    )
+    await session.execute(text(q))
+    if commit:
+        await session.commit()
+
+
+async def invalidate_entities_by_source_doc(
+    session: AsyncSession,
+    repo_path: str,
+    namespace: str,
+    *,
+    exclude_sources: set[str] | None = None,
+    at: str | None = None,
+    commit: bool = True,
+) -> None:
+    """Marca como inválidas (soft) as entidades de um documento, preservando histórico.
+
+    Usada na reindexação: em vez de apagar as entidades da versão anterior do
+    documento, registra `invalid_at`. Entidades que continuam no documento são
+    reafirmadas (reativadas) pelo `upsert_entity` subsequente.
+    """
+    await _prepare(session)
+    now = at or _now_iso()
+    excluded_sources = _dedupe_strings(str(source) for source in (exclude_sources or set()))
+    source_filter = ""
+    if excluded_sources:
+        source_filter = (
+            f"AND (n.props.source IS NULL OR NOT (n.props.source IN {_lit(excluded_sources)})) "
+        )
+    q = (
+        f"SELECT * FROM cypher('brain', $cy$ "
+        f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
+        f"WHERE n.source_doc = {_lit(repo_path)} AND n.invalid_at IS NULL "
+        f"{source_filter}"
+        f"SET n.invalid_at = {_lit(now)} $cy$) AS (v agtype)"
     )
     await session.execute(text(q))
     if commit:
