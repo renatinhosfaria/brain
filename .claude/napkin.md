@@ -20,6 +20,11 @@
 ## Patterns That Don't Work
 - (acumular aqui)
 
+## Features P2 (2026-06-22)
+- **Rate limiting MCP**: `src/brain/ratelimit.py` (token bucket in-memory por principal). `MCP_RATE_LIMIT_PER_MINUTE` (0=off, padrão). `handlers.configure_rate_limiter(settings)` chamado em `create_mcp_server`; `_enforce_rate_limit` nos 4 `_require_*`. Global `_rate_limiter` fica None fora do server (testes diretos de handler não são afetados). Erro: `RateLimitExceeded`.
+- **Reranking LLM opcional**: `src/brain/search/rerank.py` (`rerank(llm, query, results, top_n)`). `RERANK_ENABLED` (padrão off) + `RERANK_CANDIDATES` (pool, padrão 20). Integrado em `retriever._ranked_chunks` (usado por search e deep_search). Degrada para ordem vetorial em falha/resposta inválida. `search` agora aceita `llm=`.
+- **Temporalidade no grafo**: entidades/relações ganham `valid_at`/`invalid_at`. `upsert_entity/relation` usam `coalesce(n.valid_at, now)` + `invalid_at=NULL` (reativa). `age.invalidate_entities_by_source_doc` (soft) é usada no reindex (pipeline) em vez de delete — preserva histórico; `delete_document` segue deletando. `get_relationship_paths(as_of=...)` filtra via `_validity_predicate` (nós+arestas). `deep_search`/handler/server expõem `as_of`. `get_entity` retorna valid_at/invalid_at.
+
 ## Avaliação 2026-06-22 (estado atual — design MUDOU de "memory provider" p/ "vault curado")
 - O design evoluiu: hoje é serviço FastAPI+MCP sobre um **vault Markdown curado** (repo `brain-vault`), com inbox `_agents/` + curador **Hermes**. As notas antigas deste napkin sobre `remember`/`metadata` são do design ANTIGO (memory provider) — parcialmente obsoletas.
 - **memories/extract_facts = subsistema REMOVIDO (2026-06-22)**: era órfão (nada enfileirava `extract_facts`, tools MCP nunca registradas em `server.py`). Removidos: modelo Memory, repos, handlers, `remember`, `pipeline.extract_and_store_facts`, `extraction/facts.py`, job EXTRACT_FACTS, testes; migration `0004_drop_memories` dropa a tabela. PRESERVADA a primitiva `source_memory` no grafo AGE (proveniência genérica, agora não preenchida). Commits `3cd1761` (refactor) + `4bd8924` (docs). Validado: 110 unit + 280 integração verdes.
