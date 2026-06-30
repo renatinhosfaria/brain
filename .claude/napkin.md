@@ -39,6 +39,13 @@
 - `/root/brain/brain/` é LIXO local (0 arquivos tracked; sobra do achatamento). Pode apagar do ambiente; não afeta o repo.
 - Testes: `uv run pytest tests/ --ignore=tests/integration` → 112 passam (~10s). Integração exige imagem postgres custom (testcontainers).
 
+## Auditoria 2026-06-29
+- **origin/main SINCRONIZADO** (HEAD local == origin/main == b67063a). O "20 commits não pushados" do napkin antigo está OBSOLETO — push aconteceu. Features P2 (reranking/rate limit/temporalidade) commitadas em dc1d602/76af6bf.
+- **WIP não commitado (2026-06-29):** identidade de committer (`git_author_name/email`) propagada ao `pull --rebase` em `git_sync.clone_or_pull` e `git_writer._push_with_retry`/`push_repo`/`main.py`. Corrige rebase falhando quando `repo_cache` não tem `user.name/email` global. Fix correto. **PORÉM:** `tests/test_git_sync.py` e `tests/test_git_writer.py` FALHAM em `ruff format --check` → job de lint do CI quebraria. Rodar `ruff format` antes de commitar.
+- **VULN (SQLi via dollar-quote no AGE) — age.py:** o Cypher é embrulhado em `SELECT * FROM cypher('brain', $cy$ ... $cy$)` e os valores entram via `_lit()` = `json.dumps`. json.dumps escapa `"` e `\` (camada Cypher) mas NÃO escapa a sequência `$cy$`. Um `name`/`namespace`/prop contendo `$cy$` fecha o dollar-quote do SQL e cai em contexto SQL bruto. Entradas vêm de tools MCP (`update_entity`, `merge_entities`, `get_entity`...) chamáveis por cliente autenticado, e de conteúdo do vault indexado. PoC: `json.dumps('x $cy$); DROP TABLE documents; --')` → `$cy$` sobrevive. Correção: tag de dollar-quote aleatória verificada ausente no payload, OU passar valores como parâmetros agtype do `cypher(...)` (3º arg), OU rejeitar `$...$` nos valores. mypy/ruff/125 unit verdes não pegam isso.
+- Estado verificado: `ruff check` ✅, `ruff format --check` ❌ (2 testes WIP), `mypy` ✅ (37 arquivos), `pytest` unit ✅ 125 (~14s). Integração NÃO rodada (precisa imagem postgres custom).
+- `/root/brain/brain/` (lixo do achatamento) AINDA existe local com migrations/src/tests não-tracked. Inofensivo ao repo.
+
 ## Lacunas/bugs ainda ABERTOS (não corrigidos)
 - `remember` (handlers.py:51) ACEITA o parâmetro `metadata` mas NUNCA o usa/grava — silenciosamente descartado. A tabela `documents` (models.py) não tem coluna de autor; só `memories.meta` (jsonb) existe e também não é preenchido por extract_and_store_facts. Resultado: nota de conversa registra QUANDO (nome do arquivo + commit + created_at) mas não QUEM (commit é sempre brain-bot; só o namespace marca contexto). O texto do .md (git_writer.render_markdown) também não inclui timestamp/autor no corpo. Se for pedir "quem criou/quando", corrigir: cabeçalho no .md + persistir metadata.
 

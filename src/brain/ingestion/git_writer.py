@@ -232,14 +232,25 @@ def render_agent_note(
     return frontmatter + body + ("\n" if body else "")
 
 
-def _git(args: list[str], cwd: Path, token: str | None = None) -> None:
+def _git(
+    args: list[str],
+    cwd: Path,
+    token: str | None = None,
+    *,
+    committer_name: str | None = None,
+    committer_email: str | None = None,
+) -> None:
     subprocess.run(
         ["git", *args],
         cwd=cwd,
         check=True,
         capture_output=True,
         text=True,
-        env=_git_env(token),
+        env=_git_env(
+            token,
+            committer_name=committer_name,
+            committer_email=committer_email,
+        ),
     )
 
 
@@ -319,7 +330,12 @@ def _commit_path(
         dest,
     )
     if push:
-        _push_with_retry(dest, retries)
+        _push_with_retry(
+            dest,
+            retries,
+            author_name=author_name,
+            author_email=author_email,
+        )
 
 
 def write_agent_client_profile(
@@ -381,7 +397,12 @@ def write_agent_client_profile(
         )
         raise
     if push:
-        _push_with_retry(dest, retries)
+        _push_with_retry(
+            dest,
+            retries,
+            author_name=author_name,
+            author_email=author_email,
+        )
     return rel
 
 
@@ -454,7 +475,12 @@ def write_agent_note(
         )
         raise
     if push:
-        _push_with_retry(dest, retries)
+        _push_with_retry(
+            dest,
+            retries,
+            author_name=author_name,
+            author_email=author_email,
+        )
     return rel
 
 
@@ -513,7 +539,12 @@ def write_curated_note(
             )
             raise
         if push:
-            _push_with_retry(dest, retries)
+            _push_with_retry(
+                dest,
+                retries,
+                author_name=author_name,
+                author_email=author_email,
+            )
     return rel
 
 
@@ -557,11 +588,24 @@ def write_conversation(
         retries=retries,
     )
     if push:
-        _push_with_retry(dest, retries, token=token)
+        _push_with_retry(
+            dest,
+            retries,
+            token=token,
+            author_name=author_name,
+            author_email=author_email,
+        )
     return rel
 
 
-def _push_with_retry(dest: Path, retries: int, token: str | None = None) -> None:
+def _push_with_retry(
+    dest: Path,
+    retries: int,
+    token: str | None = None,
+    *,
+    author_name: str | None = None,
+    author_email: str | None = None,
+) -> None:
     last_error = None
     for _ in range(retries):
         try:
@@ -572,7 +616,13 @@ def _push_with_retry(dest: Path, retries: int, token: str | None = None) -> None
             local_head = _git_stdout(["rev-parse", "HEAD"], dest).strip()
             was_clean = _git_stdout(["status", "--short"], dest) == ""
             try:
-                _git(["pull", "--rebase"], dest, token=token)
+                _git(
+                    ["pull", "--rebase"],
+                    dest,
+                    token=token,
+                    committer_name=author_name,
+                    committer_email=author_email,
+                )
             except subprocess.CalledProcessError:
                 subprocess.run(
                     ["git", "rebase", "--abort"],
@@ -594,5 +644,18 @@ def _push_with_retry(dest: Path, retries: int, token: str | None = None) -> None
     raise RuntimeError(f"push falhou após {retries} tentativas: {last_error}")
 
 
-def push_repo(dest: str | Path, *, retries: int = 3, token: str | None = None) -> None:
-    _push_with_retry(Path(dest), retries, token=token)
+def push_repo(
+    dest: str | Path,
+    *,
+    retries: int = 3,
+    token: str | None = None,
+    author_name: str | None = None,
+    author_email: str | None = None,
+) -> None:
+    _push_with_retry(
+        Path(dest),
+        retries,
+        token=token,
+        author_name=author_name,
+        author_email=author_email,
+    )

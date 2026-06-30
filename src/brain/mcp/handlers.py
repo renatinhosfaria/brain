@@ -463,7 +463,12 @@ async def _index_curated_note(
 
 def _push_curated_note_if_enabled(deps: Deps) -> None:
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
+        git_writer.push_repo(
+            deps.settings.repo_cache_path,
+            token=deps.settings.github_token,
+            author_name=deps.settings.git_author_name,
+            author_email=deps.settings.git_author_email,
+        )
 
 
 def _validate_agent_note_transition(note, *, action: str, allowed_statuses: set[str]) -> None:
@@ -852,7 +857,12 @@ async def submit_agent_note(
             raise
 
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
+        git_writer.push_repo(
+            deps.settings.repo_cache_path,
+            token=deps.settings.github_token,
+            author_name=deps.settings.git_author_name,
+            author_email=deps.settings.git_author_email,
+        )
     return result
 
 
@@ -1042,7 +1052,12 @@ async def create_agent_client(
             raise
 
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
+        git_writer.push_repo(
+            deps.settings.repo_cache_path,
+            token=deps.settings.github_token,
+            author_name=deps.settings.git_author_name,
+            author_email=deps.settings.git_author_email,
+        )
     out.update({"token": token, "profile_path": profile_path})
     return out
 
@@ -1118,7 +1133,12 @@ async def rotate_agent_client_token(deps: Deps, slug: str) -> dict:
             raise
 
     if deps.settings.git_push_enabled:
-        git_writer.push_repo(deps.settings.repo_cache_path, token=deps.settings.github_token)
+        git_writer.push_repo(
+            deps.settings.repo_cache_path,
+            token=deps.settings.github_token,
+            author_name=deps.settings.git_author_name,
+            author_email=deps.settings.git_author_email,
+        )
     out.update({"token": token, "profile_path": profile_path})
     return out
 

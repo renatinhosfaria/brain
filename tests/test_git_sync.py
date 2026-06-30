@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -54,6 +55,90 @@ def test_pull_detecta_diff(tmp_path):
     assert before == sha1
     changes = changed_files(dest, before, after)
     assert ("A", "b.md") in changes
+
+
+def test_clone_or_pull_usa_identidade_no_rebase_quando_dest_tem_commits_locais(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    remote = tmp_path / "remote.git"
+    other = tmp_path / "other"
+    dest = tmp_path / "clone"
+    _git(["init", "--bare", "--initial-branch=main", str(remote)], tmp_path)
+    _git(["clone", str(remote), str(other)], tmp_path)
+    _git(["config", "user.email", "other@example.com"], other)
+    _git(["config", "user.name", "other"], other)
+    (other / "base.md").write_text("base\n", encoding="utf-8")
+    _git(["add", "base.md"], other)
+    _git(["commit", "-m", "base"], other)
+    _git(["push", "-u", "origin", "main"], other)
+
+    clone_or_pull(str(remote), dest)
+    (dest / "note.md").write_text("local\n", encoding="utf-8")
+    _git(["add", "note.md"], dest)
+    _git(
+        [
+            "-c",
+            "user.name=local",
+            "-c",
+            "user.email=local@example.com",
+            "commit",
+            "-m",
+            "local note",
+        ],
+        dest,
+    )
+    (other / "README.md").write_text("remote\n", encoding="utf-8")
+    _git(["add", "README.md"], other)
+    _git(["commit", "-m", "remote readme"], other)
+    _git(["push"], other)
+    assert (
+        subprocess.run(
+            ["git", "config", "--get", "user.name"],
+            cwd=dest,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 1
+    )
+
+    clone_or_pull(
+        str(remote),
+        dest,
+        committer_name="brain-bot",
+        committer_email="brain-bot@example.com",
+    )
+
+    assert (
+        subprocess.run(
+            ["git", "status", "--short"],
+            cwd=dest,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
+    assert (
+        subprocess.run(
+            ["git", "show", "HEAD:README.md"],
+            cwd=dest,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == "remote\n"
+    )
+    assert (
+        subprocess.run(
+            ["git", "show", "HEAD:note.md"],
+            cwd=dest,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == "local\n"
+    )
 
 
 def test_rename_markdown_emite_delete_e_add(tmp_path):

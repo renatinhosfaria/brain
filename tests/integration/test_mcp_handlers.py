@@ -1954,7 +1954,14 @@ async def test_submit_agent_note_push_usa_github_token(deps, monkeypatch):
     await _submit_note_as_client(deps)
 
     assert push_calls == [
-        ((deps.settings.repo_cache_path,), {"token": "github-token"}),
+        (
+            (deps.settings.repo_cache_path,),
+            {
+                "token": "github-token",
+                "author_name": deps.settings.git_author_name,
+                "author_email": deps.settings.git_author_email,
+            },
+        ),
     ]
 
 
@@ -2016,7 +2023,14 @@ async def test_create_agent_client_push_usa_github_token(deps, monkeypatch):
     await _create_client_as_curator(deps, slug="codex", name="Codex")
 
     assert push_calls == [
-        ((deps.settings.repo_cache_path,), {"token": "github-token"}),
+        (
+            (deps.settings.repo_cache_path,),
+            {
+                "token": "github-token",
+                "author_name": deps.settings.git_author_name,
+                "author_email": deps.settings.git_author_email,
+            },
+        ),
     ]
 
 

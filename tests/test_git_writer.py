@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -423,9 +424,94 @@ def test_push_repo_repassa_token_para_push_with_retry(tmp_path, monkeypatch):
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
 
-    git_writer.push_repo(tmp_path, retries=2, token="github-token")
+    git_writer.push_repo(
+        tmp_path,
+        retries=2,
+        token="github-token",
+        author_name="brain-bot",
+        author_email="brain-bot@example.com",
+    )
 
-    assert calls == [((tmp_path, 2), {"token": "github-token"})]
+    assert calls == [
+        (
+            (tmp_path, 2),
+            {
+                "token": "github-token",
+                "author_name": "brain-bot",
+                "author_email": "brain-bot@example.com",
+            },
+        )
+    ]
+
+
+def test_push_with_retry_usa_identidade_no_rebase_quando_repo_nao_tem_git_config(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    remote = tmp_path / "remote.git"
+    local = tmp_path / "local"
+    other = tmp_path / "other"
+    _git(["init", "--bare", "--initial-branch=main", str(remote)], tmp_path)
+    _git(["clone", str(remote), str(local)], tmp_path)
+
+    (local / "base.md").write_text("base\n", encoding="utf-8")
+    _git(["add", "base.md"], local)
+    _git(
+        [
+            "-c",
+            "user.name=initial",
+            "-c",
+            "user.email=initial@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        local,
+    )
+    _git(["push", "-u", "origin", "main"], local)
+
+    _git(["clone", str(remote), str(other)], tmp_path)
+    _git(["config", "user.email", "other@example.com"], other)
+    _git(["config", "user.name", "other"], other)
+    (other / "README.md").write_text("remote\n", encoding="utf-8")
+    _git(["add", "README.md"], other)
+    _git(["commit", "-m", "remote readme"], other)
+    _git(["push"], other)
+
+    (local / "note.md").write_text("local\n", encoding="utf-8")
+    _git(["add", "note.md"], local)
+    _git(
+        [
+            "-c",
+            "user.name=local",
+            "-c",
+            "user.email=local@example.com",
+            "commit",
+            "-m",
+            "local note",
+        ],
+        local,
+    )
+    assert (
+        subprocess.run(
+            ["git", "config", "--get", "user.name"],
+            cwd=local,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 1
+    )
+
+    git_writer._push_with_retry(
+        local,
+        retries=2,
+        author_name="brain-bot",
+        author_email="brain-bot@example.com",
+    )
+
+    assert _git(["status", "--short"], local).stdout == ""
+    assert _git(["show", "origin/main:README.md"], local).stdout == "remote\n"
+    assert _git(["show", "origin/main:note.md"], local).stdout == "local\n"
 
 
 def test_push_with_retry_configura_upstream_no_primeiro_push(tmp_path):

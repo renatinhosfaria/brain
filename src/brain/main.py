@@ -193,7 +193,11 @@ def create_app(deps: Deps, sf) -> FastAPI:
         ):
             return {"enqueued": 0, "ignored": True}
         before, after = git_sync.clone_or_pull(
-            settings.repo_url, settings.repo_cache_path, settings.github_token
+            settings.repo_url,
+            settings.repo_cache_path,
+            settings.github_token,
+            committer_name=settings.git_author_name,
+            committer_email=settings.git_author_email,
         )
         enqueued = 0
         for code, path in git_sync.changed_files(settings.repo_cache_path, before, after):
