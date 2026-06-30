@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import re
+import secrets
 import unicodedata
 from collections.abc import Iterable
 
@@ -51,6 +52,19 @@ def _lit(value: object) -> str:
     if isinstance(value, list):
         return "[" + ", ".join(_lit(v) for v in value) + "]"
     return json.dumps(value, ensure_ascii=False)
+
+
+def _safe_cypher(cypher_body: str, as_clause: str, graph: str = GRAPH) -> str:
+    """Constrói SELECT cypher(...) com tag de dollar-quote aleatória por query.
+
+    Evita injeção via dollar-quote: a tag fixa '$cy$' poderia ser fechada por um
+    valor que contenha essa sequência. A tag aleatória ($cy_<16 hex>$) é verificada
+    como ausente no body antes de ser usada, tornando o vetor inviável.
+    """
+    while True:
+        tag = f"$cy_{secrets.token_hex(8)}$"
+        if tag not in cypher_body:
+            return f"SELECT * FROM cypher('{graph}', {tag} {cypher_body} {tag}) {as_clause}"
 
 
 def _unwrap(agtype_value: object):
@@ -292,8 +306,7 @@ async def upsert_entity(
     source_doc = props.get("source_doc")
     source_memory = props.get("source_memory")
     now = _now_iso()
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MERGE (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
         f"SET n.valid_at = coalesce(n.valid_at, {_lit(now)}), n.invalid_at = NULL, "
         f"n.type = {_lit(type)}, n.props = {_lit(props)}, "
@@ -308,7 +321,8 @@ async def upsert_entity(
         f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
         f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
         f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
-        f"RETURN n $cy$) AS (n agtype)"
+        f"RETURN n",
+        "AS (n agtype)",
     )
     await session.execute(text(q))
     if commit:
@@ -326,13 +340,13 @@ async def upsert_relation(
 ) -> None:
     await _prepare(session)
     now = _now_iso()
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (a:Entity {{name: {_lit(source)}, namespace: {_lit(namespace)}}}), "
         f"(b:Entity {{name: {_lit(target)}, namespace: {_lit(namespace)}}}) "
         f"MERGE (a)-[r:REL {{type: {_lit(rel_type)}}}]->(b) "
         f"SET r.valid_at = coalesce(r.valid_at, {_lit(now)}), r.invalid_at = NULL "
-        f"RETURN r $cy$) AS (r agtype)"
+        f"RETURN r",
+        "AS (r agtype)",
     )
     await session.execute(text(q))
     if commit:
@@ -341,11 +355,10 @@ async def upsert_relation(
 
 async def get_entity(session: AsyncSession, name: str, namespace: str) -> dict | None:
     await _prepare(session)
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
-        f"RETURN n.name, n.type, n.props, n.valid_at, n.invalid_at $cy$) "
-        f"AS (name agtype, type agtype, props agtype, valid_at agtype, invalid_at agtype)"
+        f"RETURN n.name, n.type, n.props, n.valid_at, n.invalid_at",
+        "AS (name agtype, type agtype, props agtype, valid_at agtype, invalid_at agtype)",
     )
     row = (await session.execute(text(q))).first()
     if row is None:
@@ -382,13 +395,12 @@ async def find_entity_by_source_doc(
         source_filters.append(f"n.props.document_id = {_lit(document_id)}")
     if not source_filters:
         return None
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
         f"WHERE {' OR '.join(source_filters)} "
         f"RETURN n.name, n.type, n.namespace, n.props "
-        f"ORDER BY n.name "
-        f"$cy$) AS (name agtype, type agtype, namespace agtype, props agtype)"
+        f"ORDER BY n.name",
+        "AS (name agtype, type agtype, namespace agtype, props agtype)",
     )
     rows = (await session.execute(text(q))).all()
     if not rows:
@@ -433,15 +445,13 @@ async def search_entities(
     )
 
     async def fetch_candidates(where_clause: str = "") -> list[tuple]:
-        q = (
-            f"SELECT * FROM cypher('brain', $cy$ "
+        q = _safe_cypher(
             f"{namespace_match}"
             f"{where_clause}"
             f"RETURN n.name, n.type, n.namespace, n.props, n.source_doc "
             f"ORDER BY n.namespace, n.name, n.type "
-            f"LIMIT {candidate_limit} "
-            f"$cy$) AS (name agtype, type agtype, namespace agtype, "
-            f"props agtype, source_doc agtype)"
+            f"LIMIT {candidate_limit}",
+            "AS (name agtype, type agtype, namespace agtype, props agtype, source_doc agtype)",
         )
         # SQLAlchemy tipa .all() como Sequence[Row]; aqui é consumido como tuplas.
         return (await session.execute(text(q))).all()  # type: ignore[return-value]
@@ -594,11 +604,11 @@ async def get_related(
 ) -> list[dict]:
     await _prepare(session)
     depth = max(1, int(depth))
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (a:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}})"
         f"-[*1..{depth}]-(b:Entity) "
-        f"RETURN DISTINCT b.name, b.type $cy$) AS (name agtype, type agtype)"
+        f"RETURN DISTINCT b.name, b.type",
+        "AS (name agtype, type agtype)",
     )
     rows = (await session.execute(text(q))).all()
     return [{"name": _unwrap(n), "type": _unwrap(t)} for n, t in rows]
@@ -664,14 +674,14 @@ async def get_relationship_paths(
             order_by_expr = ", ".join(["n.name"] + node_names_expr + rel_type_expr)
             with_expr = ", ".join(["p", "n"] + edge_vars + intermediate_nodes)
 
-            q = (
-                f"SELECT * FROM cypher('brain', $cy$ "
+            q = _safe_cypher(
                 f"MATCH p = {pattern} "
                 f"{where_clause}"
                 f"WITH {with_expr} "
                 f"ORDER BY {order_by_expr} "
                 f"LIMIT {remaining} "
-                f"RETURN nodes(p), relationships(p) $cy$) AS (nodes agtype, rels agtype)"
+                f"RETURN nodes(p), relationships(p)",
+                "AS (nodes agtype, rels agtype)",
             )
             rows = (await session.execute(text(q))).all()
             for nodes_value, rels_value in rows:
@@ -866,8 +876,7 @@ async def update_entity(
     props = _props_with_search_text(name, props)
     source_doc = props.get("source_doc")
     source_memory = props.get("source_memory")
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
         f"SET n.props = {_lit(props)}, n.source_doc = {_lit(source_doc)}, "
         f"n.source_memory = {_lit(source_memory)}, "
@@ -880,7 +889,8 @@ async def update_entity(
         f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
         f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
         f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
-        f"RETURN n $cy$) AS (n agtype)"
+        f"RETURN n",
+        "AS (n agtype)",
     )
     await session.execute(text(q))
     if commit:
@@ -913,8 +923,7 @@ async def update_entity_identity(
     props = _props_with_search_text(name, props)
     source_doc = props.get("source_doc")
     source_memory = props.get("source_memory")
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (n:Entity {{name: {_lit(current_name)}, namespace: {_lit(namespace)}}}) "
         f"SET n.name = {_lit(name)}, n.type = {_lit(type)}, "
         f"n.props = {_lit(props)}, n.source_doc = {_lit(source_doc)}, "
@@ -928,7 +937,8 @@ async def update_entity_identity(
         f"n.path_search_text_normalized = {_lit(props.get('path_search_text_normalized'))}, "
         f"n.source_doc_normalized = {_lit(props.get('source_doc_normalized'))}, "
         f"n.repo_path_normalized = {_lit(props.get('repo_path_normalized'))} "
-        f"RETURN n $cy$) AS (n agtype)"
+        f"RETURN n",
+        "AS (n agtype)",
     )
     await session.execute(text(q))
     if commit:
@@ -937,10 +947,9 @@ async def update_entity_identity(
 
 async def delete_entity(session: AsyncSession, name: str, namespace: str) -> None:
     await _prepare(session)
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
-        f"MATCH (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) "
-        f"DETACH DELETE n $cy$) AS (v agtype)"
+    q = _safe_cypher(
+        f"MATCH (n:Entity {{name: {_lit(name)}, namespace: {_lit(namespace)}}}) DETACH DELETE n",
+        "AS (v agtype)",
     )
     await session.execute(text(q))
     await session.commit()
@@ -961,12 +970,12 @@ async def delete_entities_by_source_doc(
         source_filter = (
             f"AND (n.props.source IS NULL OR NOT (n.props.source IN {_lit(excluded_sources)})) "
         )
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
         f"WHERE n.source_doc = {_lit(repo_path)} "
         f"{source_filter}"
-        f"DETACH DELETE n $cy$) AS (v agtype)"
+        f"DETACH DELETE n",
+        "AS (v agtype)",
     )
     await session.execute(text(q))
     if commit:
@@ -996,12 +1005,12 @@ async def invalidate_entities_by_source_doc(
         source_filter = (
             f"AND (n.props.source IS NULL OR NOT (n.props.source IN {_lit(excluded_sources)})) "
         )
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (n:Entity {{namespace: {_lit(namespace)}}}) "
         f"WHERE n.source_doc = {_lit(repo_path)} AND n.invalid_at IS NULL "
         f"{source_filter}"
-        f"SET n.invalid_at = {_lit(now)} $cy$) AS (v agtype)"
+        f"SET n.invalid_at = {_lit(now)}",
+        "AS (v agtype)",
     )
     await session.execute(text(q))
     if commit:
@@ -1013,12 +1022,12 @@ async def delete_entities_by_source_memory(
 ) -> None:
     await _prepare(session)
     namespace_filter = f"n.namespace = {_lit(namespace)} AND " if namespace is not None else ""
-    q = (
-        f"SELECT * FROM cypher('brain', $cy$ "
+    q = _safe_cypher(
         f"MATCH (n:Entity) "
         f"WHERE {namespace_filter}"
         f"(n.source_memory = {_lit(memory_id)} OR n.props.source_memory = {_lit(memory_id)}) "
-        f"DETACH DELETE n $cy$) AS (v agtype)"
+        f"DETACH DELETE n",
+        "AS (v agtype)",
     )
     await session.execute(text(q))
     await session.commit()
@@ -1036,23 +1045,22 @@ async def merge_entities(
         # propósito: `[:REL ...]` (dois-pontos após `[`) faria o text() do
         # SQLAlchemy tratar `:REL` como bind parameter. Com `nr:REL` o `:` vem
         # após letra e é ignorado pelo parser.
-        out_q = (
-            f"SELECT * FROM cypher('brain', $cy$ "
+        out_q = _safe_cypher(
             f"MATCH (s:Entity {{name: {_lit(src)}, namespace: {_lit(namespace)}}})-[r:REL]->(o), "
             f"(t:Entity {{name: {_lit(into)}, namespace: {_lit(namespace)}}}) "
-            f"MERGE (t)-[nr:REL {{type: r.type}}]->(o) $cy$) AS (v agtype)"
+            f"MERGE (t)-[nr:REL {{type: r.type}}]->(o)",
+            "AS (v agtype)",
         )
         # relações de entrada
-        in_q = (
-            f"SELECT * FROM cypher('brain', $cy$ "
+        in_q = _safe_cypher(
             f"MATCH (o)-[r:REL]->(s:Entity {{name: {_lit(src)}, namespace: {_lit(namespace)}}}), "
             f"(t:Entity {{name: {_lit(into)}, namespace: {_lit(namespace)}}}) "
-            f"MERGE (o)-[nr:REL {{type: r.type}}]->(t) $cy$) AS (v agtype)"
+            f"MERGE (o)-[nr:REL {{type: r.type}}]->(t)",
+            "AS (v agtype)",
         )
-        del_q = (
-            f"SELECT * FROM cypher('brain', $cy$ "
-            f"MATCH (s:Entity {{name: {_lit(src)}, namespace: {_lit(namespace)}}}) "
-            f"DETACH DELETE s $cy$) AS (v agtype)"
+        del_q = _safe_cypher(
+            f"MATCH (s:Entity {{name: {_lit(src)}, namespace: {_lit(namespace)}}}) DETACH DELETE s",
+            "AS (v agtype)",
         )
         await session.execute(text(out_q))
         await session.execute(text(in_q))
