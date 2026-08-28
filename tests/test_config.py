@@ -15,7 +15,9 @@ class BrainSettingsTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _principal(self, name: str, mode: str, token: str, *tools: str) -> PrincipalConfig:
+    def _principal(
+        self, name: str, mode: str, token: str, *tools: str
+    ) -> PrincipalConfig:
         return PrincipalConfig(name, mode, token_digest(token), frozenset(tools))
 
     def test_accepts_dynamic_worker_and_gateway_principals(self) -> None:
@@ -64,7 +66,11 @@ class BrainSettingsTests(unittest.TestCase):
                 kanban_db=self.root / "kanban.db",
                 principals={
                     "default": self._principal(
-                        "default", "gateway", "gateway", "conversation_phone", "read_all"
+                        "default",
+                        "gateway",
+                        "gateway",
+                        "conversation_phone",
+                        "read_all",
                     ),
                 },
                 cursor_secret=b"c" * 32,
@@ -99,7 +105,7 @@ class BrainSettingsTests(unittest.TestCase):
 state_db = "{state_db}"
 kanban_db = "{kanban_db}"
 whatsapp_session_dir = "{mapping_dir}"
-cursor_secret = "{'c' * 64}"
+cursor_secret = "{"c" * 64}"
 
 [principals.default]
 mode = "gateway"

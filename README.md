@@ -51,11 +51,14 @@ validation, staged rollout and rollback. The unit intentionally does not use
 ## Hermes integration
 
 Use [`deploy/hermes-brain.example.yaml`](deploy/hermes-brain.example.yaml) for
-Porteiro/Cadastro and
+Porteiro/Cadastro,
 [`deploy/hermes-brain-memory.example.yaml`](deploy/hermes-brain-memory.example.yaml)
-for Reno/FamaAgent. Both templates keep Brain out of Telegram and WhatsApp via
-`no_mcp`; the worker's Task/Run headers are server-derived and are not tool
-arguments. Follow
+for Reno, and
+[`deploy/hermes-brain-famaagent.example.yaml`](deploy/hermes-brain-famaagent.example.yaml)
+for FamaAgent. Porteiro, Cadastro and Reno preserve the existing FamaChat MCP
+server alongside Brain; FamaAgent keeps only Brain. All templates keep Brain
+out of Telegram and WhatsApp via `no_mcp`; the worker's Task/Run headers are
+server-derived and are not tool arguments. Follow
 [`docs/worker-history-invariant.md`](docs/worker-history-invariant.md) for the
 SOUL.md addition. Follow
 [`docs/conversation-identity-invariant.md`](docs/conversation-identity-invariant.md)

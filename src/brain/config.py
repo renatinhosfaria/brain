@@ -20,9 +20,7 @@ from typing import Literal
 
 DEFAULT_STATE_DB = Path("/root/.hermes/state.db")
 DEFAULT_KANBAN_DB = Path("/root/.hermes/kanban.db")
-DEFAULT_WHATSAPP_SESSION_DIR = Path(
-    "/root/.hermes/platforms/whatsapp/session"
-)
+DEFAULT_WHATSAPP_SESSION_DIR = Path("/root/.hermes/platforms/whatsapp/session")
 VALID_MODES = frozenset({"worker", "gateway"})
 VALID_TOOLS = frozenset(
     {"conversation_recent", "conversation_search", "conversation_phone"}
@@ -117,7 +115,9 @@ class BrainSettings:
         object.__setattr__(self, "principals", normalized)
         object.__setattr__(self, "state_db", Path(self.state_db))
         object.__setattr__(self, "kanban_db", Path(self.kanban_db))
-        object.__setattr__(self, "whatsapp_session_dir", Path(self.whatsapp_session_dir))
+        object.__setattr__(
+            self, "whatsapp_session_dir", Path(self.whatsapp_session_dir)
+        )
         if not self.cursor_secret:
             logger.warning(
                 "BRAIN_CURSOR_SECRET is not configured; generated an ephemeral "

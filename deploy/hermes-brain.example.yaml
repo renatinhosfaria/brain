@@ -13,13 +13,14 @@ mcp_servers:
     resources: false
     prompts: false
 
-# Allow only the Brain MCP server on CLI and explicitly disable all MCP
-# servers on Telegram/WhatsApp. The sentinel is required because a native-only
-# list otherwise inherits globally enabled MCP servers.
+# Keep Brain and the existing FamaChat MCP server available on CLI. Explicit
+# MCP names form an allowlist in Hermes, so omitting FamaChat would hide it.
+# Explicitly disable all MCP servers on Telegram/WhatsApp.
 platform_toolsets:
   cli:
     - clarify
     - brain
+    - famachat
   telegram:
     - clarify
     - no_mcp

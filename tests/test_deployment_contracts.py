@@ -118,6 +118,39 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("identity", package.lower())
         self.assertIn("identity", service.lower())
 
+    def test_worker_templates_preserve_famachat_with_brain(self) -> None:
+        for filename in (
+            "deploy/hermes-brain.example.yaml",
+            "deploy/hermes-brain-memory.example.yaml",
+        ):
+            source = (ROOT / filename).read_text(encoding="utf-8")
+            self.assertIn("famachat", source, filename)
+            self.assertIn("- brain", source, filename)
+
+        famaagent = (ROOT / "deploy/hermes-brain-famaagent.example.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- brain", famaagent)
+        self.assertNotIn("famachat", famaagent)
+
+    def test_hermes_check_requires_famachat_by_profile(self) -> None:
+        source = (ROOT / "scripts/hermes_integration_check.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('"famachat"', source)
+        self.assertIn("expected_cli_toolsets", source)
+        for profile in ("porteiro", "cadastro", "reno", "famaagent"):
+            self.assertIn(f'"{profile}"', source)
+
+    def test_ci_formats_and_lints_the_external_plugin(self) -> None:
+        source = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("uv run ruff check src tests scripts integrations", source)
+        self.assertIn(
+            "uv run ruff format --check src tests scripts integrations", source
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

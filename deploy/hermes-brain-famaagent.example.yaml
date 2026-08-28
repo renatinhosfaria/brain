@@ -1,4 +1,4 @@
-# Merge this template into the Reno worker Profile configuration.
+# Merge this template into the FamaAgent worker Profile configuration.
 # Keep the actual BRAIN_TOKEN in that Profile's secret scope; do not commit it.
 mcp_servers:
   brain:
@@ -14,14 +14,12 @@ mcp_servers:
     resources: false
     prompts: false
 
-# Keep Brain and the existing FamaChat MCP server available on CLI. Explicit
-# MCP names form an allowlist in Hermes, so omitting FamaChat would hide it.
-# no_mcp prevents inheritance from globally enabled MCP servers elsewhere.
+# FamaAgent keeps only the Brain MCP server on CLI. Explicitly disable all MCP
+# servers on Telegram/WhatsApp.
 platform_toolsets:
   cli:
     - clarify
     - brain
-    - famachat
   telegram:
     - clarify
     - no_mcp

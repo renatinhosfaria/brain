@@ -23,10 +23,12 @@
    rotation, rerun with `--force` and restart Brain.
 4. Confirm `/etc/brain/brain.toml` and `/etc/brain/brain.env` are owned by root,
    mode `0600`, and the Reno/FamaAgent `.env` files remain mode `0600`.
-5. Merge `deploy/hermes-brain.example.yaml` into Porteiro and Cadastro. Merge
-   `deploy/hermes-brain-memory.example.yaml` into Reno and FamaAgent. Put each
-   raw, distinct `BRAIN_TOKEN` only in its Profile's secret scope. Keep
-   `no_mcp` on worker Telegram/WhatsApp toolsets.
+5. Merge `deploy/hermes-brain.example.yaml` into Porteiro and Cadastro, and
+   preserve `famachat` in their CLI toolsets. Merge
+   `deploy/hermes-brain-memory.example.yaml` into Reno, preserving `famachat`,
+   and `deploy/hermes-brain-famaagent.example.yaml` into FamaAgent, without
+   adding `famachat`. Put each raw, distinct `BRAIN_TOKEN` only in its
+   Profile's secret scope. Keep `no_mcp` on worker Telegram/WhatsApp toolsets.
 6. Review the versioned
    `integrations/hermes/brain-ceo-bridge/` source and
    `deploy/hermes-ceo-brain.example.yaml`, copy the source to
