@@ -23,3 +23,8 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.ruff.lint.per-file-ignores]
+# Hermes plugin directories use their manifest slug, which intentionally keeps
+# the hyphen required by native plugin discovery.
+"integrations/hermes/brain-ceo-bridge/*.py" = ["N999"]
