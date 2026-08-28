@@ -433,6 +433,12 @@ class BrainFixture(unittest.TestCase):
         self.assertEqual(health.status, "unavailable")
         self.assertEqual(health.whatsapp_identity, "incompatible")
 
+    def test_identity_directory_permission_error_fails_closed(self) -> None:
+        with patch.object(Path, "is_symlink", side_effect=PermissionError):
+            compatible = self.service._identity_directory_compatible()
+
+        self.assertFalse(compatible)
+
     def test_placeholder_is_rejected_before_db_access(self) -> None:
         settings = BrainSettings(
             state_db=Path(self.temp_dir.name) / "missing-state.db",

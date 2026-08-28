@@ -101,11 +101,14 @@ class BrainService:
 
     def _identity_directory_compatible(self) -> bool:
         path = self.settings.whatsapp_session_dir
-        return (
-            not path.is_symlink()
-            and path.is_dir()
-            and os.access(path, os.R_OK | os.X_OK)
-        )
+        try:
+            return (
+                not path.is_symlink()
+                and path.is_dir()
+                and os.access(path, os.R_OK | os.X_OK)
+            )
+        except OSError:
+            return False
 
     def _gateway_bridge_configured(self) -> bool:
         gateway = self.settings.principals.get("default")
