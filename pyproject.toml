@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brain-memory-service"
+version = "0.1.0"
+description = "Read-only, capability-scoped longitudinal memory MCP service for Hermes"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "mcp==2.0.0",
+  "uvicorn>=0.24,<1",
+]
+
+[dependency-groups]
+dev = ["ruff==0.16.5"]
+
+[project.scripts]
+brain = "brain.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

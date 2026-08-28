@@ -1,0 +1,21 @@
+[server]
+state_db = "/root/.hermes/state.db"
+kanban_db = "/root/.hermes/kanban.db"
+board = "default"
+host = "127.0.0.1"
+port = 8765
+history_budget_chars = 12000
+message_max_chars = 2000
+busy_retries = 2
+busy_timeout_seconds = 1.0
+# Keep this stable across restarts so issued pagination cursors remain valid.
+# Generate with: openssl rand -hex 32
+# cursor_secret = "replace-with-64-hex-characters"
+
+# Store only digests in this file. Generate a digest with:
+#   /root/brain/scripts/brain-token-hash
+[profiles.reno]
+token_sha256 = "replace-with-64-hex-digest"
+
+[profiles.famaagent]
+token_sha256 = "replace-with-a-different-64-hex-digest"

@@ -1,0 +1,29 @@
+# Merge this into each worker Profile's Hermes configuration.
+# Keep the actual BRAIN_TOKEN in that Profile's secret scope; do not commit it.
+mcp_servers:
+  brain:
+    url: "http://127.0.0.1:8765/mcp"
+    headers:
+      Authorization: "Bearer ${BRAIN_TOKEN}"
+      X-Hermes-Task: "${HERMES_KANBAN_TASK}"
+      X-Hermes-Run: "${HERMES_KANBAN_RUN_ID}"
+    tools:
+      include:
+        - conversation_recent
+        - conversation_search
+    resources: false
+    prompts: false
+
+# For Reno/FamaAgent, allow only the Brain MCP server on CLI and explicitly
+# disable all MCP servers on Telegram. The sentinel is required because a
+# native-only list otherwise inherits globally enabled MCP servers.
+platform_toolsets:
+  cli:
+    - clarify
+    - brain
+  telegram:
+    - clarify
+    - no_mcp
+  whatsapp:
+    - clarify
+    - no_mcp

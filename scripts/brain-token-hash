@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Print a SHA-256 digest for a Brain profile token."""
+
+import hashlib
+import getpass
+
+
+def main() -> None:
+    token = getpass.getpass("Brain token: ")
+    print(hashlib.sha256(token.encode("utf-8")).hexdigest())
+
+
+if __name__ == "__main__":
+    main()

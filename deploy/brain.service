@@ -1,0 +1,24 @@
+[Unit]
+Description=Brain longitudinal memory MCP service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/brain
+EnvironmentFile=/etc/brain/brain.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/brain/.venv/bin/brain
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+# ProtectHome=true is intentionally absent: V1 must read /root/.hermes.
+# ProtectSystem=strict is intentionally left for the live WAL/SHM hardening
+# validation described in the PRD; do not enable it without that test.
+
+[Install]
+WantedBy=multi-user.target
