@@ -18,9 +18,7 @@ class WhatsAppIdentityTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _write(self, name: str, value: object) -> None:
-        (self.mapping_dir / name).write_text(
-            json.dumps(value), encoding="utf-8"
-        )
+        (self.mapping_dir / name).write_text(json.dumps(value), encoding="utf-8")
 
     def test_phone_jid_returns_transport_digits(self) -> None:
         result = resolve_phone("5534999772714@s.whatsapp.net", self.mapping_dir)
@@ -35,9 +33,7 @@ class WhatsAppIdentityTests(unittest.TestCase):
         self.assertEqual(result.phone, "5534999772714")
 
     def test_reverse_mapping_uses_phone_from_content(self) -> None:
-        self._write(
-            "lid-mapping-123456789012345_reverse.json", "5534999772714"
-        )
+        self._write("lid-mapping-123456789012345_reverse.json", "5534999772714")
 
         result = resolve_phone("123456789012345@lid", self.mapping_dir)
 
@@ -46,9 +42,7 @@ class WhatsAppIdentityTests(unittest.TestCase):
 
     def test_consistent_forward_and_reverse_mappings_are_accepted(self) -> None:
         self._write("lid-mapping-5534999772714.json", "123456789012345")
-        self._write(
-            "lid-mapping-123456789012345_reverse.json", "5534999772714"
-        )
+        self._write("lid-mapping-123456789012345_reverse.json", "5534999772714")
 
         result = resolve_phone("123456789012345@lid", self.mapping_dir)
 
@@ -68,6 +62,28 @@ class WhatsAppIdentityTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unavailable")
         self.assertEqual(result.reason, "PHONE_MAPPING_UNAVAILABLE")
+
+    def test_unrelated_invalid_mappings_do_not_poison_requested_resolution(
+        self,
+    ) -> None:
+        self._write("lid-mapping-5534999772714.json", "123456789012345")
+        (self.mapping_dir / "lid-mapping-5534999772715.json").write_bytes(b"")
+        (self.mapping_dir / "lid-mapping-5534999772716.json").write_text(
+            "{not-json", encoding="utf-8"
+        )
+
+        result = resolve_phone("123456789012345@lid", self.mapping_dir)
+
+        self.assertEqual(result, PhoneResolution("ok", "5534999772714", "resolved"))
+
+    def test_oversized_mapping_is_rejected_before_resolution(self) -> None:
+        oversized = b'"123456789"' + (b" " * 4097)
+        (self.mapping_dir / "lid-mapping-5534999772714.json").write_bytes(oversized)
+
+        result = resolve_phone("123456789@lid", self.mapping_dir)
+
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.reason, "PHONE_MAPPING_INVALID")
 
     def test_malformed_mapping_is_unavailable(self) -> None:
         (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(

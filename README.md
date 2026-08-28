@@ -61,11 +61,15 @@ SOUL.md addition. Follow
 [`docs/conversation-identity-invariant.md`](docs/conversation-identity-invariant.md)
 for phone and session identity rules.
 
-Install the CEO bridge only after reviewing it, by copying the versioned source
-to `/root/.hermes/plugins/brain-ceo-bridge` and enabling `brain-ceo-bridge` in
-the CEO `plugins.enabled` list. The installer and runbook configure
-`BRAIN_GATEWAY_TOKEN` for that plugin. This production copy is intentionally
-outside this repository; development here changes only `/root/brain`.
+Install the CEO bridge only after reviewing it and
+[`deploy/hermes-ceo-brain.example.yaml`](deploy/hermes-ceo-brain.example.yaml).
+Copy the versioned source to `/root/.hermes/plugins/brain-ceo-bridge`, enable
+`brain-ceo-bridge` in the CEO `plugins.enabled` list, and expose its
+`brain-context` toolset on WhatsApp only. Do not add `brain-context` to CLI or
+Telegram, and do not configure the worker Brain MCP server in the CEO. The
+installer and runbook configure `BRAIN_GATEWAY_TOKEN` for that plugin. This
+production copy is intentionally outside this repository; development here
+changes only `/root/brain`.
 
 The deployment boundary is explicit: `/root/brain` contains the source and
 examples, `/root/.hermes` receives only the operator's runtime installation,

@@ -1,8 +1,8 @@
 # Brain V2 — Design Specification
 
-**Status:** aprovado para planejamento e implementação  
-**Data:** 2026-08-28  
-**Fonte de requisitos:** `PRD.md` (V2, promovido de `PRD-v2.md`)  
+**Status:** aprovado para planejamento e implementação
+**Data:** 2026-08-28
+**Fonte de requisitos:** `PRD.md` (V2, promovido de `PRD-v2.md`)
 **Escopo de desenvolvimento:** somente o repositório `/root/brain`
 
 ## 1. Objetivo

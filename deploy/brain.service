@@ -1,5 +1,5 @@
 [Unit]
-Description=Brain longitudinal memory MCP service
+Description=Brain V2 conversation identity and longitudinal memory service
 After=network.target
 Wants=network.target
 

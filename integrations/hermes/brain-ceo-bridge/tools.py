@@ -18,6 +18,7 @@ _SESSION_FIELDS = (
     "HERMES_SESSION_PROFILE",
 )
 _PHONE_RE = re.compile(r"^[1-9][0-9]{6,14}$")
+_MAX_RESPONSE_BYTES = 16_384
 
 
 def _unavailable() -> str:
@@ -41,10 +42,7 @@ def _session_context() -> dict[str, str] | None:
     # tool invocation, including invocations in concurrent gateway tasks.
     from gateway.session_context import get_session_env
 
-    values = {
-        name: get_session_env(name, "")
-        for name in _SESSION_FIELDS
-    }
+    values = {name: get_session_env(name, "") for name in _SESSION_FIELDS}
     if any(not _safe_context_value(value) for value in values.values()):
         return None
     if values["HERMES_SESSION_PLATFORM"] != "whatsapp":
@@ -100,7 +98,10 @@ def conversation_phone(args: dict, **kwargs: Any) -> str:
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=2) as response:
-            result = _response_payload(response.read())
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+            if len(raw) > _MAX_RESPONSE_BYTES:
+                return _unavailable()
+            result = _response_payload(raw)
         return json.dumps(result, separators=(",", ":")) if result else _unavailable()
     except Exception:  # noqa: BLE001 - tool boundary must never raise
         return _unavailable()

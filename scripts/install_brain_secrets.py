@@ -15,6 +15,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 
 WORKER_PROFILES = ("porteiro", "cadastro", "reno", "famaagent")
@@ -33,7 +34,7 @@ def env_defines(path: Path, key: str) -> bool:
     return False
 
 
-def atomic_private_write(path: Path, content: str) -> None:
+def atomic_private_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -41,7 +42,7 @@ def atomic_private_write(path: Path, content: str) -> None:
     )
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -50,6 +51,30 @@ def atomic_private_write(path: Path, content: str) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def atomic_private_write(path: Path, content: str) -> None:
+    atomic_private_write_bytes(path, content.encode("utf-8"))
+
+
+def snapshot_files(paths: Iterable[Path]) -> dict[Path, bytes | None]:
+    snapshots: dict[Path, bytes | None] = {}
+    for path in paths:
+        if path.is_symlink():
+            raise RuntimeError(f"refusing to write through symlink: {path}")
+        if path.exists() and not path.is_file():
+            raise RuntimeError(f"refusing to overwrite non-file: {path}")
+        snapshots[path] = path.read_bytes() if path.exists() else None
+    return snapshots
+
+
+def restore_files(snapshots: dict[Path, bytes | None]) -> None:
+    for path, content in snapshots.items():
+        if content is None:
+            if path.is_symlink() or path.exists():
+                path.unlink()
+        else:
+            atomic_private_write_bytes(path, content)
 
 
 def main() -> int:
@@ -100,7 +125,9 @@ def main() -> int:
         profile_home = args.hermes_home / "profiles" / profile
         if not profile_home.is_dir():
             raise RuntimeError(f"missing Hermes Profile: {profile}")
-    secret_targets = [(args.hermes_home, "BRAIN_GATEWAY_TOKEN", tokens[GATEWAY_PRINCIPAL])]
+    secret_targets = [
+        (args.hermes_home, "BRAIN_GATEWAY_TOKEN", tokens[GATEWAY_PRINCIPAL])
+    ]
     secret_targets.extend(
         (
             args.hermes_home / "profiles" / profile,
@@ -109,25 +136,32 @@ def main() -> int:
         )
         for profile in WORKER_PROFILES
     )
-    for secret_home, secret_name, token in secret_targets:
-        environment = dict(os.environ)
-        environment["HERMES_HOME"] = str(secret_home)
-        scoped_writer = writer.replace("BRAIN_TOKEN", secret_name)
-        subprocess.run(
-            [str(args.hermes_python), "-c", scoped_writer],
-            input=token,
-            text=True,
-            check=True,
-            env=environment,
-            stdout=subprocess.DEVNULL,
-        )
+    mutable_paths = [
+        *(secret_home / ".env" for secret_home, _, _ in secret_targets),
+        config_path,
+        env_path,
+    ]
+    snapshots = snapshot_files(mutable_paths)
+    try:
+        for secret_home, secret_name, token in secret_targets:
+            environment = dict(os.environ)
+            environment["HERMES_HOME"] = str(secret_home)
+            scoped_writer = writer.replace("BRAIN_TOKEN", secret_name)
+            subprocess.run(
+                [str(args.hermes_python), "-c", scoped_writer],
+                input=token,
+                text=True,
+                check=True,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+            )
 
-    digests = {
-        principal: hashlib.sha256(token.encode("utf-8")).hexdigest()
-        for principal, token in tokens.items()
-    }
-    cursor_secret = secrets.token_hex(32)
-    config = f'''[server]
+        digests = {
+            principal: hashlib.sha256(token.encode("utf-8")).hexdigest()
+            for principal, token in tokens.items()
+        }
+        cursor_secret = secrets.token_hex(32)
+        config = f'''[server]
 state_db = "/root/.hermes/state.db"
 kanban_db = "/root/.hermes/kanban.db"
 whatsapp_session_dir = "/root/.hermes/platforms/whatsapp/session"
@@ -165,9 +199,14 @@ mode = "worker"
 token_sha256 = "{digests["famaagent"]}"
 tools = ["conversation_recent", "conversation_search"]
 '''
-    atomic_private_write(config_path, config)
-    atomic_private_write(env_path, f"BRAIN_CONFIG={config_path}\n")
-    print("OK: installed distinct worker/gateway credentials and root-only Brain configuration")
+        atomic_private_write(config_path, config)
+        atomic_private_write(env_path, f"BRAIN_CONFIG={config_path}\n")
+    except Exception:
+        restore_files(snapshots)
+        raise
+    print(
+        "OK: installed distinct worker/gateway credentials and root-only Brain configuration"
+    )
     return 0
 
 

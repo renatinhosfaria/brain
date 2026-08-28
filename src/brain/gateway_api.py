@@ -17,6 +17,7 @@ _CONTEXT_FIELDS = frozenset(
     {"platform", "chat_type", "chat_id", "session_key", "session_id"}
 )
 _MAX_CONTEXT_VALUE = 512
+_MAX_BODY_BYTES = 16_384
 
 
 def _valid_context_value(value: object) -> bool:
@@ -68,9 +69,21 @@ class GatewayAPI:
             # Authenticate before reading or parsing the body, especially so an
             # unresolved secret cannot reach the JSON or database paths.
             self.service.authorizer.parse_gateway_headers(headers)
-            body = await request.body()
-            if len(body) > 16_384:
-                raise _request_error()
+            declared_length = request.headers.get("content-length")
+            if declared_length is not None:
+                try:
+                    if not (0 <= int(declared_length) <= _MAX_BODY_BYTES):
+                        raise _request_error()
+                except ValueError:
+                    raise _request_error() from None
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > _MAX_BODY_BYTES:
+                    raise _request_error()
+                chunks.append(chunk)
+            body = b"".join(chunks)
             try:
                 payload: Any = json.loads(body)
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError):

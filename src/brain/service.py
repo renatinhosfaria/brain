@@ -42,6 +42,8 @@ FORBIDDEN_ARGUMENTS = frozenset(
         "database_path",
         "board",
         "conversation_id",
+        "mapping_dir",
+        "whatsapp_session_dir",
     }
 )
 
@@ -175,6 +177,8 @@ class BrainService:
             if not isinstance(arguments, Mapping) or FORBIDDEN_ARGUMENTS.intersection(
                 arguments
             ):
+                raise BrainError("AUTH_TASK_INVALID")
+            if tool == "conversation_phone" and arguments:
                 raise BrainError("AUTH_TASK_INVALID")
             capability = self.authorizer.authorize_worker(request_identity, identity)
             identity.update(

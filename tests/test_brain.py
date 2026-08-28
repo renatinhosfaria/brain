@@ -385,6 +385,16 @@ class BrainFixture(unittest.TestCase):
             result, {"status": "unavailable", "reason": "phone_not_resolved"}
         )
 
+    def test_phone_tool_rejects_nonempty_arguments(self) -> None:
+        with self.assertRaises(BrainError) as denied:
+            self.service.call_tool(
+                "conversation_phone",
+                {"unrelated": "ignored"},
+                self.headers(token="porteiro-secret", task="task-p", run="104"),
+            )
+
+        self.assertEqual(denied.exception.code, "AUTH_TASK_INVALID")
+
     def test_phone_schema_has_no_identity_properties(self) -> None:
         phone = next(tool for tool in _tools() if tool.name == "conversation_phone")
         self.assertEqual(
@@ -754,6 +764,9 @@ class BrainFixture(unittest.TestCase):
     def test_multiple_resets_and_whatsapp_aliases_share_longitudinal_history(
         self,
     ) -> None:
+        (self.mapping_dir / "lid-mapping-5511999990000.json").write_text(
+            '"123456789"', encoding="utf-8"
+        )
         conn = sqlite3.connect(self.state_path)
         conn.executemany(
             "INSERT INTO sessions VALUES (?, 'wa:a', 'whatsapp', ?, 'dm', ?)",
@@ -778,6 +791,20 @@ class BrainFixture(unittest.TestCase):
         self.assertIn("fato A", texts)
         self.assertIn("terceiro reset", texts)
         self.assertIn("mensagem pelo alias LID", texts)
+
+    def test_unverified_longitudinal_alias_is_denied(self) -> None:
+        conn = sqlite3.connect(self.state_path)
+        conn.execute(
+            "INSERT INTO sessions VALUES ('a-unverified', 'wa:a', 'whatsapp', "
+            "'987654321@lid', 'dm', 5.0)"
+        )
+        conn.commit()
+        conn.close()
+
+        with self.assertRaises(BrainError) as denied:
+            self.service.call_tool("conversation_recent", {}, self.headers())
+
+        self.assertEqual(denied.exception.code, "AUTH_ORIGIN_AMBIGUOUS_ALIAS")
 
     def test_twenty_plus_turns_and_current_inbound_are_available(self) -> None:
         conn = sqlite3.connect(self.state_path)

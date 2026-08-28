@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from .config import BrainSettings, PrincipalConfig
 from .db import ReadOnlyDatabase
 from .errors import BrainError
+from .whatsapp_identity import same_verified_contact
 
 TERMINAL_RUN_STATES = frozenset({"done", "failed", "crashed", "timed_out", "reclaimed"})
 _RUN_RE = re.compile(r"^[0-9]{1,20}$")
@@ -136,7 +137,9 @@ class Authorizer:
             principal=principal.name, task_id=task_header, run_id=run_id
         )
 
-    def parse_gateway_headers(self, headers: Mapping[str, str]) -> GatewayRequestIdentity:
+    def parse_gateway_headers(
+        self, headers: Mapping[str, str]
+    ) -> GatewayRequestIdentity:
         principal = self._authenticate(headers)
         if principal.mode != "gateway":
             raise BrainError("AUTH_MODE_MISMATCH")
@@ -228,7 +231,7 @@ class Authorizer:
                 raise BrainError("SCOPE_NOT_WHATSAPP_DM")
             session_key = next(iter(session_keys))
             longitudinal = conn.execute(
-                "SELECT id FROM sessions "
+                "SELECT id, chat_id FROM sessions "
                 "WHERE session_key = ? AND source = 'whatsapp' AND chat_type = 'dm' "
                 "ORDER BY started_at ASC, id ASC",
                 (session_key,),
@@ -236,6 +239,11 @@ class Authorizer:
             ids = tuple(str(row["id"]) for row in longitudinal)
             if not ids or task_session_id not in ids:
                 raise BrainError("AUTH_SESSION_MISMATCH")
+            if not same_verified_contact(
+                (row["chat_id"] for row in longitudinal),
+                self.settings.whatsapp_session_dir,
+            ):
+                raise BrainError("AUTH_ORIGIN_AMBIGUOUS_ALIAS")
             return session_key, ids
 
         session_key, session_ids = self.state.read(state_gate)
@@ -285,7 +293,10 @@ class Authorizer:
                 for row in longitudinal
             ):
                 raise BrainError("SCOPE_NOT_WHATSAPP_DM")
-            if any(row["chat_id"] != session["chat_id"] for row in longitudinal):
+            if not same_verified_contact(
+                (row["chat_id"] for row in longitudinal),
+                self.settings.whatsapp_session_dir,
+            ):
                 raise BrainError("AUTH_ORIGIN_AMBIGUOUS_ALIAS")
             return tuple(str(row["id"]) for row in longitudinal)
 

@@ -28,11 +28,13 @@
    raw, distinct `BRAIN_TOKEN` only in its Profile's secret scope. Keep
    `no_mcp` on worker Telegram/WhatsApp toolsets.
 6. Review the versioned
-   `integrations/hermes/brain-ceo-bridge/` source, copy it to
+   `integrations/hermes/brain-ceo-bridge/` source and
+   `deploy/hermes-ceo-brain.example.yaml`, copy the source to
    `/root/.hermes/plugins/brain-ceo-bridge`, enable `brain-ceo-bridge` in the
-   CEO `plugins.enabled` list, and ensure only the CEO has
-   `BRAIN_GATEWAY_TOKEN`. These production paths are not modified by this
-   repository task.
+   CEO `plugins.enabled` list, and expose `brain-context` on WhatsApp only.
+   Do not add it to CEO CLI/Telegram and do not configure the worker Brain MCP
+   server in the CEO. Ensure only the CEO has `BRAIN_GATEWAY_TOKEN`. These
+   production paths are not modified by this repository task.
 7. Add `docs/worker-history-invariant.md` and
    `docs/conversation-identity-invariant.md` to both worker `SOUL.md` files.
 8. Install `deploy/brain.service` as `/etc/systemd/system/brain.service`, run
@@ -116,10 +118,14 @@ historical context and must not use `session_search`, terminal or direct SQLite
 as fallback. If `conversation_phone` is unavailable, do not guess a phone from
 history or from the mapping path; return to the controlled operational flow.
 
-To roll back exposure, remove `brain` from Reno/FamaAgent `cli` toolsets while
-leaving `no_mcp` on Telegram and WhatsApp, then restart their worker processes.
-Stopping `brain.service` is safe: Brain owns no transcript and writes no Hermes
-domain data.
+To roll back all V2 exposure, disable `brain-ceo-bridge`, remove
+`brain-context` from the CEO WhatsApp toolset, remove `brain` from the CLI
+toolsets of Porteiro, Cadastro, Reno and FamaAgent, and restart the affected
+processes. Keep `no_mcp` on worker Telegram and WhatsApp. Restore the prior
+Porteiro/Cadastro behavior for a missing phone (controlled block; never infer)
+and keep the worker Profiles' Brain MCP entries disabled. Stopping
+`brain.service` is safe: Brain owns no transcript and writes no Hermes domain
+data.
 
 Never put tokens, Authorization headers, transcript text, phone numbers,
 `chat_id`, `session_key` or database paths in incident notes or logs.

@@ -1,0 +1,26 @@
+# Merge these entries into the CEO Hermes configuration.
+# The bridge is intentionally available only to WhatsApp sessions.
+plugins:
+  enabled:
+    - brain-ceo-bridge
+
+# Mark the plugin as known on every platform so a saved platform allowlist
+# cannot silently enable it outside WhatsApp.
+known_plugin_toolsets:
+  cli:
+    - brain-context
+  telegram:
+    - brain-context
+  whatsapp:
+    - brain-context
+
+platform_toolsets:
+  whatsapp:
+    - kanban
+    - clarify
+    - skills
+    - vision
+    - brain-context
+
+# Do not add `brain-context` to cli/telegram; preserve their existing toolsets.
+# Do not configure the Brain MCP server in the CEO profile.

@@ -34,8 +34,8 @@ class _Response:
     def __exit__(self, *_args) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.payload
+    def read(self, size: int = -1) -> bytes:
+        return self.payload if size < 0 else self.payload[:size]
 
 
 class CEOBridgePluginTests(unittest.TestCase):
@@ -55,7 +55,9 @@ class CEOBridgePluginTests(unittest.TestCase):
         session_context = types.ModuleType("gateway.session_context")
 
         def get_session_env(name: str, default: str = "") -> str:
-            return self.context_values.get(name, ContextVar(name, default=default)).get()
+            return self.context_values.get(
+                name, ContextVar(name, default=default)
+            ).get()
 
         session_context.get_session_env = get_session_env  # type: ignore[attr-defined]
         gateway.session_context = session_context  # type: ignore[attr-defined]
@@ -108,7 +110,9 @@ class CEOBridgePluginTests(unittest.TestCase):
 
         self.plugin.register(context)
 
-        self.assertEqual([call["name"] for call in context.calls], ["conversation_phone"])
+        self.assertEqual(
+            [call["name"] for call in context.calls], ["conversation_phone"]
+        )
         self.assertEqual(context.calls[0]["toolset"], "brain-context")
         self.assertEqual(
             context.calls[0]["schema"]["parameters"],
@@ -132,13 +136,13 @@ class CEOBridgePluginTests(unittest.TestCase):
 
         with patch.object(self.tools.urllib.request, "urlopen", opener):
             result = json.loads(
-                self.tools.conversation_phone(
-                    {}, BRAIN_GATEWAY_TOKEN="gateway-secret"
-                )
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
             )
 
         self.assertEqual(result, {"status": "ok", "phone": "5534999772714"})
-        self.assertEqual(requests[0][0], "http://127.0.0.1:8765/internal/gateway/conversation-phone")
+        self.assertEqual(
+            requests[0][0], "http://127.0.0.1:8765/internal/gateway/conversation-phone"
+        )
         self.assertEqual(
             requests[0][1],
             {
@@ -163,26 +167,28 @@ class CEOBridgePluginTests(unittest.TestCase):
             )
             self.context_values["HERMES_SESSION_PLATFORM"].set("telegram")
             wrong_platform = json.loads(
-                self.tools.conversation_phone(
-                    {}, BRAIN_GATEWAY_TOKEN="gateway-secret"
-                )
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
             )
 
-        self.assertEqual(extra_args, {"status": "unavailable", "reason": "phone_not_resolved"})
-        self.assertEqual(wrong_platform, {"status": "unavailable", "reason": "phone_not_resolved"})
+        self.assertEqual(
+            extra_args, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
+        self.assertEqual(
+            wrong_platform, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
 
-    def test_handler_returns_unavailable_for_missing_secret_timeout_or_bad_response(self) -> None:
+    def test_handler_returns_unavailable_for_missing_secret_timeout_or_bad_response(
+        self,
+    ) -> None:
         self.bind_context(self.context_values_for("a"))
         no_secret = json.loads(self.tools.conversation_phone({}))
         self.assertEqual(no_secret["status"], "unavailable")
 
         with patch.object(
             self.tools.urllib.request, "urlopen", side_effect=TimeoutError
-            ):
+        ):
             timeout = json.loads(
-                self.tools.conversation_phone(
-                    {}, BRAIN_GATEWAY_TOKEN="gateway-secret"
-                )
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
             )
         with patch.object(
             self.tools.urllib.request,
@@ -190,13 +196,30 @@ class CEOBridgePluginTests(unittest.TestCase):
             return_value=_Response(b"not-json"),
         ):
             malformed = json.loads(
-                self.tools.conversation_phone(
-                    {}, BRAIN_GATEWAY_TOKEN="gateway-secret"
-                )
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
             )
 
-        self.assertEqual(timeout, {"status": "unavailable", "reason": "phone_not_resolved"})
-        self.assertEqual(malformed, {"status": "unavailable", "reason": "phone_not_resolved"})
+        self.assertEqual(
+            timeout, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
+        self.assertEqual(
+            malformed, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
+
+    def test_handler_rejects_oversized_response(self) -> None:
+        self.bind_context(self.context_values_for("a"))
+        payload = b'{"status":"ok","phone":"5534999772714"}' + (b" " * 16_385)
+
+        with patch.object(
+            self.tools.urllib.request, "urlopen", return_value=_Response(payload)
+        ):
+            result = json.loads(
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
+            )
+
+        self.assertEqual(
+            result, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
 
     def test_parallel_contextvars_stay_paired(self) -> None:
         seen: list[dict[str, str]] = []
@@ -219,9 +242,7 @@ class CEOBridgePluginTests(unittest.TestCase):
         def call_sync(prefix: str) -> None:
             tokens = self.bind_context(self.context_values_for(prefix))
             try:
-                self.tools.conversation_phone(
-                    {}, BRAIN_GATEWAY_TOKEN="gateway-secret"
-                )
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
             finally:
                 for name, token in zip(self.context_values, tokens):
                     self.context_values[name].reset(token)

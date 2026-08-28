@@ -1,10 +1,10 @@
 # Brain — Product Requirements Document (PRD)
 
-**Versão:** 2.0  
-**Status:** Proposta técnica pronta para implementação  
-**Data:** 2026-08-28  
-**Produto:** Brain  
-**Repositório:** `renatinhosfaria/brain`  
+**Versão:** 2.0
+**Status:** Implementada — sujeita aos gates de produção
+**Data:** 2026-08-28
+**Produto:** Brain
+**Repositório:** `renatinhosfaria/brain`
 **Objetivo desta revisão:** ampliar o Brain de “memória longitudinal autorizada para workers” para “contexto autorizado da conversa”, adicionando resolução segura do telefone da conversa WhatsApp para o CEO, Porteiro e Cadastro, sem modificar o core do Hermes Agent.
 
 ---

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+
+from scripts.install_brain_secrets import restore_files, snapshot_files
 
 ROOT = Path(__file__).parents[1]
 
@@ -34,6 +37,86 @@ class DeploymentContractTests(unittest.TestCase):
 
         self.assertIn("/usr/local/lib/hermes-agent", readme)
         self.assertIn("runtime determina a conversa", invariant)
+
+    def test_ceo_example_scopes_bridge_to_whatsapp(self) -> None:
+        source = (ROOT / "deploy/hermes-ceo-brain.example.yaml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("brain-ceo-bridge", source)
+        self.assertIn("brain-context", source)
+        self.assertIn("whatsapp:", source)
+        self.assertIn("Do not add `brain-context` to cli/telegram", source)
+
+    def test_hermes_check_covers_gateway_plugin_and_context_scope(self) -> None:
+        source = (ROOT / "scripts/hermes_integration_check.py").read_text(
+            encoding="utf-8"
+        )
+
+        for required in (
+            "BRAIN_GATEWAY_TOKEN",
+            "doctor_plugin",
+            "brain-context",
+            "HERMES_SESSION_PLATFORM",
+            "HERMES_SESSION_CHAT_ID",
+            "HERMES_SESSION_KEY",
+            "HERMES_SESSION_ID",
+        ):
+            self.assertIn(required, source)
+
+    def test_hermes_check_validates_principal_modes_and_tool_acl(self) -> None:
+        source = (ROOT / "scripts/hermes_integration_check.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("expected_modes", source)
+        self.assertIn('principal.get("mode")', source)
+        self.assertIn('principal.get("tools")', source)
+
+    def test_smoke_covers_authenticated_gateway_probe(self) -> None:
+        source = (ROOT / "scripts/smoke_test.py").read_text(encoding="utf-8")
+
+        self.assertIn("BRAIN_GATEWAY_TOKEN", source)
+        self.assertIn("gateway/conversation-phone", source)
+        self.assertIn("Content-Length", source)
+
+    def test_secret_installation_restores_all_snapshots_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            existing = root / "brain.toml"
+            created = root / "brain.env"
+            existing.write_bytes(b"before")
+
+            snapshots = snapshot_files((existing, created))
+            existing.write_bytes(b"partial update")
+            created.write_bytes(b"partial secret")
+            restore_files(snapshots)
+
+            self.assertEqual(existing.read_bytes(), b"before")
+            self.assertFalse(created.exists())
+
+    def test_docs_cover_ceo_scope_and_complete_rollback(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+
+        self.assertIn("hermes-ceo-brain.example.yaml", readme)
+        self.assertIn("WhatsApp only", readme)
+        for required in (
+            "brain-context",
+            "disable `brain-ceo-bridge`",
+            "Porteiro",
+            "Cadastro",
+        ):
+            self.assertIn(required, runbook)
+
+    def test_v2_metadata_describes_identity_and_implementation_status(self) -> None:
+        prd = (ROOT / "PRD.md").read_text(encoding="utf-8")
+        package = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        service = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
+
+        self.assertIn("Status:** Implementada", prd)
+        self.assertIn("identity", package.lower())
+        self.assertIn("identity", service.lower())
 
 
 if __name__ == "__main__":

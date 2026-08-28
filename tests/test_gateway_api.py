@@ -98,7 +98,11 @@ class GatewayAPITests(unittest.TestCase):
         }
 
     @staticmethod
-    def request(payload: object, token: str = "gateway-secret") -> Request:
+    def request(
+        payload: object,
+        token: str = "gateway-secret",
+        declared_length: int | None = None,
+    ) -> Request:
         if isinstance(payload, bytes):
             body = payload
         else:
@@ -112,21 +116,26 @@ class GatewayAPITests(unittest.TestCase):
             sent = True
             return {"type": "http.request", "body": body, "more_body": False}
 
+        headers = [
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"application/json"),
+        ]
+        if declared_length is not None:
+            headers.append((b"content-length", str(declared_length).encode()))
         scope = {
             "type": "http",
             "method": "POST",
             "path": "/internal/gateway/conversation-phone",
-            "headers": [
-                (b"authorization", f"Bearer {token}".encode()),
-                (b"content-type", b"application/json"),
-            ],
+            "headers": headers,
         }
         return Request(scope, receive)
 
     def post_gateway(
         self, payload: object, token: str = "gateway-secret"
     ) -> SimpleNamespace:
-        response = asyncio.run(self.api.conversation_phone(self.request(payload, token)))
+        response = asyncio.run(
+            self.api.conversation_phone(self.request(payload, token))
+        )
         return SimpleNamespace(
             status_code=response.status_code,
             text=response.body.decode("utf-8"),
@@ -137,6 +146,23 @@ class GatewayAPITests(unittest.TestCase):
         (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(
             '"123456789012345"', encoding="utf-8"
         )
+
+        response = self.post_gateway(self.valid_context())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok", "phone": "5534999772714"})
+
+    def test_gateway_accepts_verified_phone_lid_longitudinal_alias(self) -> None:
+        (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(
+            '"123456789012345"', encoding="utf-8"
+        )
+        state = sqlite3.connect(self.state_path)
+        state.execute(
+            "INSERT INTO sessions VALUES "
+            "('g-old', 'wa:g', 'whatsapp', '5534999772714@s.whatsapp.net', 'dm', 0.5)"
+        )
+        state.commit()
+        state.close()
 
         response = self.post_gateway(self.valid_context())
 
@@ -170,7 +196,10 @@ class GatewayAPITests(unittest.TestCase):
             ({"platform": "whatsapp"}, 400),
             ({**self.valid_context(), "extra": "secret-context"}, 400),
             ({**self.valid_context(), "platform": "telegram"}, 400),
-            ({**self.valid_context(), "chat_type": "group", "chat_id": "group@g.us"}, 400),
+            (
+                {**self.valid_context(), "chat_type": "group", "chat_id": "group@g.us"},
+                400,
+            ),
             ({**self.valid_context(), "session_id": ""}, 400),
             ({**self.valid_context(), "session_key": "not-wa-g"}, 403),
         ]
@@ -190,6 +219,15 @@ class GatewayAPITests(unittest.TestCase):
         self.assertEqual(placeholder.status_code, 403)
         self.assertEqual(invalid_json.status_code, 400)
         self.assertNotIn("BRAIN_GATEWAY_TOKEN", placeholder.text)
+
+    def test_gateway_rejects_oversized_declared_body_before_reading(self) -> None:
+        response = asyncio.run(
+            self.api.conversation_phone(
+                self.request(self.valid_context(), declared_length=16_385)
+            )
+        )
+
+        self.assertEqual(response.status_code, 400)
 
     def test_mcp_app_registers_private_gateway_route(self) -> None:
         app = BrainMCPServer(self.service).app()

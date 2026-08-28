@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,6 +18,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--health-url", default="http://127.0.0.1:8765/health")
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8765/mcp")
+    parser.add_argument(
+        "--gateway-url",
+        default="http://127.0.0.1:8765/internal/gateway/conversation-phone",
+    )
+    parser.add_argument("--gateway-env", type=Path, default=Path("/root/.hermes/.env"))
     parser.add_argument("--state-db", type=Path, default=Path("/root/.hermes/state.db"))
     parser.add_argument(
         "--kanban-db", type=Path, default=Path("/root/.hermes/kanban.db")
@@ -32,7 +39,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if urlparse(args.health_url).hostname not in {"127.0.0.1", "localhost", "::1"}:
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if (
+        urlparse(args.health_url).hostname not in local_hosts
+        or urlparse(args.gateway_url).hostname not in local_hosts
+    ):
         print(
             "FAIL: smoke test must target a localhost Brain endpoint", file=sys.stderr
         )
@@ -82,6 +93,53 @@ def main() -> int:
     }
     if status != 200 or payload != expected:
         print("FAIL: Brain health is incompatible", file=sys.stderr)
+        return 1
+
+    def env_value(path: Path, key: str) -> str:
+        value = os.environ.get(key)
+        if value:
+            return value
+        if not path.is_file():
+            return ""
+        for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("export "):
+                stripped = stripped[7:].lstrip()
+            name, separator, raw = stripped.partition("=")
+            if separator and name.strip() == key:
+                value = raw.strip()
+                if len(value) >= 2 and value[0] == value[-1] in {'"', "'"}:
+                    value = value[1:-1]
+                return value
+        return ""
+
+    gateway_token = env_value(args.gateway_env, "BRAIN_GATEWAY_TOKEN")
+    if not gateway_token:
+        print("FAIL: Brain gateway credential is unavailable", file=sys.stderr)
+        return 1
+    gateway_body = b"{}"
+    gateway_request = urllib.request.Request(
+        args.gateway_url,
+        data=gateway_body,
+        headers={
+            "Authorization": f"Bearer {gateway_token}",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(gateway_body)),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(gateway_request, timeout=5) as response:
+            if response.status != 400:
+                raise RuntimeError(
+                    "gateway contract probe returned an unexpected status"
+                )
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            print("FAIL: authenticated Brain gateway probe failed", file=sys.stderr)
+            return 1
+    except (OSError, RuntimeError):
+        print("FAIL: authenticated Brain gateway probe failed", file=sys.stderr)
         return 1
 
     def post(message: dict, extra_headers: dict[str, str] | None = None):

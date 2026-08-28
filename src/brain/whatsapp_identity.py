@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -12,13 +13,10 @@ _PHONE_JID_RE = re.compile(r"^(?P<phone>[1-9][0-9]{6,14})@s\.whatsapp\.net$")
 _LID_JID_RE = re.compile(r"^(?P<lid>[0-9]{1,20})@lid$")
 _PHONE_RE = re.compile(r"^[1-9][0-9]{6,14}$")
 _LID_RE = re.compile(r"^[0-9]{1,20}$")
-_FORWARD_FILE_RE = re.compile(
-    r"^lid-mapping-(?P<phone>[1-9][0-9]{6,14})\.json$"
-)
-_REVERSE_FILE_RE = re.compile(
-    r"^lid-mapping-(?P<lid>[0-9]{1,20})_reverse\.json$"
-)
+_FORWARD_FILE_RE = re.compile(r"^lid-mapping-(?P<phone>[1-9][0-9]{6,14})\.json$")
+_REVERSE_FILE_RE = re.compile(r"^lid-mapping-(?P<lid>[0-9]{1,20})_reverse\.json$")
 _MAPPING_FILE_PREFIX = "lid-mapping-"
+_MAX_MAPPING_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -34,7 +32,11 @@ def _unavailable(reason: str) -> PhoneResolution:
 
 def _parse_mapping_file(path: Path, filename: str) -> tuple[str, str]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_MAPPING_BYTES + 1)
+        if len(raw) > _MAX_MAPPING_BYTES:
+            raise ValueError("mapping file is too large")
+        payload = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("mapping file is unreadable or invalid JSON") from exc
     if not isinstance(payload, str):
@@ -62,6 +64,7 @@ def _load_mappings(mapping_dir: Path, requested_lid: str) -> dict[str, set[str]]
         raise ValueError("mapping directory is unavailable")
 
     observations: dict[str, set[str]] = {}
+    invalid_candidate = False
     try:
         entries = sorted(mapping_dir.iterdir(), key=lambda entry: entry.name)
     except OSError as exc:
@@ -77,11 +80,24 @@ def _load_mappings(mapping_dir: Path, requested_lid: str) -> dict[str, set[str]]
             or _REVERSE_FILE_RE.fullmatch(entry.name)
         ):
             continue
+        reverse = _REVERSE_FILE_RE.fullmatch(entry.name)
+        requested_reverse = bool(reverse and reverse.group("lid") == requested_lid)
         if entry.is_symlink() or not entry.is_file():
-            raise ValueError("mapping entry is not a regular file")
-        lid, phone = _parse_mapping_file(entry, entry.name)
+            if requested_reverse:
+                raise ValueError("requested mapping entry is not a regular file")
+            invalid_candidate = True
+            continue
+        try:
+            lid, phone = _parse_mapping_file(entry, entry.name)
+        except (TypeError, ValueError):
+            if requested_reverse:
+                raise
+            invalid_candidate = True
+            continue
         observations.setdefault(lid, set()).add(phone)
 
+    if not observations.get(requested_lid) and invalid_candidate:
+        raise ValueError("no valid evidence for requested mapping")
     return {requested_lid: observations.get(requested_lid, set())}
 
 
@@ -115,3 +131,25 @@ def resolve_phone(chat_id: str, mapping_dir: Path) -> PhoneResolution:
     if len(phones) != 1:
         return _unavailable("PHONE_IDENTITY_AMBIGUOUS")
     return PhoneResolution("ok", next(iter(phones)), "resolved")
+
+
+def same_verified_contact(chat_ids: Iterable[str], mapping_dir: Path) -> bool:
+    """Return whether longitudinal WhatsApp IDs have one proven contact.
+
+    An exact repeated identifier is already the same database identity. Any
+    different identifier must independently resolve to the same verified
+    transport phone; a shared Hermes ``session_key`` is never sufficient.
+    """
+    unique_ids = tuple(dict.fromkeys(chat_ids))
+    if not unique_ids:
+        return False
+    if any(not isinstance(chat_id, str) or not chat_id for chat_id in unique_ids):
+        return False
+    if len(unique_ids) == 1:
+        return True
+
+    resolutions = [resolve_phone(chat_id, mapping_dir) for chat_id in unique_ids]
+    if any(resolution.status != "ok" for resolution in resolutions):
+        return False
+    phones = {resolution.phone for resolution in resolutions}
+    return len(phones) == 1

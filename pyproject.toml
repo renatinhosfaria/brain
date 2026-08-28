@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brain-memory-service"
 version = "0.1.0"
-description = "Read-only, capability-scoped longitudinal memory MCP service for Hermes"
+description = "Read-only, capability-scoped conversation identity and longitudinal memory service for Hermes"
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "mcp==2.0.0",
