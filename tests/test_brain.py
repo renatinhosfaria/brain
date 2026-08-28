@@ -325,6 +325,15 @@ class BrainFixture(unittest.TestCase):
         self.assertEqual(capability.principal, "porteiro")
         self.assertEqual(capability.chat_id, "5511999990000@s.whatsapp.net")
 
+    def test_audit_records_execution_mode_without_identity_fields(self) -> None:
+        with self.assertLogs("brain.audit", level="INFO") as captured:
+            self.service.call_tool("conversation_recent", {}, self.headers())
+
+        event = json.loads(captured.output[0].split("brain.audit:", 1)[1])
+        self.assertEqual(event["mode"], "worker")
+        self.assertNotIn("chat_id", event)
+        self.assertNotIn("session_key", event)
+
     def test_gateway_principal_cannot_use_worker_headers(self) -> None:
         with self.assertRaises(BrainError) as denied:
             self.service.call_tool(

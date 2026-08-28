@@ -135,6 +135,7 @@ class BrainService:
             "event": "brain_conversation_access",
             "timestamp": datetime.now(UTC).isoformat(),
             "profile": identity.get("profile", "unknown"),
+            "mode": identity.get("mode", "unknown"),
             "task_id": identity.get("task_id"),
             "run_id": identity.get("run_id"),
             "decision": decision,
@@ -154,12 +155,14 @@ class BrainService:
         started = time.perf_counter()
         identity: dict[str, Any] = {
             "profile": "unknown",
+            "mode": "unknown",
             "task_id": None,
             "run_id": None,
         }
         try:
             request_identity = self.authorizer.parse_worker_headers(headers)
             identity["profile"] = request_identity.profile
+            identity["mode"] = self.settings.principals[request_identity.principal].mode
             if tool not in {
                 "conversation_recent",
                 "conversation_search",
@@ -256,12 +259,14 @@ class BrainService:
         started = time.perf_counter()
         identity: dict[str, Any] = {
             "profile": "unknown",
+            "mode": "unknown",
             "task_id": None,
             "run_id": None,
         }
         try:
             request_identity = self.authorizer.parse_gateway_headers(headers)
             identity["profile"] = request_identity.principal
+            identity["mode"] = self.settings.principals[request_identity.principal].mode
             capability = self.authorizer.authorize_gateway(request_identity, context)
             result, reason = self._conversation_phone_result(capability)
             self._audit(
