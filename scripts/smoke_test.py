@@ -76,6 +76,8 @@ def main() -> int:
         "status": "ok",
         "hermes_state_db": "ok",
         "hermes_kanban_db": "ok",
+        "whatsapp_identity": "compatible",
+        "gateway_bridge": "configured",
         "schema": "compatible",
     }
     if status != 200 or payload != expected:
@@ -129,14 +131,25 @@ def main() -> int:
             "run_id",
             "profile",
             "database_path",
+            "mapping_dir",
+            "whatsapp_session_dir",
         }
-        if status != 200 or names != {"conversation_recent", "conversation_search"}:
+        if status != 200 or names != {
+            "conversation_recent",
+            "conversation_search",
+            "conversation_phone",
+        }:
             raise RuntimeError("MCP tool allowlist failed")
         for tool in tools:
-            if forbidden.intersection(
-                tool.get("inputSchema", {}).get("properties", {})
-            ):
+            schema = tool.get("inputSchema", {})
+            if forbidden.intersection(schema.get("properties", {})):
                 raise RuntimeError("MCP identity argument leaked into tool schema")
+            if tool.get("name") == "conversation_phone" and schema != {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            }:
+                raise RuntimeError("conversation_phone schema is not zero-argument")
 
         # Unresolved Hermes interpolation must fail before any database read.
         status, _, placeholder = post(

@@ -1,4 +1,4 @@
-# Merge this into Porteiro and Cadastro worker Profile configurations.
+# Merge this template into Reno and FamaAgent worker Profile configurations.
 # Keep the actual BRAIN_TOKEN in that Profile's secret scope; do not commit it.
 mcp_servers:
   brain:
@@ -9,13 +9,13 @@ mcp_servers:
       X-Hermes-Run: "${HERMES_KANBAN_RUN_ID}"
     tools:
       include:
-        - conversation_phone
+        - conversation_recent
+        - conversation_search
     resources: false
     prompts: false
 
-# Allow only the Brain MCP server on CLI and explicitly disable all MCP
-# servers on Telegram/WhatsApp. The sentinel is required because a native-only
-# list otherwise inherits globally enabled MCP servers.
+# Keep Brain out of Telegram and WhatsApp. no_mcp prevents inheritance from
+# globally enabled MCP servers while leaving Brain available to CLI workers.
 platform_toolsets:
   cli:
     - clarify

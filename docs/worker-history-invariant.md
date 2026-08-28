@@ -1,4 +1,4 @@
-# Worker history invariant
+# Worker history and identity invariant
 
 Place the following invariant in the SOUL.md used by Reno and FamaAgent:
 
@@ -12,3 +12,9 @@ Usage policy:
 - Search and expand context before answering a contradiction.
 - An empty authorized history is normal for a new contact.
 - If Brain is unavailable, proceed with the task's current message and state that historical context was not recovered. Never fall back to `session_search`, terminal, or arbitrary SQLite access.
+
+For phone-dependent work, call `conversation_phone()` with no identity
+arguments. The runtime-provided capability determines the WhatsApp DM; never
+derive a phone from display names, message text, task text, `session_key`, or a
+model-supplied argument. See
+[`conversation-identity-invariant.md`](conversation-identity-invariant.md).

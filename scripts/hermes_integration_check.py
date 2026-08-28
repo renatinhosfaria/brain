@@ -32,6 +32,16 @@ def main() -> int:
         default=Path("/root/.hermes/profiles/reno/config.yaml"),
     )
     parser.add_argument(
+        "--porteiro-config",
+        type=Path,
+        default=Path("/root/.hermes/profiles/porteiro/config.yaml"),
+    )
+    parser.add_argument(
+        "--cadastro-config",
+        type=Path,
+        default=Path("/root/.hermes/profiles/cadastro/config.yaml"),
+    )
+    parser.add_argument(
         "--famaagent-config",
         type=Path,
         default=Path("/root/.hermes/profiles/famaagent/config.yaml"),
@@ -68,15 +78,18 @@ def main() -> int:
             fail(f"invalid config mapping: {path}")
         return parsed
 
-    workers = {
-        "reno": load(args.reno_config),
-        "famaagent": load(args.famaagent_config),
+    worker_paths = {
+        "porteiro": args.porteiro_config,
+        "cadastro": args.cadastro_config,
+        "reno": args.reno_config,
+        "famaagent": args.famaagent_config,
     }
-    ceo = load(args.ceo_config)
+    workers = {profile: load(path) for profile, path in worker_paths.items()}
+    ceo = load(args.ceo_config) if args.ceo_config.is_file() else {}
     if not args.server_config.is_file():
         fail("Brain server configuration is missing")
     server_config = tomllib.loads(args.server_config.read_text(encoding="utf-8"))
-    configured_profiles = server_config.get("profiles") or {}
+    configured_principals = server_config.get("principals") or {}
     token_digests: dict[str, str] = {}
 
     expected_headers = {
@@ -84,12 +97,17 @@ def main() -> int:
         "X-Hermes-Task": "${HERMES_KANBAN_TASK}",
         "X-Hermes-Run": "${HERMES_KANBAN_RUN_ID}",
     }
+    expected_tools = {
+        "porteiro": {"conversation_phone"},
+        "cadastro": {"conversation_phone"},
+        "reno": {"conversation_recent", "conversation_search"},
+        "famaagent": {"conversation_recent", "conversation_search"},
+    }
     for profile, config in workers.items():
-        token = load_env_file(
-            (args.reno_config if profile == "reno" else args.famaagent_config).parent
-            / ".env"
-        ).get("BRAIN_TOKEN")
-        expected_digest = (configured_profiles.get(profile) or {}).get("token_sha256")
+        token = load_env_file(worker_paths[profile].parent / ".env").get("BRAIN_TOKEN")
+        expected_digest = (configured_principals.get(profile) or {}).get(
+            "token_sha256"
+        )
         if not token or not isinstance(expected_digest, str):
             fail(f"{profile}: Brain credentials are incomplete")
         actual_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -104,11 +122,8 @@ def main() -> int:
             fail(f"{profile}: Brain URL is not the localhost production endpoint")
         if server.get("headers") != expected_headers:
             fail(f"{profile}: Brain capability headers changed")
-        if set((server.get("tools") or {}).get("include") or []) != {
-            "conversation_recent",
-            "conversation_search",
-        }:
-            fail(f"{profile}: Brain tools.include is not the exact V1 allowlist")
+        if set((server.get("tools") or {}).get("include") or []) != expected_tools[profile]:
+            fail(f"{profile}: Brain tools.include is not the exact V2 allowlist")
         if server.get("resources") is not False or server.get("prompts") is not False:
             fail(f"{profile}: Brain resources/prompts must be disabled")
 
@@ -130,7 +145,7 @@ def main() -> int:
             fail(f"{profile}: WhatsApp is missing no_mcp")
 
     if len(set(token_digests.values())) != len(workers):
-        fail("Reno and FamaAgent must use distinct Brain credentials")
+        fail("Brain worker principals must use distinct credentials")
 
     for platform in ("cli", "telegram", "whatsapp"):
         if "brain" in _get_platform_tools(
@@ -138,9 +153,22 @@ def main() -> int:
         ):
             fail(f"CEO: resolver exposed Brain on {platform}")
 
-    kanban = ceo.get("kanban") or {}
-    if kanban.get("auto_subscribe_on_create") is not True:
-        fail("CEO: kanban.auto_subscribe_on_create must be explicitly true")
+    if ceo:
+        enabled_plugins = (ceo.get("plugins") or {}).get("enabled") or []
+        if "brain-ceo-bridge" not in enabled_plugins:
+            fail("CEO: brain-ceo-bridge is not enabled")
+        plugin_source = Path(__file__).resolve().parents[1] / (
+            "integrations/hermes/brain-ceo-bridge/tools.py"
+        )
+        if not plugin_source.is_file() or "get_session_env" not in plugin_source.read_text(
+            encoding="utf-8"
+        ):
+            fail("CEO: Brain bridge does not use gateway session context")
+
+    if ceo:
+        kanban = ceo.get("kanban") or {}
+        if kanban.get("auto_subscribe_on_create") is not True:
+            fail("CEO: kanban.auto_subscribe_on_create must be explicitly true")
 
     smoke_name = "BRAIN_SMOKE_INTERPOLATION_7D3B"
     old_value = os.environ.get(smoke_name)
