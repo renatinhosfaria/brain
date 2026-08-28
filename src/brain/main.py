@@ -11,11 +11,15 @@ from .mcp_server import BrainMCPServer
 from .service import BrainService
 
 
-def create_app(settings: BrainSettings | None = None):
-    resolved = settings or BrainSettings.from_env()
+def _configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+
+
+def create_app(settings: BrainSettings | None = None):
+    _configure_logging()
+    resolved = settings or BrainSettings.from_env()
     service = BrainService(resolved)
     startup_health = service.health()
     if startup_health.status != "ok":
@@ -26,6 +30,7 @@ def create_app(settings: BrainSettings | None = None):
 
 
 def main() -> None:
+    _configure_logging()
     settings = BrainSettings.from_env()
     uvicorn.run(
         create_app(settings),

@@ -8,6 +8,7 @@ The service never logs either form.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import secrets
 import tomllib
@@ -18,6 +19,7 @@ from pathlib import Path
 ALLOWED_PROFILES = frozenset({"reno", "famaagent"})
 DEFAULT_STATE_DB = Path("/root/.hermes/state.db")
 DEFAULT_KANBAN_DB = Path("/root/.hermes/kanban.db")
+logger = logging.getLogger("brain.config")
 
 
 def token_digest(token: str) -> str:
@@ -83,6 +85,11 @@ class BrainSettings:
             raise ValueError("Reno and FamaAgent must use distinct credentials")
         object.__setattr__(self, "credentials", normalized)
         if not self.cursor_secret:
+            logger.warning(
+                "BRAIN_CURSOR_SECRET is not configured; generated an ephemeral "
+                "cursor secret. Cursors do not survive restart, and Brain must "
+                "run as a single process."
+            )
             object.__setattr__(self, "cursor_secret", secrets.token_bytes(32))
         if len(self.cursor_secret) < 32:
             raise ValueError("cursor_secret must contain at least 32 bytes")
