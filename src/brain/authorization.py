@@ -29,6 +29,11 @@ class WorkerRequestIdentity:
 
 
 @dataclass(frozen=True)
+class GatewayRequestIdentity:
+    principal: str
+
+
+@dataclass(frozen=True)
 class GatewaySessionContext:
     platform: str
     chat_type: str
@@ -130,6 +135,14 @@ class Authorizer:
         return WorkerRequestIdentity(
             principal=principal.name, task_id=task_header, run_id=run_id
         )
+
+    def parse_gateway_headers(self, headers: Mapping[str, str]) -> GatewayRequestIdentity:
+        principal = self._authenticate(headers)
+        if principal.mode != "gateway":
+            raise BrainError("AUTH_MODE_MISMATCH")
+        if "conversation_phone" not in principal.tools:
+            raise BrainError("AUTH_TOOL_DENIED")
+        return GatewayRequestIdentity(principal=principal.name)
 
     def authorize_worker(
         self,
@@ -235,6 +248,55 @@ class Authorizer:
             task_id=identity.task_id,
             run_id=identity.run_id,
             session_key=session_key,
+            session_ids=session_ids,
+        )
+
+    def authorize_gateway(
+        self,
+        identity: GatewayRequestIdentity,
+        context: GatewaySessionContext,
+    ) -> AuthorizedConversation:
+        def state_gate(conn):
+            session = conn.execute(
+                "SELECT id, session_key, source, chat_id, chat_type "
+                "FROM sessions WHERE id = ?",
+                (context.session_id,),
+            ).fetchone()
+            if session is None:
+                raise BrainError("AUTH_SESSION_MISMATCH")
+            if (
+                session["source"] != context.platform
+                or session["chat_type"] != context.chat_type
+                or session["chat_id"] != context.chat_id
+                or session["session_key"] != context.session_key
+            ):
+                raise BrainError("AUTH_SESSION_MISMATCH")
+
+            longitudinal = conn.execute(
+                "SELECT id, session_key, source, chat_id, chat_type "
+                "FROM sessions WHERE session_key = ? "
+                "ORDER BY started_at ASC, id ASC",
+                (session["session_key"],),
+            ).fetchall()
+            if not longitudinal:
+                raise BrainError("AUTH_ORIGIN_MISSING")
+            if any(
+                row["source"] != "whatsapp" or row["chat_type"] != "dm"
+                for row in longitudinal
+            ):
+                raise BrainError("SCOPE_NOT_WHATSAPP_DM")
+            if any(row["chat_id"] != session["chat_id"] for row in longitudinal):
+                raise BrainError("AUTH_ORIGIN_AMBIGUOUS_ALIAS")
+            return tuple(str(row["id"]) for row in longitudinal)
+
+        session_ids = self.state.read(state_gate)
+        return AuthorizedConversation(
+            principal=identity.principal,
+            mode="gateway",
+            source="whatsapp",
+            chat_type="dm",
+            chat_id=str(context.chat_id),
+            session_key=str(context.session_key),
             session_ids=session_ids,
         )
 

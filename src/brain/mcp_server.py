@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .errors import BrainError
+from .gateway_api import GatewayAPI
 from .service import BrainService
 
 RECENT_SCHEMA = {
@@ -70,6 +71,7 @@ def _tools() -> list[Tool]:
 class BrainMCPServer:
     def __init__(self, service: BrainService) -> None:
         self.service = service
+        self.gateway_api = GatewayAPI(service)
         self.server = Server(
             "brain",
             version="0.1.0",
@@ -123,5 +125,12 @@ class BrainMCPServer:
             json_response=True,
             stateless_http=False,
             host=self.service.settings.host,
-            custom_starlette_routes=[Route("/health", self.health, methods=["GET"])],
+            custom_starlette_routes=[
+                Route("/health", self.health, methods=["GET"]),
+                Route(
+                    "/internal/gateway/conversation-phone",
+                    self.gateway_api.conversation_phone,
+                    methods=["POST"],
+                ),
+            ],
         )

@@ -22,7 +22,7 @@ class BrainError(Exception):
     def public_message(self) -> str:
         if self.unavailable:
             return GENERIC_UNAVAILABLE
-        if self.code == "SEARCH_INVALID":
+        if self.code in {"SEARCH_INVALID", "GATEWAY_REQUEST_INVALID"}:
             return GENERIC_REQUEST
         return GENERIC_DENY
 

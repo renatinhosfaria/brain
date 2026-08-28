@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .authorization import Authorizer, Capability
+from .authorization import (
+    Authorizer,
+    Capability,
+    GatewaySessionContext,
+)
 from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
@@ -243,6 +247,50 @@ class BrainService:
     def conversation_phone(self, capability: Capability) -> dict[str, Any]:
         result, _reason = self._conversation_phone_result(capability)
         return result
+
+    def gateway_conversation_phone(
+        self,
+        headers: Mapping[str, str],
+        context: GatewaySessionContext,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        identity: dict[str, Any] = {
+            "profile": "unknown",
+            "task_id": None,
+            "run_id": None,
+        }
+        try:
+            request_identity = self.authorizer.parse_gateway_headers(headers)
+            identity["profile"] = request_identity.principal
+            capability = self.authorizer.authorize_gateway(request_identity, context)
+            result, reason = self._conversation_phone_result(capability)
+            self._audit(
+                identity=identity,
+                tool="conversation_phone",
+                decision="allow" if result["status"] == "ok" else "unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error=reason if result["status"] != "ok" else None,
+            )
+            return result
+        except BrainError as exc:
+            self._audit(
+                identity=identity,
+                tool="conversation_phone",
+                decision="deny" if not exc.unavailable else "unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error=exc.code,
+            )
+            raise
+        except Exception as exc:
+            logger.exception("brain gateway request failed: %s", type(exc).__name__)
+            self._audit(
+                identity=identity,
+                tool="conversation_phone",
+                decision="unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error="DB_UNAVAILABLE",
+            )
+            raise DatabaseUnavailable() from exc
 
     @staticmethod
     def _validate_limit(
