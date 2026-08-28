@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .config import BrainSettings
+from .config import BrainSettings, PrincipalConfig
 from .db import ReadOnlyDatabase
 from .errors import BrainError
 
@@ -17,19 +17,47 @@ _RUN_RE = re.compile(r"^[0-9]{1,20}$")
 
 
 @dataclass(frozen=True)
-class RequestIdentity:
-    profile: str
+class WorkerRequestIdentity:
+    principal: str
     task_id: str
     run_id: int
+
+    @property
+    def profile(self) -> str:
+        """V1 compatibility alias for audit and cursor callers."""
+        return self.principal
 
 
 @dataclass(frozen=True)
-class Capability:
-    profile: str
-    task_id: str
-    run_id: int
+class GatewaySessionContext:
+    platform: str
+    chat_type: str
+    chat_id: str
+    session_key: str
+    session_id: str
+
+
+@dataclass(frozen=True)
+class AuthorizedConversation:
+    principal: str
+    mode: str
+    source: str
+    chat_type: str
+    chat_id: str
     session_key: str
     session_ids: tuple[str, ...]
+    task_id: str | None = None
+    run_id: int | None = None
+
+    @property
+    def profile(self) -> str:
+        """V1 compatibility alias for the authenticated principal."""
+        return self.principal
+
+
+# Internal V1 imports remain valid while callers migrate to the explicit name.
+RequestIdentity = WorkerRequestIdentity
+Capability = AuthorizedConversation
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
@@ -58,34 +86,39 @@ class Authorizer:
         self.state = state
         self.kanban = kanban
 
-    def parse_headers(self, headers: Mapping[str, str]) -> RequestIdentity:
+    def _authenticate(self, headers: Mapping[str, str]) -> PrincipalConfig:
         authorization = _header(headers, "Authorization")
-        task_header = _header(headers, "X-Hermes-Task")
-        run_header = _header(headers, "X-Hermes-Run")
-
-        # This check intentionally precedes token parsing and all DB access.
-        if any(
-            _has_placeholder(value)
-            for value in (authorization, task_header, run_header)
-        ):
+        if _has_placeholder(authorization):
             raise BrainError("AUTH_UNRESOLVED_PLACEHOLDER")
-
         if not authorization or not authorization.lower().startswith("bearer "):
             raise BrainError("AUTH_INVALID_TOKEN")
         token = authorization[7:]
         if not _visible(token, 4096) or any(char.isspace() for char in token):
             raise BrainError("AUTH_INVALID_TOKEN")
         presented_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        profile = next(
+        principal = next(
             (
-                candidate
-                for candidate, expected in self.settings.credentials.items()
-                if hmac.compare_digest(presented_digest, expected)
+                configured
+                for configured in self.settings.principals.values()
+                if hmac.compare_digest(presented_digest, configured.token_sha256)
             ),
             None,
         )
-        if profile is None:
+        if principal is None:
             raise BrainError("AUTH_INVALID_TOKEN")
+        return principal
+
+    def parse_worker_headers(self, headers: Mapping[str, str]) -> WorkerRequestIdentity:
+        task_header = _header(headers, "X-Hermes-Task")
+        run_header = _header(headers, "X-Hermes-Run")
+
+        # This check intentionally precedes token parsing and all DB access.
+        if any(_has_placeholder(value) for value in (task_header, run_header)):
+            raise BrainError("AUTH_UNRESOLVED_PLACEHOLDER")
+
+        principal = self._authenticate(headers)
+        if principal.mode != "worker":
+            raise BrainError("AUTH_MODE_MISMATCH")
 
         if task_header is None or not _visible(task_header, 256):
             raise BrainError("AUTH_TASK_INVALID")
@@ -94,11 +127,13 @@ class Authorizer:
         run_id = int(run_header)
         if run_id <= 0:
             raise BrainError("AUTH_RUN_MISMATCH")
-        return RequestIdentity(profile=profile, task_id=task_header, run_id=run_id)
+        return WorkerRequestIdentity(
+            principal=principal.name, task_id=task_header, run_id=run_id
+        )
 
-    def authorize_identity(
+    def authorize_worker(
         self,
-        identity: RequestIdentity,
+        identity: WorkerRequestIdentity,
         audit_identity: dict[str, object] | None = None,
     ) -> Capability:
         def kanban_gate(conn):
@@ -114,7 +149,7 @@ class Authorizer:
             if audit_identity is not None:
                 audit_identity["task_id"] = str(task["id"])
                 audit_identity["run_id"] = identity.run_id
-            if task["assignee"] != identity.profile:
+            if task["assignee"] != identity.principal:
                 raise BrainError("AUTH_PROFILE_MISMATCH")
             if task["status"] != "running":
                 raise BrainError("AUTH_TASK_NOT_RUNNING")
@@ -191,20 +226,36 @@ class Authorizer:
             return session_key, ids
 
         session_key, session_ids = self.state.read(state_gate)
-        return Capability(
-            profile=identity.profile,
+        return AuthorizedConversation(
+            principal=identity.principal,
+            mode="worker",
+            source="whatsapp",
+            chat_type="dm",
+            chat_id=chat_id,
             task_id=identity.task_id,
             run_id=identity.run_id,
             session_key=session_key,
             session_ids=session_ids,
         )
 
+    def parse_headers(self, headers: Mapping[str, str]) -> WorkerRequestIdentity:
+        """V1 compatibility alias for the explicit worker parser."""
+        return self.parse_worker_headers(headers)
+
+    def authorize_identity(
+        self,
+        identity: WorkerRequestIdentity,
+        audit_identity: dict[str, object] | None = None,
+    ) -> Capability:
+        """V1 compatibility alias for worker authorization."""
+        return self.authorize_worker(identity, audit_identity)
+
     def authorize(
         self,
         headers: Mapping[str, str],
         audit_identity: dict[str, object] | None = None,
     ) -> Capability:
-        identity = self.parse_headers(headers)
+        identity = self.parse_worker_headers(headers)
         if audit_identity is not None:
-            audit_identity["profile"] = identity.profile
-        return self.authorize_identity(identity, audit_identity)
+            audit_identity["profile"] = identity.principal
+        return self.authorize_worker(identity, audit_identity)

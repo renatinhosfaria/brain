@@ -10,15 +10,24 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import secrets
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
-ALLOWED_PROFILES = frozenset({"reno", "famaagent"})
 DEFAULT_STATE_DB = Path("/root/.hermes/state.db")
 DEFAULT_KANBAN_DB = Path("/root/.hermes/kanban.db")
+DEFAULT_WHATSAPP_SESSION_DIR = Path(
+    "/root/.hermes/platforms/whatsapp/session"
+)
+VALID_MODES = frozenset({"worker", "gateway"})
+VALID_TOOLS = frozenset(
+    {"conversation_recent", "conversation_search", "conversation_phone"}
+)
+_PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 logger = logging.getLogger("brain.config")
 
 
@@ -27,7 +36,7 @@ def token_digest(token: str) -> str:
 
 
 def _valid_digest(value: str) -> bool:
-    if len(value) != 64:
+    if not isinstance(value, str) or len(value) != 64:
         return False
     try:
         int(value, 16)
@@ -37,13 +46,36 @@ def _valid_digest(value: str) -> bool:
 
 
 @dataclass(frozen=True)
+class PrincipalConfig:
+    name: str
+    mode: Literal["worker", "gateway"] | str
+    token_sha256: str
+    tools: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not _PRINCIPAL_RE.fullmatch(self.name):
+            raise ValueError("principal name is invalid")
+        if self.mode not in VALID_MODES:
+            raise ValueError("principal mode must be worker or gateway")
+        if not _valid_digest(self.token_sha256):
+            raise ValueError(f"invalid credential digest for {self.name}")
+        normalized_digest = self.token_sha256.lower()
+        object.__setattr__(self, "token_sha256", normalized_digest)
+        if not isinstance(self.tools, frozenset):
+            object.__setattr__(self, "tools", frozenset(self.tools))
+        if not self.tools or not self.tools.issubset(VALID_TOOLS):
+            raise ValueError(f"invalid tool allowlist for {self.name}")
+
+
+@dataclass(frozen=True)
 class BrainSettings:
     state_db: Path = DEFAULT_STATE_DB
     kanban_db: Path = DEFAULT_KANBAN_DB
+    whatsapp_session_dir: Path = DEFAULT_WHATSAPP_SESSION_DIR
     board: str = "default"
     host: str = "127.0.0.1"
     port: int = 8765
-    credentials: Mapping[str, str] = field(default_factory=dict)
+    principals: Mapping[str, PrincipalConfig] = field(default_factory=dict)
     cursor_secret: bytes = b""
     history_budget_chars: int = 12_000
     message_max_chars: int = 2_000
@@ -65,25 +97,27 @@ class BrainSettings:
             raise ValueError("busy_retries must be between 0 and 5")
         if self.busy_timeout_seconds <= 0:
             raise ValueError("busy_timeout_seconds must be positive")
-        if not self.credentials:
-            raise ValueError("reno and famaagent credentials are required")
-        if set(self.credentials) != ALLOWED_PROFILES:
-            raise ValueError("V1 credentials must contain exactly reno and famaagent")
-        digests = []
-        normalized: dict[str, str] = {}
-        for profile, digest in self.credentials.items():
-            if (
-                profile not in ALLOWED_PROFILES
-                or not isinstance(digest, str)
-                or not _valid_digest(digest)
-            ):
-                raise ValueError(f"invalid credential digest for {profile}")
-            normalized_digest = digest.lower()
-            normalized[profile] = normalized_digest
-            digests.append(normalized_digest)
-        if digests[0] == digests[1]:
-            raise ValueError("Reno and FamaAgent must use distinct credentials")
-        object.__setattr__(self, "credentials", normalized)
+        if not self.principals:
+            raise ValueError("at least one Brain principal is required")
+        normalized: dict[str, PrincipalConfig] = {}
+        for name, principal in self.principals.items():
+            if name != principal.name:
+                raise ValueError("principal mapping key does not match its name")
+            normalized[name] = principal
+        gateway_names = [
+            principal.name
+            for principal in normalized.values()
+            if principal.mode == "gateway"
+        ]
+        if gateway_names != ["default"]:
+            raise ValueError("exactly one gateway principal named default is required")
+        digests = [principal.token_sha256 for principal in normalized.values()]
+        if len(set(digests)) != len(digests):
+            raise ValueError("Brain principals must use distinct credentials")
+        object.__setattr__(self, "principals", normalized)
+        object.__setattr__(self, "state_db", Path(self.state_db))
+        object.__setattr__(self, "kanban_db", Path(self.kanban_db))
+        object.__setattr__(self, "whatsapp_session_dir", Path(self.whatsapp_session_dir))
         if not self.cursor_secret:
             logger.warning(
                 "BRAIN_CURSOR_SECRET is not configured; generated an ephemeral "
@@ -106,18 +140,29 @@ class BrainSettings:
                 raw = tomllib.load(handle)
 
         server = raw.get("server", {})
-        profiles = raw.get("profiles", {})
+        principals_raw = raw.get("principals", {})
 
-        credentials: dict[str, str] = {}
-        for profile in sorted(ALLOWED_PROFILES):
-            env_hash = os.environ.get(f"BRAIN_{profile.upper()}_TOKEN_HASH")
-            env_raw = os.environ.get(f"BRAIN_{profile.upper()}_TOKEN")
-            configured = profiles.get(profile, {})
+        principals: dict[str, PrincipalConfig] = {}
+        for name in sorted(principals_raw):
+            configured = principals_raw.get(name, {})
+            if not isinstance(configured, Mapping):
+                raise ValueError(f"invalid configuration for principal {name}")
+            env_name = re.sub(r"[^A-Za-z0-9]", "_", str(name).upper())
+            env_hash = os.environ.get(f"BRAIN_{env_name}_TOKEN_HASH")
+            env_raw = os.environ.get(f"BRAIN_{env_name}_TOKEN")
+            if name == "default":
+                env_hash = env_hash or os.environ.get("BRAIN_GATEWAY_TOKEN_HASH")
+                env_raw = env_raw or os.environ.get("BRAIN_GATEWAY_TOKEN")
             digest = env_hash or configured.get("token_sha256")
             if digest is None and env_raw:
                 digest = token_digest(env_raw)
             if digest:
-                credentials[profile] = str(digest).lower()
+                principals[name] = PrincipalConfig(
+                    name=str(name),
+                    mode=str(configured.get("mode", "")),
+                    token_sha256=str(digest),
+                    tools=frozenset(str(tool) for tool in configured.get("tools", [])),
+                )
 
         cursor_value = os.environ.get("BRAIN_CURSOR_SECRET") or server.get(
             "cursor_secret"
@@ -139,12 +184,18 @@ class BrainSettings:
                     "BRAIN_KANBAN_DB", server.get("kanban_db", DEFAULT_KANBAN_DB)
                 )
             ),
+            whatsapp_session_dir=Path(
+                os.environ.get(
+                    "BRAIN_WHATSAPP_SESSION_DIR",
+                    server.get("whatsapp_session_dir", DEFAULT_WHATSAPP_SESSION_DIR),
+                )
+            ),
             board=str(
                 os.environ.get("BRAIN_KANBAN_BOARD", server.get("board", "default"))
             ),
             host=str(os.environ.get("BRAIN_HOST", server.get("host", "127.0.0.1"))),
             port=int(os.environ.get("BRAIN_PORT", server.get("port", 8765))),
-            credentials=credentials,
+            principals=principals,
             cursor_secret=cursor_secret,
             history_budget_chars=int(
                 os.environ.get(

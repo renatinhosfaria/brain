@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from mcp.types import CallToolRequestParams
 
-from brain.config import BrainSettings, token_digest
+from brain.config import BrainSettings, PrincipalConfig, token_digest
 from brain.db import ReadOnlyDatabase
 from brain.errors import BrainError
 from brain.mcp_server import BrainMCPServer, _tools
@@ -31,14 +31,45 @@ class BrainFixture(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.state_path = root / "state.db"
         self.kanban_path = root / "kanban.db"
+        self.mapping_dir = root / "whatsapp-session"
+        self.mapping_dir.mkdir()
         self._create_state()
         self._create_kanban()
         self.settings = BrainSettings(
             state_db=self.state_path,
             kanban_db=self.kanban_path,
-            credentials={
-                "reno": token_digest("reno-secret"),
-                "famaagent": token_digest("fama-secret"),
+            whatsapp_session_dir=self.mapping_dir,
+            principals={
+                "default": PrincipalConfig(
+                    "default",
+                    "gateway",
+                    token_digest("gateway-secret"),
+                    frozenset({"conversation_phone"}),
+                ),
+                "porteiro": PrincipalConfig(
+                    "porteiro",
+                    "worker",
+                    token_digest("porteiro-secret"),
+                    frozenset({"conversation_phone"}),
+                ),
+                "cadastro": PrincipalConfig(
+                    "cadastro",
+                    "worker",
+                    token_digest("cadastro-secret"),
+                    frozenset({"conversation_phone"}),
+                ),
+                "reno": PrincipalConfig(
+                    "reno",
+                    "worker",
+                    token_digest("reno-secret"),
+                    frozenset({"conversation_recent", "conversation_search"}),
+                ),
+                "famaagent": PrincipalConfig(
+                    "famaagent",
+                    "worker",
+                    token_digest("fama-secret"),
+                    frozenset({"conversation_recent", "conversation_search"}),
+                ),
             },
             cursor_secret=b"c" * 32,
             history_budget_chars=1_000,
@@ -54,7 +85,7 @@ class BrainFixture(unittest.TestCase):
             settings = BrainSettings(
                 state_db=self.state_path,
                 kanban_db=self.kanban_path,
-                credentials=self.settings.credentials,
+                principals=self.settings.principals,
             )
 
         self.assertEqual(len(settings.cursor_secret), 32)
@@ -102,6 +133,14 @@ class BrainFixture(unittest.TestCase):
                     "wa:b",
                     "whatsapp",
                     "5511888880000@s.whatsapp.net",
+                    "dm",
+                    1.0,
+                ),
+                (
+                    "g-one",
+                    "wa:g",
+                    "whatsapp",
+                    "123456789012345@lid",
                     "dm",
                     1.0,
                 ),
@@ -171,6 +210,8 @@ class BrainFixture(unittest.TestCase):
                 ("task-a", "reno", "running", 101, "a-new"),
                 ("task-b", "reno", "running", 102, "b-one"),
                 ("task-f", "famaagent", "running", 103, "a-new"),
+                ("task-p", "porteiro", "running", 104, "a-new"),
+                ("task-c", "cadastro", "running", 105, "a-new"),
             ],
         )
         conn.executemany(
@@ -179,6 +220,8 @@ class BrainFixture(unittest.TestCase):
                 (101, "task-a", "running"),
                 (102, "task-b", "running"),
                 (103, "task-f", "running"),
+                (104, "task-p", "running"),
+                (105, "task-c", "running"),
             ],
         )
         conn.executemany(
@@ -187,6 +230,8 @@ class BrainFixture(unittest.TestCase):
                 ("task-a", "5511999990000@s.whatsapp.net"),
                 ("task-b", "5511888880000@s.whatsapp.net"),
                 ("task-f", "5511999990000@s.whatsapp.net"),
+                ("task-p", "5511999990000@s.whatsapp.net"),
+                ("task-c", "5511999990000@s.whatsapp.net"),
             ],
         )
         conn.commit()
@@ -270,11 +315,33 @@ class BrainFixture(unittest.TestCase):
             )
         self.assertEqual(cross_profile.exception.code, "AUTH_PROFILE_MISMATCH")
 
+    def test_porteiro_worker_capability_contains_trusted_chat_id(self) -> None:
+        identity = self.service.authorizer.parse_worker_headers(
+            self.headers(token="porteiro-secret", task="task-p", run="104")
+        )
+        capability = self.service.authorizer.authorize_worker(identity)
+        self.assertEqual(capability.principal, "porteiro")
+        self.assertEqual(capability.chat_id, "5511999990000@s.whatsapp.net")
+
+    def test_gateway_principal_cannot_use_worker_headers(self) -> None:
+        with self.assertRaises(BrainError) as denied:
+            self.service.call_tool(
+                "conversation_recent", {}, self.headers(token="gateway-secret")
+            )
+        self.assertEqual(denied.exception.code, "AUTH_MODE_MISMATCH")
+
+    def test_worker_tool_acl_denies_phone_to_reno(self) -> None:
+        with self.assertRaises(BrainError) as denied:
+            self.service.call_tool(
+                "conversation_phone", {}, self.headers(token="reno-secret")
+            )
+        self.assertEqual(denied.exception.code, "AUTH_TOOL_DENIED")
+
     def test_placeholder_is_rejected_before_db_access(self) -> None:
         settings = BrainSettings(
             state_db=Path(self.temp_dir.name) / "missing-state.db",
             kanban_db=Path(self.temp_dir.name) / "missing-kanban.db",
-            credentials=self.settings.credentials,
+            principals=self.settings.principals,
             cursor_secret=b"d" * 32,
         )
         service = BrainService(settings)
@@ -294,7 +361,7 @@ class BrainFixture(unittest.TestCase):
         settings = BrainSettings(
             state_db=Path(self.temp_dir.name) / "missing-state.db",
             kanban_db=Path(self.temp_dir.name) / "missing-kanban.db",
-            credentials=self.settings.credentials,
+            principals=self.settings.principals,
             cursor_secret=b"f" * 32,
         )
         service = BrainService(settings)
@@ -376,9 +443,9 @@ class BrainFixture(unittest.TestCase):
         conn.close()
         conn = sqlite3.connect(self.kanban_path)
         conn.execute(
-            "INSERT INTO tasks VALUES ('task-group', 'reno', 'running', 104, 'group-one')"
+            "INSERT INTO tasks VALUES ('task-group', 'reno', 'running', 204, 'group-one')"
         )
-        conn.execute("INSERT INTO task_runs VALUES (104, 'task-group', 'running')")
+        conn.execute("INSERT INTO task_runs VALUES (204, 'task-group', 'running')")
         conn.execute(
             "INSERT INTO kanban_notify_subs VALUES ('task-group', 'whatsapp', 'group@g.us', 'dm', 'default')"
         )
@@ -386,7 +453,7 @@ class BrainFixture(unittest.TestCase):
         conn.close()
         with self.assertRaises(BrainError) as denied:
             self.service.call_tool(
-                "conversation_recent", {}, self.headers(task="task-group", run="104")
+                "conversation_recent", {}, self.headers(task="task-group", run="204")
             )
         self.assertEqual(denied.exception.code, "SCOPE_NOT_WHATSAPP_DM")
 
@@ -441,7 +508,7 @@ class BrainFixture(unittest.TestCase):
         settings = BrainSettings(
             state_db=incomplete,
             kanban_db=self.kanban_path,
-            credentials=self.settings.credentials,
+            principals=self.settings.principals,
             cursor_secret=b"e" * 32,
         )
         self.assertEqual(BrainService(settings).health().status, "unavailable")
@@ -923,7 +990,7 @@ class BrainFixture(unittest.TestCase):
         with self.assertRaises(ValueError):
             BrainSettings(
                 board="other",
-                credentials=self.settings.credentials,
+                principals=self.settings.principals,
                 cursor_secret=b"z" * 32,
             )
 

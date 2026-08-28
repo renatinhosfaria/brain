@@ -128,15 +128,22 @@ class BrainService:
             "run_id": None,
         }
         try:
-            request_identity = self.authorizer.parse_headers(headers)
+            request_identity = self.authorizer.parse_worker_headers(headers)
             identity["profile"] = request_identity.profile
-            if tool not in {"conversation_recent", "conversation_search"}:
+            if tool not in {
+                "conversation_recent",
+                "conversation_search",
+                "conversation_phone",
+            }:
                 raise BrainError("AUTH_TASK_INVALID")
+            principal = self.settings.principals[request_identity.principal]
+            if tool not in principal.tools:
+                raise BrainError("AUTH_TOOL_DENIED")
             if not isinstance(arguments, Mapping) or FORBIDDEN_ARGUMENTS.intersection(
                 arguments
             ):
                 raise BrainError("AUTH_TASK_INVALID")
-            capability = self.authorizer.authorize_identity(request_identity, identity)
+            capability = self.authorizer.authorize_worker(request_identity, identity)
             identity.update(
                 profile=capability.profile,
                 task_id=capability.task_id,
