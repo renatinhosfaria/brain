@@ -26,6 +26,7 @@ _REQUIRED_SESSION_FIELDS = (
 )
 _PHONE_RE = re.compile(r"^[1-9][0-9]{6,14}$")
 _MAX_RESPONSE_BYTES = 16_384
+_HTTP_TIMEOUT_SECONDS = 5.0
 
 
 def _unavailable() -> str:
@@ -104,7 +105,7 @@ def conversation_phone(args: dict, **kwargs: Any) -> str:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
             if len(raw) > _MAX_RESPONSE_BYTES:
                 return _unavailable()

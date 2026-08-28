@@ -155,9 +155,27 @@ class CEOBridgePluginTests(unittest.TestCase):
                 "chat_id": "implicit@lid",
                 "session_key": "wa:implicit",
                 "session_id": "implicit",
-                "timeout": 2,
+                "timeout": 5.0,
             },
         )
+
+    def test_handler_allows_observed_latency_budget_without_sleep(self) -> None:
+        self.bind_context(self.context_values_for("latency"))
+        timeouts: list[float] = []
+
+        def opener(_request, timeout):
+            timeouts.append(timeout)
+            if timeout < 2.52:
+                raise TimeoutError
+            return _Response(b'{"status":"ok","phone":"5534999772714"}')
+
+        with patch.object(self.tools.urllib.request, "urlopen", opener):
+            result = json.loads(
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
+            )
+
+        self.assertEqual(result, {"status": "ok", "phone": "5534999772714"})
+        self.assertGreaterEqual(timeouts[0], 2.52)
 
     def test_handler_accepts_explicit_default_profile_and_attempts_post(self) -> None:
         self.bind_context(self.context_values_for("explicit"))
