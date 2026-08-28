@@ -124,8 +124,12 @@ class CEOBridgePluginTests(unittest.TestCase):
         )
         self.assertEqual(context.calls[0]["requires_env"], ["BRAIN_GATEWAY_TOKEN"])
 
-    def test_handler_reads_contextvars_and_calls_fixed_endpoint(self) -> None:
-        self.bind_context(self.context_values_for("a"))
+    def test_handler_accepts_implicit_default_profile_and_calls_fixed_endpoint(
+        self,
+    ) -> None:
+        values = self.context_values_for("implicit")
+        values["HERMES_SESSION_PROFILE"] = ""
+        self.bind_context(values)
         requests: list[tuple[str, dict]] = []
 
         def opener(request, timeout):
@@ -148,12 +152,57 @@ class CEOBridgePluginTests(unittest.TestCase):
             {
                 "platform": "whatsapp",
                 "chat_type": "dm",
-                "chat_id": "a@lid",
-                "session_key": "wa:a",
-                "session_id": "a",
+                "chat_id": "implicit@lid",
+                "session_key": "wa:implicit",
+                "session_id": "implicit",
                 "timeout": 2,
             },
         )
+
+    def test_handler_accepts_explicit_default_profile_and_attempts_post(self) -> None:
+        self.bind_context(self.context_values_for("explicit"))
+
+        with patch.object(
+            self.tools.urllib.request,
+            "urlopen",
+            return_value=_Response(
+                b'{"status":"unavailable","reason":"phone_not_resolved"}'
+            ),
+        ) as opener:
+            result = json.loads(
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
+            )
+
+        self.assertEqual(
+            result, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
+        opener.assert_called_once()
+
+    def test_handler_rejects_named_profile_without_network(self) -> None:
+        values = self.context_values_for("named")
+        values["HERMES_SESSION_PROFILE"] = "porteiro"
+        self.assert_unavailable_without_post(values)
+
+    def test_handler_rejects_empty_required_fields_without_network(self) -> None:
+        for field in (
+            "HERMES_SESSION_CHAT_ID",
+            "HERMES_SESSION_KEY",
+            "HERMES_SESSION_ID",
+        ):
+            with self.subTest(field=field):
+                values = self.context_values_for(field.removeprefix("HERMES_SESSION_"))
+                values[field] = ""
+                self.assert_unavailable_without_post(values)
+
+    def test_handler_rejects_wrong_platform_without_network(self) -> None:
+        values = self.context_values_for("telegram")
+        values["HERMES_SESSION_PLATFORM"] = "telegram"
+        self.assert_unavailable_without_post(values)
+
+    def test_handler_rejects_wrong_chat_type_without_network(self) -> None:
+        values = self.context_values_for("group")
+        values["HERMES_SESSION_CHAT_TYPE"] = "group"
+        self.assert_unavailable_without_post(values)
 
     def test_handler_rejects_nonempty_args_and_invalid_context(self) -> None:
         self.bind_context(self.context_values_for("a"))
@@ -175,6 +224,19 @@ class CEOBridgePluginTests(unittest.TestCase):
         )
         self.assertEqual(
             wrong_platform, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
+
+    def assert_unavailable_without_post(self, values: dict[str, str]) -> None:
+        self.bind_context(values)
+        opener = lambda *_args, **_kwargs: self.fail("network must not be called")
+
+        with patch.object(self.tools.urllib.request, "urlopen", opener):
+            result = json.loads(
+                self.tools.conversation_phone({}, BRAIN_GATEWAY_TOKEN="gateway-secret")
+            )
+
+        self.assertEqual(
+            result, {"status": "unavailable", "reason": "phone_not_resolved"}
         )
 
     def test_handler_returns_unavailable_for_missing_secret_timeout_or_bad_response(

@@ -17,6 +17,13 @@ _SESSION_FIELDS = (
     "HERMES_SESSION_ID",
     "HERMES_SESSION_PROFILE",
 )
+_REQUIRED_SESSION_FIELDS = (
+    "HERMES_SESSION_PLATFORM",
+    "HERMES_SESSION_CHAT_TYPE",
+    "HERMES_SESSION_CHAT_ID",
+    "HERMES_SESSION_KEY",
+    "HERMES_SESSION_ID",
+)
 _PHONE_RE = re.compile(r"^[1-9][0-9]{6,14}$")
 _MAX_RESPONSE_BYTES = 16_384
 
@@ -43,13 +50,13 @@ def _session_context() -> dict[str, str] | None:
     from gateway.session_context import get_session_env
 
     values = {name: get_session_env(name, "") for name in _SESSION_FIELDS}
-    if any(not _safe_context_value(value) for value in values.values()):
+    if any(not _safe_context_value(values[name]) for name in _REQUIRED_SESSION_FIELDS):
+        return None
+    if values["HERMES_SESSION_PROFILE"] not in ("", "default"):
         return None
     if values["HERMES_SESSION_PLATFORM"] != "whatsapp":
         return None
     if values["HERMES_SESSION_CHAT_TYPE"] != "dm":
-        return None
-    if values["HERMES_SESSION_PROFILE"] != "default":
         return None
     return {
         "platform": values["HERMES_SESSION_PLATFORM"],
