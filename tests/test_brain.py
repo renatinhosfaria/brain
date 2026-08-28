@@ -254,6 +254,8 @@ class BrainFixture(unittest.TestCase):
                 "status": "ok",
                 "hermes_state_db": "ok",
                 "hermes_kanban_db": "ok",
+                "whatsapp_identity": "compatible",
+                "gateway_bridge": "configured",
                 "schema": "compatible",
             },
         )
@@ -336,6 +338,81 @@ class BrainFixture(unittest.TestCase):
                 "conversation_phone", {}, self.headers(token="reno-secret")
             )
         self.assertEqual(denied.exception.code, "AUTH_TOOL_DENIED")
+
+    def _move_task_p_to_gateway_fixture_session(self) -> None:
+        conn = sqlite3.connect(self.kanban_path)
+        conn.execute("UPDATE tasks SET session_id='g-one' WHERE id='task-p'")
+        conn.execute(
+            "UPDATE kanban_notify_subs SET chat_id='123456789012345@lid' "
+            "WHERE task_id='task-p'"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_porteiro_phone_tool_returns_verified_phone(self) -> None:
+        self._move_task_p_to_gateway_fixture_session()
+        (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(
+            '"123456789012345"', encoding="utf-8"
+        )
+
+        result = self.service.call_tool(
+            "conversation_phone",
+            {},
+            self.headers(token="porteiro-secret", task="task-p", run="104"),
+        )
+
+        self.assertEqual(result, {"status": "ok", "phone": "5534999772714"})
+
+    def test_phone_mapping_failure_is_publicly_sanitized(self) -> None:
+        self._move_task_p_to_gateway_fixture_session()
+
+        result = self.service.call_tool(
+            "conversation_phone",
+            {},
+            self.headers(token="porteiro-secret", task="task-p", run="104"),
+        )
+
+        self.assertEqual(
+            result, {"status": "unavailable", "reason": "phone_not_resolved"}
+        )
+
+    def test_phone_schema_has_no_identity_properties(self) -> None:
+        phone = next(tool for tool in _tools() if tool.name == "conversation_phone")
+        self.assertEqual(
+            phone.model_dump(mode="json", by_alias=True)["inputSchema"],
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        )
+
+    def test_health_exposes_v2_identity_and_gateway_status(self) -> None:
+        self.assertEqual(
+            self.service.health().as_dict(),
+            {
+                "status": "ok",
+                "hermes_state_db": "ok",
+                "hermes_kanban_db": "ok",
+                "whatsapp_identity": "compatible",
+                "gateway_bridge": "configured",
+                "schema": "compatible",
+            },
+        )
+
+    def test_health_fails_when_identity_directory_is_unavailable(self) -> None:
+        settings = BrainSettings(
+            state_db=self.state_path,
+            kanban_db=self.kanban_path,
+            whatsapp_session_dir=Path(self.temp_dir.name) / "missing-mappings",
+            principals=self.settings.principals,
+            cursor_secret=b"m" * 32,
+        )
+
+        health = BrainService(settings).health()
+
+        self.assertEqual(health.status, "unavailable")
+        self.assertEqual(health.whatsapp_identity, "incompatible")
 
     def test_placeholder_is_rejected_before_db_access(self) -> None:
         settings = BrainSettings(
@@ -474,7 +551,7 @@ class BrainFixture(unittest.TestCase):
         tools = _tools()
         self.assertEqual(
             {tool.name for tool in tools},
-            {"conversation_recent", "conversation_search"},
+            {"conversation_recent", "conversation_search", "conversation_phone"},
         )
         forbidden = {
             "phone",
@@ -980,7 +1057,14 @@ class BrainFixture(unittest.TestCase):
     def test_health_route_returns_503_for_incompatible_schema(self) -> None:
         class UnhealthyService:
             def health(self):
-                return Health("unavailable", "ok", "ok", "incompatible")
+                return Health(
+                    "unavailable",
+                    "ok",
+                    "ok",
+                    "compatible",
+                    "configured",
+                    "incompatible",
+                )
 
         server = BrainMCPServer(UnhealthyService())  # type: ignore[arg-type]
         response = asyncio.run(server.health(None))  # type: ignore[arg-type]

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import sqlite3
 import time
 import unicodedata
@@ -20,6 +21,7 @@ from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
 from .projection import ProjectedMessage, project_rows
+from .whatsapp_identity import PhoneResolution, resolve_phone
 
 logger = logging.getLogger("brain.audit")
 CURSOR_VERSION = 1
@@ -45,6 +47,8 @@ class Health:
     status: str
     hermes_state_db: str
     hermes_kanban_db: str
+    whatsapp_identity: str
+    gateway_bridge: str
     schema: str
 
     def as_dict(self) -> dict[str, str]:
@@ -52,6 +56,8 @@ class Health:
             "status": self.status,
             "hermes_state_db": self.hermes_state_db,
             "hermes_kanban_db": self.hermes_kanban_db,
+            "whatsapp_identity": self.whatsapp_identity,
+            "gateway_bridge": self.gateway_bridge,
             "schema": self.schema,
         }
 
@@ -76,11 +82,31 @@ class BrainService:
         state_ok = self._db_openable(self.state)
         kanban_ok = self._db_openable(self.kanban)
         schema_ok = state_ok and kanban_ok and self.schema.check()
+        identity_ok = self._identity_directory_compatible()
+        gateway_ok = self._gateway_bridge_configured()
         return Health(
-            status="ok" if schema_ok else "unavailable",
+            status="ok" if schema_ok and identity_ok and gateway_ok else "unavailable",
             hermes_state_db="ok" if state_ok else "unavailable",
             hermes_kanban_db="ok" if kanban_ok else "unavailable",
+            whatsapp_identity="compatible" if identity_ok else "incompatible",
+            gateway_bridge="configured" if gateway_ok else "unconfigured",
             schema="compatible" if schema_ok else "incompatible",
+        )
+
+    def _identity_directory_compatible(self) -> bool:
+        path = self.settings.whatsapp_session_dir
+        return (
+            not path.is_symlink()
+            and path.is_dir()
+            and os.access(path, os.R_OK | os.X_OK)
+        )
+
+    def _gateway_bridge_configured(self) -> bool:
+        gateway = self.settings.principals.get("default")
+        return bool(
+            gateway
+            and gateway.mode == "gateway"
+            and "conversation_phone" in gateway.tools
         )
 
     @staticmethod
@@ -160,6 +186,16 @@ class BrainService:
                     message_count=count,
                 )
                 return result
+            if tool == "conversation_phone":
+                result, reason = self._conversation_phone_result(capability)
+                self._audit(
+                    identity=identity,
+                    tool=tool,
+                    decision="allow" if result["status"] == "ok" else "unavailable",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    error=reason if result["status"] != "ok" else None,
+                )
+                return result
             result = self.conversation_search(capability, arguments)
             self._audit(
                 identity=identity,
@@ -189,6 +225,24 @@ class BrainService:
                 error="DB_UNAVAILABLE",
             )
             raise DatabaseUnavailable() from exc
+
+    @staticmethod
+    def _public_phone_result(resolution: PhoneResolution) -> dict[str, Any]:
+        if resolution.status == "ok":
+            return {"status": "ok", "phone": resolution.phone}
+        return {"status": "unavailable", "reason": "phone_not_resolved"}
+
+    def _conversation_phone_result(
+        self, capability: Capability
+    ) -> tuple[dict[str, Any], str]:
+        resolution = resolve_phone(
+            capability.chat_id, self.settings.whatsapp_session_dir
+        )
+        return self._public_phone_result(resolution), resolution.reason
+
+    def conversation_phone(self, capability: Capability) -> dict[str, Any]:
+        result, _reason = self._conversation_phone_result(capability)
+        return result
 
     @staticmethod
     def _validate_limit(

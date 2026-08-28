@@ -38,7 +38,7 @@ def _parse_mapping_file(path: Path, filename: str) -> tuple[str, str]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("mapping file is unreadable or invalid JSON") from exc
     if not isinstance(payload, str):
-        raise ValueError("mapping value must be a JSON string")
+        raise TypeError("mapping value must be a JSON string")
 
     forward = _FORWARD_FILE_RE.fullmatch(filename)
     if forward:
@@ -106,7 +106,7 @@ def resolve_phone(chat_id: str, mapping_dir: Path) -> PhoneResolution:
     requested_lid = lid_match.group("lid")
     try:
         observations = _load_mappings(Path(mapping_dir), requested_lid)
-    except ValueError:
+    except (TypeError, ValueError):
         return _unavailable("PHONE_MAPPING_INVALID")
 
     phones = observations[requested_lid]

@@ -146,7 +146,7 @@ class BrainSettings:
         for name in sorted(principals_raw):
             configured = principals_raw.get(name, {})
             if not isinstance(configured, Mapping):
-                raise ValueError(f"invalid configuration for principal {name}")
+                raise TypeError(f"invalid configuration for principal {name}")
             env_name = re.sub(r"[^A-Za-z0-9]", "_", str(name).upper())
             env_hash = os.environ.get(f"BRAIN_{env_name}_TOKEN_HASH")
             env_raw = os.environ.get(f"BRAIN_{env_name}_TOKEN")

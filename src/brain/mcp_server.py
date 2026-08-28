@@ -1,4 +1,4 @@
-"""MCP Streamable HTTP adapter with exactly two model-visible tools."""
+"""MCP Streamable HTTP adapter with exactly three model-visible tools."""
 
 from __future__ import annotations
 
@@ -40,6 +40,12 @@ SEARCH_SCHEMA = {
     "additionalProperties": False,
 }
 
+PHONE_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
 
 def _tools() -> list[Tool]:
     return [
@@ -52,6 +58,11 @@ def _tools() -> list[Tool]:
             name="conversation_search",
             description="Search facts inside the already authorized WhatsApp DM.",
             inputSchema=SEARCH_SCHEMA,
+        ),
+        Tool(
+            name="conversation_phone",
+            description="Resolve the verified transport phone for the authorized WhatsApp DM.",
+            inputSchema=PHONE_SCHEMA,
         ),
     ]
 
