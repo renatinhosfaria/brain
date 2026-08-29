@@ -1,0 +1,378 @@
+from __future__ import annotations
+
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+
+from brain.config import BrainSettings, PrincipalConfig, token_digest
+from brain.db import ReadOnlyDatabase
+from brain.runtime_db import RuntimeDatabase
+from brain.service import BrainService
+from brain.transport_models import RuntimeIds
+
+BUSINESS_TABLES = {
+    "transport_events",
+    "whatsapp_turns",
+    "turn_events",
+    "kanban_bindings",
+    "lead_lifecycles",
+    "lifecycle_facts",
+    "lifecycle_effects",
+    "contact_ephemera",
+    "reconcile_state",
+}
+
+
+class RuntimeDatabaseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.path = self.root / "nested" / "brain-runtime.db"
+        self.runtime = RuntimeDatabase(self.path, timeout_seconds=0.25)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def initialize(self) -> None:
+        self.runtime.initialize()
+
+    @staticmethod
+    def _insert_event(conn: sqlite3.Connection, event_id: str) -> None:
+        conn.execute(
+            "INSERT INTO transport_events "
+            "(event_id, observer_device_id, direction, received_at, "
+            "transport_kind, created_at) VALUES (?, 'observer-a', 'inbound', "
+            "1.0, 'ordinary', 1.0)",
+            (event_id,),
+        )
+
+    @staticmethod
+    def _insert_turn(conn: sqlite3.Connection, wa_turn_id: str) -> None:
+        conn.execute(
+            "INSERT INTO whatsapp_turns "
+            "(wa_turn_id, correlation_status, created_at) "
+            "VALUES (?, 'correlated', 1.0)",
+            (wa_turn_id,),
+        )
+
+    @classmethod
+    def _insert_lifecycle(
+        cls,
+        conn: sqlite3.Connection,
+        lifecycle_id: str = "lifecycle-a",
+        origin_event_id: str = "event-a",
+        wa_turn_id: str = "turn-a",
+        client_id: int = 101,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO lead_lifecycles "
+            "(lifecycle_id, origin_event_id, wa_turn_id, contact_key, client_id, "
+            "phase, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'contact-a', ?, 'active', 1.0, 1.0)",
+            (lifecycle_id, origin_event_id, wa_turn_id, client_id),
+        )
+
+    def _seed_lifecycle(self) -> None:
+        def seed(conn: sqlite3.Connection) -> None:
+            self._insert_event(conn, "event-a")
+            self._insert_turn(conn, "turn-a")
+            self._insert_lifecycle(conn)
+
+        self.runtime.write(seed)
+
+    def test_initialize_creates_exact_business_tables_and_parent(self) -> None:
+        self.assertFalse(self.path.parent.exists())
+
+        self.initialize()
+
+        tables = self.runtime.read(
+            lambda conn: {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+        )
+        self.assertEqual(tables, BUSINESS_TABLES)
+        self.assertTrue(self.path.is_file())
+
+    def test_initialize_is_idempotent_and_preserves_data(self) -> None:
+        self.initialize()
+        self.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO reconcile_state (name, value, updated_at) "
+                "VALUES ('delivery-ledger', '42', 1.0)"
+            )
+        )
+
+        self.initialize()
+
+        value = self.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT value FROM reconcile_state WHERE name='delivery-ledger'"
+            ).fetchone()[0]
+        )
+        self.assertEqual(value, "42")
+
+    def test_wal_foreign_keys_and_writable_runtime_connection(self) -> None:
+        self.initialize()
+
+        pragmas = self.runtime.read(
+            lambda conn: (
+                conn.execute("PRAGMA journal_mode").fetchone()[0],
+                conn.execute("PRAGMA foreign_keys").fetchone()[0],
+                conn.execute("PRAGMA query_only").fetchone()[0],
+            )
+        )
+
+        self.assertEqual(pragmas, ("wal", 1, 0))
+
+    def test_foreign_key_rejects_missing_turn_and_event(self) -> None:
+        self.initialize()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.runtime.write(
+                lambda conn: conn.execute(
+                    "INSERT INTO turn_events (wa_turn_id, event_id, ordinal) "
+                    "VALUES ('missing-turn', 'missing-event', 0)"
+                )
+            )
+
+    def test_write_commits_on_success(self) -> None:
+        self.initialize()
+
+        result = self.runtime.write(
+            lambda conn: (
+                conn.execute(
+                    "INSERT INTO reconcile_state (name, value, updated_at) "
+                    "VALUES ('checkpoint', 'ready', 1.0)"
+                ),
+                "committed",
+            )[1]
+        )
+
+        self.assertEqual(result, "committed")
+        self.assertEqual(
+            self.runtime.read(
+                lambda conn: conn.execute(
+                    "SELECT value FROM reconcile_state WHERE name='checkpoint'"
+                ).fetchone()[0]
+            ),
+            "ready",
+        )
+
+    def test_write_rolls_back_and_propagates_exception(self) -> None:
+        self.initialize()
+
+        def fail_after_insert(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO reconcile_state (name, value, updated_at) "
+                "VALUES ('rollback', 'must-disappear', 1.0)"
+            )
+            raise RuntimeError("expected test failure")
+
+        with self.assertRaisesRegex(RuntimeError, "expected test failure"):
+            self.runtime.write(fail_after_insert)
+
+        count = self.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT COUNT(*) FROM reconcile_state WHERE name='rollback'"
+            ).fetchone()[0]
+        )
+        self.assertEqual(count, 0)
+
+    def test_lifecycle_effect_state_check_rejects_unknown_state(self) -> None:
+        self.initialize()
+        self._seed_lifecycle()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.runtime.write(
+                lambda conn: conn.execute(
+                    "INSERT INTO lifecycle_effects "
+                    "(effect_id, lifecycle_id, expected_status, target_status, "
+                    "cause, state, created_at, updated_at) VALUES "
+                    "('fx-a', 'lifecycle-a', 'Sem Atendimento', "
+                    "'Não Respondeu', 't1', 'invented', 1.0, 1.0)"
+                )
+            )
+
+    def test_duplicate_lifecycle_fact_type_is_rejected(self) -> None:
+        self.initialize()
+        self._seed_lifecycle()
+        insert = (
+            "INSERT INTO lifecycle_facts "
+            "(lifecycle_id, fact_type, observed_at, created_at) "
+            "VALUES ('lifecycle-a', 'first_t1_send_success', 1.0, 1.0)"
+        )
+        self.runtime.write(lambda conn: conn.execute(insert))
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.runtime.write(lambda conn: conn.execute(insert))
+
+    def test_duplicate_lifecycle_origin_is_rejected(self) -> None:
+        self.initialize()
+        self._seed_lifecycle()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.runtime.write(
+                lambda conn: self._insert_lifecycle(
+                    conn,
+                    lifecycle_id="lifecycle-b",
+                    origin_event_id="event-a",
+                    wa_turn_id="turn-a",
+                    client_id=102,
+                )
+            )
+
+    def test_duplicate_turn_ordinal_is_rejected(self) -> None:
+        self.initialize()
+
+        def seed(conn: sqlite3.Connection) -> None:
+            self._insert_event(conn, "event-a")
+            self._insert_event(conn, "event-b")
+            self._insert_turn(conn, "turn-a")
+            conn.execute(
+                "INSERT INTO turn_events (wa_turn_id, event_id, ordinal) "
+                "VALUES ('turn-a', 'event-a', 0)"
+            )
+
+        self.runtime.write(seed)
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.runtime.write(
+                lambda conn: conn.execute(
+                    "INSERT INTO turn_events (wa_turn_id, event_id, ordinal) "
+                    "VALUES ('turn-a', 'event-b', 0)"
+                )
+            )
+
+
+class RuntimeIdsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runtime_secret = b"r" * 32
+        self.transport_secret = b"t" * 32
+        self.ids = RuntimeIds(self.runtime_secret, self.transport_secret)
+
+    @staticmethod
+    def values(ids: RuntimeIds) -> dict[str, str]:
+        return {
+            "turn": ids.wa_turn_id("hermes-turn-a"),
+            "effect": ids.effect_id("lifecycle-a", "first_t1_send_success"),
+            "contact": ids.contact_key("5534999999999"),
+            "event": ids.event_id("observer-a", "message-a"),
+            "body": ids.body_hmac("texto exato"),
+            "jid": ids.jid_hmac("opaque-jid"),
+            "opaque": ids.opaque_hmac("opaque-value"),
+        }
+
+    def test_ids_are_deterministic_and_have_stable_prefixes(self) -> None:
+        first = self.values(self.ids)
+        second = self.values(RuntimeIds(self.runtime_secret, self.transport_secret))
+
+        self.assertEqual(first, second)
+        self.assertTrue(first["turn"].startswith("waturn_"))
+        self.assertTrue(first["effect"].startswith("fx_"))
+        self.assertTrue(first["event"].startswith("waevt_"))
+        self.assertEqual(len(first["body"]), 64)
+
+    def test_runtime_secret_changes_only_runtime_domain(self) -> None:
+        baseline = self.values(self.ids)
+        changed = self.values(RuntimeIds(b"R" * 32, self.transport_secret))
+
+        self.assertNotEqual(baseline["turn"], changed["turn"])
+        self.assertNotEqual(baseline["effect"], changed["effect"])
+        for name in ("contact", "event", "body", "jid", "opaque"):
+            self.assertEqual(baseline[name], changed[name])
+
+    def test_transport_secret_changes_only_transport_domain(self) -> None:
+        baseline = self.values(self.ids)
+        changed = self.values(RuntimeIds(self.runtime_secret, b"T" * 32))
+
+        self.assertEqual(baseline["turn"], changed["turn"])
+        self.assertEqual(baseline["effect"], changed["effect"])
+        for name in ("contact", "event", "body", "jid", "opaque"):
+            self.assertNotEqual(baseline[name], changed[name])
+
+    def test_method_domains_are_distinct(self) -> None:
+        self.assertNotEqual(self.ids.body_hmac("value"), self.ids.opaque_hmac("value"))
+        self.assertNotEqual(self.ids.jid_hmac("value"), self.ids.opaque_hmac("value"))
+
+    def test_event_id_uses_unambiguous_framing_and_device_identity(self) -> None:
+        self.assertNotEqual(self.ids.event_id("ab", "c"), self.ids.event_id("a", "bc"))
+        self.assertNotEqual(
+            self.ids.event_id("observer-a", "message-a"),
+            self.ids.event_id("observer-b", "message-a"),
+        )
+
+    def test_body_hmac_preserves_exact_unicode_text(self) -> None:
+        self.assertNotEqual(self.ids.body_hmac("texto"), self.ids.body_hmac("texto "))
+        self.assertNotEqual(self.ids.body_hmac("ação"), self.ids.body_hmac("acão"))
+
+    def test_short_secrets_are_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            RuntimeIds(b"short", self.transport_secret)
+        with self.assertRaises(ValueError):
+            RuntimeIds(self.runtime_secret, b"short")
+
+    def test_contact_key_requires_canonical_phone(self) -> None:
+        for invalid in ("", "+5534999999999", "05534999999999", "not-a-phone"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.ids.contact_key(invalid)
+
+
+class BrainServiceRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.principals = {
+            "default": PrincipalConfig(
+                "default",
+                "gateway",
+                token_digest("gateway"),
+                frozenset({"conversation_phone"}),
+            )
+        }
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_service_initializes_runtime_when_stable_secrets_exist(self) -> None:
+        settings = BrainSettings(
+            state_db=self.root / "state.db",
+            kanban_db=self.root / "kanban.db",
+            runtime_db=self.root / "runtime" / "brain-runtime.db",
+            principals=self.principals,
+            cursor_secret=b"c" * 32,
+            runtime_hmac_secret=b"r" * 32,
+            transport_hmac_secret=b"t" * 32,
+        )
+
+        service = BrainService(settings)
+
+        self.assertIsInstance(service.state, ReadOnlyDatabase)
+        self.assertIsInstance(service.kanban, ReadOnlyDatabase)
+        self.assertIsInstance(service.runtime, RuntimeDatabase)
+        self.assertIsInstance(service.runtime_ids, RuntimeIds)
+        self.assertTrue(settings.runtime_db.is_file())
+
+    def test_direct_test_settings_without_secrets_do_not_write_runtime(self) -> None:
+        runtime_path = self.root / "runtime" / "brain-runtime.db"
+        settings = BrainSettings(
+            state_db=self.root / "state.db",
+            kanban_db=self.root / "kanban.db",
+            runtime_db=runtime_path,
+            principals=self.principals,
+            cursor_secret=b"c" * 32,
+        )
+
+        service = BrainService(settings)
+
+        self.assertIsInstance(service.runtime, RuntimeDatabase)
+        self.assertIsNone(service.runtime_ids)
+        self.assertFalse(runtime_path.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

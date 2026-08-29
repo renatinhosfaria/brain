@@ -25,6 +25,8 @@ from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
 from .projection import ProjectedMessage, project_rows
+from .runtime_db import RuntimeDatabase
+from .transport_models import RuntimeIds
 from .whatsapp_identity import PhoneResolution, resolve_phone
 
 logger = logging.getLogger("brain.audit")
@@ -81,6 +83,19 @@ class BrainService:
             retries=settings.busy_retries,
             timeout_seconds=settings.busy_timeout_seconds,
         )
+        self.runtime = RuntimeDatabase(
+            settings.runtime_db,
+            timeout_seconds=settings.busy_timeout_seconds,
+        )
+        self.runtime_ids: RuntimeIds | None = None
+        if settings.runtime_hmac_secret or settings.transport_hmac_secret:
+            if not settings.runtime_hmac_secret or not settings.transport_hmac_secret:
+                raise ValueError("both stable HMAC secrets are required")
+            self.runtime_ids = RuntimeIds(
+                settings.runtime_hmac_secret,
+                settings.transport_hmac_secret,
+            )
+            self.runtime.initialize()
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
 
