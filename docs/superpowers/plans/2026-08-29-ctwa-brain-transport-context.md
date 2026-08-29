@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add Brain-owned transport persistence, authenticated CTWA event ingestion, fail-closed WhatsApp turn correlation, `conversation_context()`, and the CEO plugin hooks needed to derive stable `wa_turn_id`/Kanban idempotency without editing upstream Hermes Agent files.
+**Goal:** Add Brain-owned runtime persistence, authenticated privacy-safe WhatsApp event ingestion, fail-closed turn correlation, `conversation_context()`, and CEO plugin hooks for stable `wa_turn_id`/Kanban idempotency without editing upstream Hermes Agent files.
 
-**Architecture:** Brain gains a writable runtime SQLite database separate from Hermes' read-only `state.db`/`kanban.db`. The external `brain-ceo-bridge` uses official Hermes plugin hooks to register each WhatsApp turn and enforce Kanban idempotency, while the zero-argument `conversation_context()` tool returns only the proven phone, sanitized display name, `wa_turn_id`, and correlated event classifications. Transport ingestion is authenticated by a new service principal and never persists raw message text, JID/LID, raw `sourceId`, raw `ctwaClid`, or full `contextInfo`.
+**Architecture:** Brain keeps Hermes `state.db`/`kanban.db` read-only and owns `/var/lib/brain/runtime/brain-runtime.db`. The observer and Brain share one dedicated **transport HMAC key** used only to derive safe event/contact/body/opaque digests before an event reaches durable outbox storage. The Brain-only runtime HMAC key remains separate and derives `wa_turn_id`, effect IDs, leases, and other Brain-private identifiers. This separation lets the observer durably spool only allowlisted digests/metadata while preserving exact turn correlation after a Brain restart. `brain-ceo-bridge` uses official Hermes public hooks; it never patches upstream code.
 
 **Tech Stack:** Python 3.11+, standard-library SQLite/HMAC/urllib, Starlette/uvicorn, MCP 2.0, `unittest`, Ruff, Hermes public plugin API (`register_tool`, `register_hook`).
 
@@ -13,23 +13,27 @@
 ## Global Constraints
 
 - Never edit, patch, monkeypatch, preload, wrap, or replace `/usr/local/lib/hermes-agent/**`.
-- Hermes `state.db`, `kanban.db`, and the Hermes WhatsApp mapping directory remain read-only to Brain.
-- Brain runtime DB is `/var/lib/brain/runtime/brain-runtime.db`; only `brain.service` opens it for writes.
-- Observer mapping directory is independent from Hermes and defaults to `/var/lib/brain/whatsapp-observer/session`.
+- Hermes `state.db`, `kanban.db`, and Hermes WhatsApp session/mapping directory remain read-only to Brain.
+- Brain runtime DB: `/var/lib/brain/runtime/brain-runtime.db`; only `brain.service` writes it.
+- Observer mapping directory is independent: `/var/lib/brain/whatsapp-observer/session`.
 - Brain binds only to localhost.
-- Raw WhatsApp message text may cross the authenticated localhost turn-registration boundary transiently, only to calculate HMAC/length/correlation; it is never stored in Brain runtime persistence or logs.
-- Raw observer JID/LID may cross the authenticated localhost ingestion boundary transiently only so Brain can resolve it against the observer mapping directory; it is never stored in runtime persistence or logs.
-- `event_id = "waevt_" + HMAC(runtime_secret, observer_device_id || observer_message_id)`.
+- `BRAIN_TRANSPORT_HMAC_SECRET` is a 32+ byte secret shared only by `brain.service` and `brain-whatsapp-observer.service`. It derives `event_id`, `contact_key`, `body_hmac`, `remote_jid_hmac`, and opaque CTWA HMACs. It never derives `wa_turn_id`.
+- `BRAIN_RUNTIME_HMAC_SECRET` is Brain-only. It derives `wa_turn_id` and Brain-internal IDs.
+- Raw WhatsApp message text, raw JID/LID, raw observer message ID, raw `sourceId`, raw `ctwaClid`, and full source URL are never persisted in Brain runtime or observer outbox.
+- `event_id = "waevt_" + HMAC(transport_secret, observer_device_id || observer_message_id)`.
+- `contact_key = HMAC(transport_secret, canonical_phone)`.
+- `body_hmac = HMAC(transport_secret, message_body)`.
 - `wa_turn_id = "waturn_" + HMAC(runtime_secret, hermes_turn_id)`.
-- The gateway/CEO principal exposes `conversation_context`; worker fallback `conversation_phone` remains unchanged for Porteiro/Cadastro.
-- Service principals use distinct credentials and cannot present worker Task/Run headers as authority.
+- The observer service is trusted to derive the safe envelope because it necessarily sees raw transport data; Brain re-verifies contact identity against the observer mapping directory before accepting the event.
+- Gateway/default capabilities are `turn_register` and `conversation_context`; worker fallback `conversation_phone` remains for Porteiro/Cadastro.
+- Service principals are distinct and cannot use worker Task/Run identity as authority.
 - Correlation is fail-closed: zero matches -> `turn_not_correlated`; multiple matches -> `ambiguous_transport_events`.
-- A later event that itself matches the proven CTWA detector is `ctwa_attributed_inbound`, not `human_inbound`.
-- Every behavior change follows TDD and every task ends in a focused test run plus a commit.
+- A later event matching the proven CTWA detector is `ctwa_attributed_inbound`, never automatically `human_inbound`.
+- Every behavior change follows TDD and every task ends with tests plus a focused commit.
 
 ---
 
-### Task 1: Extend Brain configuration and service-principal authorization
+### Task 1: Extend Brain settings and principal authorization
 
 **Files:**
 - Modify: `src/brain/config.py`
@@ -39,61 +43,37 @@
 - Modify: `deploy/brain.toml.example`
 
 **Interfaces:**
-- Produces `PrincipalConfig.mode` values `worker | gateway | service`.
-- Produces service capabilities `transport_ingest`, `turn_register`, `conversation_context`, `kanban_binding_register`, `lifecycle_claim`, `lifecycle_result` in Brain's internal allowlist; only the relevant capabilities are assigned to each principal.
-- Produces `ServiceRequestIdentity(principal: str)` and `Authorizer.parse_service_headers(headers, required_capability) -> ServiceRequestIdentity`.
-- Adds `BrainSettings.runtime_db: Path`, `observer_session_dir: Path`, `runtime_hmac_secret: bytes`, `transport_retention_days=90`, `display_name_ttl_hours=24`.
+- `PrincipalConfig.mode`: `worker | gateway | service`.
+- Brain capabilities: `conversation_recent`, `conversation_search`, `conversation_phone`, `turn_register`, `conversation_context`, `transport_ingest`, `lifecycle_claim`, `lifecycle_result`.
+- `ServiceRequestIdentity(principal)` and `parse_service_headers(headers, required_capability)`.
+- `parse_gateway_headers(headers, required_capability)` replaces the current phone-specific gateway gate.
+- `BrainSettings` adds `runtime_db`, `observer_session_dir`, `runtime_hmac_secret`, `transport_hmac_secret`, `transport_retention_days=90`, `display_name_ttl_hours=24`.
 
-- [ ] **Step 1: Write failing configuration tests**
+- [ ] **Step 1: Write failing config tests**
 
-Add concrete tests to `tests/test_config.py`:
+Add tests that accept:
 
 ```python
-def test_settings_accept_service_principals_and_runtime_paths(self):
-    settings = BrainSettings(
-        state_db=self.root / "state.db",
-        kanban_db=self.root / "kanban.db",
-        whatsapp_session_dir=self.root / "hermes-session",
-        observer_session_dir=self.root / "observer-session",
-        runtime_db=self.root / "runtime.db",
-        runtime_hmac_secret=b"h" * 32,
-        principals={
-            "default": self._principal("default", "gateway", "g", "conversation_context"),
-            "observer": self._principal("observer", "service", "o", "transport_ingest"),
-            "writer": self._principal(
-                "writer", "service", "w", "lifecycle_claim", "lifecycle_result"
-            ),
-        },
-        cursor_secret=b"c" * 32,
-    )
-    self.assertEqual(settings.principals["observer"].mode, "service")
-    self.assertEqual(settings.runtime_db, self.root / "runtime.db")
-    self.assertEqual(settings.observer_session_dir, self.root / "observer-session")
-    self.assertEqual(settings.runtime_hmac_secret, b"h" * 32)
-
-
-def test_settings_rejects_short_runtime_hmac_secret(self):
-    with self.assertRaises(ValueError):
-        BrainSettings(
-            principals={"default": self._principal("default", "gateway", "g", "conversation_context")},
-            runtime_hmac_secret=b"short",
-            cursor_secret=b"c" * 32,
-        )
+principals={
+    "default": principal("default", "gateway", "conversation_context", "turn_register"),
+    "observer": principal("observer", "service", "transport_ingest"),
+    "writer": principal("writer", "service", "lifecycle_claim", "lifecycle_result"),
+}
 ```
 
-- [ ] **Step 2: Run config tests and verify RED**
+and reject a short/missing stable runtime or transport HMAC secret in production settings.
 
-Run:
+- [ ] **Step 2: Run RED**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_config -v
 ```
 
-Expected: failures for unknown `service` mode and missing runtime settings.
+Expected: service mode/settings unsupported.
 
-- [ ] **Step 3: Implement the minimal config model**
+- [ ] **Step 3: Implement minimal settings/ACL**
 
-In `src/brain/config.py`, add constants and fields with exact defaults:
+Use exact defaults:
 
 ```python
 DEFAULT_RUNTIME_DB = Path("/var/lib/brain/runtime/brain-runtime.db")
@@ -101,32 +81,16 @@ DEFAULT_OBSERVER_SESSION_DIR = Path("/var/lib/brain/whatsapp-observer/session")
 VALID_MODES = frozenset({"worker", "gateway", "service"})
 VALID_TOOLS = frozenset({
     "conversation_recent", "conversation_search", "conversation_phone",
-    "conversation_context", "transport_ingest", "turn_register",
-    "kanban_binding_register", "lifecycle_claim", "lifecycle_result",
+    "turn_register", "conversation_context", "transport_ingest",
+    "lifecycle_claim", "lifecycle_result",
 })
 ```
 
-Load `BRAIN_RUNTIME_DB`, `BRAIN_OBSERVER_SESSION_DIR`, `BRAIN_RUNTIME_HMAC_SECRET`, `BRAIN_TRANSPORT_RETENTION_DAYS`, and `BRAIN_DISPLAY_NAME_TTL_HOURS`. Require `runtime_hmac_secret` to be at least 32 bytes, exactly as `cursor_secret` is bounded today.
+No unused `kanban_binding_register` capability is added.
 
-- [ ] **Step 4: Write and run service-auth tests**
+- [ ] **Step 4: Prove mode/capability separation**
 
-Create `tests/test_service_authorization.py` proving:
-
-```python
-def test_observer_token_can_only_use_transport_ingest(self):
-    ident = authorizer.parse_service_headers(
-        {"Authorization": "Bearer observer-secret"}, "transport_ingest"
-    )
-    self.assertEqual(ident.principal, "observer")
-    with self.assertRaises(BrainError):
-        authorizer.parse_service_headers(
-            {"Authorization": "Bearer observer-secret"}, "lifecycle_claim"
-        )
-```
-
-Also prove worker and gateway tokens are rejected by `parse_service_headers`.
-
-Run:
+`tests/test_service_authorization.py` must prove observer can only `transport_ingest`, writer only claim/result, and worker/gateway tokens are rejected by service parser. Gateway parser must require the named capability and reject service tokens.
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_config tests.test_service_authorization -v
@@ -134,31 +98,9 @@ PYTHONPATH=src .venv/bin/python -m unittest tests.test_config tests.test_service
 
 Expected: PASS.
 
-- [ ] **Step 5: Update deploy example and commit**
+- [ ] **Step 5: Update example config and commit**
 
-Update `deploy/brain.toml.example` with `[server]` runtime paths/secret comment and service principals:
-
-```toml
-runtime_db = "/var/lib/brain/runtime/brain-runtime.db"
-observer_session_dir = "/var/lib/brain/whatsapp-observer/session"
-transport_retention_days = 90
-display_name_ttl_hours = 24
-# runtime_hmac_secret = "generate-with-openssl-rand-hex-32"
-
-[principals.default]
-mode = "gateway"
-tools = ["conversation_context"]
-
-[principals.observer]
-mode = "service"
-tools = ["transport_ingest"]
-
-[principals.writer]
-mode = "service"
-tools = ["lifecycle_claim", "lifecycle_result"]
-```
-
-Commit:
+Add server paths/retention and distinct principal examples; secrets are comments/env references, never checked-in values.
 
 ```bash
 git add src/brain/config.py src/brain/authorization.py tests/test_config.py tests/test_service_authorization.py deploy/brain.toml.example
@@ -167,7 +109,7 @@ git commit -m "feat: add Brain runtime service principals"
 
 ---
 
-### Task 2: Create the writable Brain runtime database and identifier primitives
+### Task 2: Create Brain runtime SQLite and domain-separated IDs
 
 **Files:**
 - Create: `src/brain/runtime_db.py`
@@ -176,52 +118,25 @@ git commit -m "feat: add Brain runtime service principals"
 - Modify: `src/brain/service.py`
 
 **Interfaces:**
-- Produces `RuntimeDatabase(path: Path, timeout_seconds: float)` with `initialize()`, `read(callback)`, and `write(callback)`.
-- Produces `RuntimeIds(secret: bytes)` with `contact_key(phone)`, `event_id(observer_device_id, message_id)`, `wa_turn_id(turn_id)`, `body_hmac(text)`, and `opaque_hmac(value)`.
-- Creates the spec tables `transport_events`, `whatsapp_turns`, `turn_events`, `kanban_bindings`, `lead_lifecycles`, `lifecycle_facts`, `lifecycle_effects`, `contact_ephemera`, and `reconcile_state` with foreign keys and unique constraints.
+- `RuntimeDatabase.initialize/read/write`.
+- `RuntimeIds(runtime_secret, transport_secret)` with `wa_turn_id`, `effect_id`, `contact_key`, `event_id`, `body_hmac`, `jid_hmac`, `opaque_hmac`.
+- Tables: `transport_events`, `whatsapp_turns`, `turn_events`, `kanban_bindings`, `lead_lifecycles`, `lifecycle_facts`, `lifecycle_effects`, `contact_ephemera`, `reconcile_state`.
 
-- [ ] **Step 1: Write the failing schema/idempotency tests**
+- [ ] **Step 1: Write schema and ID stability tests**
 
-Create `tests/test_runtime_db.py` with tests that open a temporary DB, call `initialize()`, and assert the exact table set. Add identifier stability tests:
+Assert exact table set, foreign keys, unique keys, WAL, and domain separation. Prove same observer/device message gives same `waevt_`, different device gives different ID, and `waturn_` never uses transport key.
 
-```python
-def test_runtime_ids_are_stable_and_domain_separated(self):
-    ids = RuntimeIds(b"k" * 32)
-    self.assertEqual(ids.event_id("observer-a", "MSG1"), ids.event_id("observer-a", "MSG1"))
-    self.assertNotEqual(ids.event_id("observer-a", "MSG1"), ids.event_id("observer-b", "MSG1"))
-    self.assertTrue(ids.event_id("observer-a", "MSG1").startswith("waevt_"))
-    self.assertTrue(ids.wa_turn_id("turn-1").startswith("waturn_"))
-```
-
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_runtime_db -v
 ```
 
-Expected: import/module failures.
+- [ ] **Step 3: Implement SQLite/IDs**
 
-- [ ] **Step 3: Implement `RuntimeIds` and `RuntimeDatabase`**
+Use HMAC-SHA256 with explicit domain prefixes and one transaction for schema initialization. Do not reuse the Hermes `ReadOnlyDatabase` class for Brain writes.
 
-Use HMAC-SHA256 with explicit domain prefixes so identifiers cannot collide across domains:
-
-```python
-def _hmac(self, domain: str, *parts: str) -> str:
-    raw = "\0".join((domain, *parts)).encode("utf-8")
-    return hmac.new(self.secret, raw, hashlib.sha256).hexdigest()
-
-
-def event_id(self, observer_device_id: str, message_id: str) -> str:
-    return "waevt_" + self._hmac("event", observer_device_id, message_id)[:32]
-```
-
-`RuntimeDatabase.initialize()` must enable WAL, `PRAGMA foreign_keys=ON`, and create schema inside one transaction. Do not reuse `ReadOnlyDatabase`; keep Hermes DB protections isolated in `db.py`.
-
-- [ ] **Step 4: Initialize runtime DB from `BrainService` and run tests**
-
-In `BrainService.__init__`, construct/initialize the runtime DB and `RuntimeIds`. Update tests that instantiate `BrainSettings` to supply temporary `runtime_db` and `runtime_hmac_secret` where necessary.
-
-Run:
+- [ ] **Step 4: Wire into `BrainService` and run regression tests**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_runtime_db tests.test_brain tests.test_gateway_api -v
@@ -238,74 +153,38 @@ git commit -m "feat: add Brain runtime persistence"
 
 ---
 
-### Task 3: Add authenticated observer-event ingestion and privacy-preserving CTWA normalization
+### Task 3: Ingest the observer's safe event envelope
 
 **Files:**
 - Create: `src/brain/transport_api.py`
 - Create: `src/brain/transport_service.py`
 - Modify: `src/brain/mcp_server.py`
+- Modify: `src/brain/whatsapp_identity.py`
 - Modify: `src/brain/service.py`
 - Create: `tests/test_transport_ingest.py`
+- Modify: `tests/test_whatsapp_identity.py`
 
 **Interfaces:**
-- HTTP `POST /internal/transport/events`, service capability `transport_ingest`.
-- Consumes one bounded JSON object with `observer_device_id`, `message_id`, `received_at`, `message_timestamp`, `remote_jid`, `push_name`, `body`, `native_type`, and a nested allowlisted `external_ad_reply` object.
-- Produces `{ "status": "ok", "event_id": "waevt_...", "duplicate": bool }`.
-- Persists `contact_key`, body HMAC/length, sanitized display-name ephemera, CTWA booleans/HMACs/hostname, and `transport_kind` only.
+- `POST /internal/transport/events`, service capability `transport_ingest`.
+- Input contains only: `event_id`, `observer_device_id`, `received_at`, `message_timestamp`, `remote_jid_hmac`, optional derived `contact_key`, `body_hmac`, `body_length`, sanitized optional `display_name`, `native_type`, `transport_kind`, and already-sanitized CTWA metadata (`source_type`, `source_app`, source-id length/HMAC, URL hostname/length/HMAC, ctwaClid length/HMAC, booleans).
+- No raw body/JID/message ID/source ID/ctwaClid/full URL is accepted by this endpoint.
 
-- [ ] **Step 1: Write ingestion tests before the route exists**
+- [ ] **Step 1: Add mapping-directory contact-key verification tests**
 
-Create tests for normal CTWA, duplicate event, ordinary inbound, malformed payload, observer-token ACL, and persistence redaction. Example assertion:
+Extend `whatsapp_identity.py` with a helper that enumerates only valid allowlisted PN/LID mapping files, derives `contact_key`/`remote_jid_hmac` using the transport key, and requires exactly one canonical phone match. Conflicting/invalid mapping evidence is unavailable.
 
-```python
-def test_ingest_ctwa_persists_no_raw_transport_identifiers(self):
-    response = post_event(ctwa_fixture())
-    self.assertEqual(response.status_code, 200)
-    row = runtime_conn.execute("SELECT * FROM transport_events").fetchone()
-    serialized = json.dumps(dict(row))
-    self.assertNotIn("5534999772714", serialized)
-    self.assertNotIn("123456789012345@lid", serialized)
-    self.assertNotIn("ctwa-secret-value", serialized)
-    self.assertEqual(row["transport_kind"], "ctwa_candidate")
-```
+- [ ] **Step 2: Write ingestion RED tests**
 
-- [ ] **Step 2: Run and verify RED**
+Prove a safe CTWA envelope persists. Prove payloads containing forbidden raw fields (`body`, `remote_jid`, `message_id`, `sourceId`, `ctwaClid`, `sourceUrl`) are rejected. Prove duplicate `event_id` is a successful no-op. Prove unverified contact/JID HMAC returns retryable unavailable without persisting.
+
+- [ ] **Step 3: Implement strict route**
+
+Authenticate before body read, cap body size, validate exact field set/types, verify `event_id`/HMAC formats, independently match observer identity evidence through the observer mapping directory, and persist only the safe envelope. Display name is control-stripped/160-char bounded and gets an expiry timestamp.
+
+- [ ] **Step 4: Run focused suite**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m unittest tests.test_transport_ingest -v
-```
-
-Expected: missing route/service failures.
-
-- [ ] **Step 3: Implement strict parsing and CTWA detector**
-
-Implement fixed maximum body size and exact field/type validation. Resolve `remote_jid` with existing `resolve_phone(remote_jid, settings.observer_session_dir)`; reject unresolved identity without persisting the raw JID. Sanitize display names by removing ASCII controls and limiting to 160 characters.
-
-Implement the proven detector exactly:
-
-```python
-def is_historical_ctwa(ad: Mapping[str, object]) -> bool:
-    return (
-        ad.get("present") is True
-        and ad.get("sourceType") == "ad"
-        and (
-            ad.get("clickToWhatsappCall") is True
-            or bool(ad.get("ctwaClid"))
-            or bool(ad.get("sourceId"))
-        )
-    )
-```
-
-Persist `sourceId`/`ctwaClid` only as present/length/HMAC and source URL only as hostname/length/HMAC.
-
-- [ ] **Step 4: Add route, deduplication, and audit-safe errors**
-
-Wire `Route("/internal/transport/events", ..., methods=["POST"])` in `mcp_server.py`. Authenticate before reading the request body. Unique `event_id` conflict is a successful duplicate no-op, never a second row.
-
-Run:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m unittest tests.test_transport_ingest tests.test_gateway_api -v
+PYTHONPATH=src .venv/bin/python -m unittest tests.test_transport_ingest tests.test_whatsapp_identity tests.test_gateway_api -v
 ```
 
 Expected: PASS.
@@ -313,13 +192,13 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/brain/transport_api.py src/brain/transport_service.py src/brain/mcp_server.py src/brain/service.py tests/test_transport_ingest.py
+git add src/brain/transport_api.py src/brain/transport_service.py src/brain/mcp_server.py src/brain/whatsapp_identity.py src/brain/service.py tests/test_transport_ingest.py tests/test_whatsapp_identity.py
 git commit -m "feat: ingest privacy-safe WhatsApp transport events"
 ```
 
 ---
 
-### Task 4: Register Hermes turns and correlate one turn to one-or-more transport events
+### Task 4: Register Hermes turns and correlate batched messages
 
 **Files:**
 - Create: `src/brain/turn_correlation.py`
@@ -329,45 +208,24 @@ git commit -m "feat: ingest privacy-safe WhatsApp transport events"
 - Modify: `tests/test_gateway_api.py`
 
 **Interfaces:**
-- HTTP `POST /internal/gateway/turn-register`, gateway capability `turn_register`.
-- Consumes trusted session context plus `turn_id`, `user_message`, and an RFC3339/epoch turn timestamp.
-- Produces `{ "status": "ok", "wa_turn_id": "waturn_...", "correlation": "correlated|pending|ambiguous" }`.
-- Produces `TurnCorrelationResult(status, event_ids, reason)`.
+- `POST /internal/gateway/turn-register`, gateway capability `turn_register`.
+- Input: trusted gateway session context + upstream Hermes `turn_id` + current `user_message` + timestamp.
+- Raw `user_message` is used only in memory to derive `body_hmac`/length and is never stored/logged.
+- Output: `status`, `wa_turn_id`, `correlation=correlated|pending|ambiguous`.
 
-- [ ] **Step 1: Write single-event and batching correlation tests**
+- [ ] **Step 1: Write single-event, two-event debounce, and embedded-newline tests**
 
-Seed runtime events with body HMACs and timestamps, then test:
+Seed safe transport events with `body_hmac`/length. Require the exact Hermes batching join (`"\n"`) to produce one unique ordered event combination. Include an event whose own body contains a newline so naive line-count matching fails and the implementation must test contiguous candidate partitions.
 
-```python
-def test_two_observer_messages_match_one_hermes_debounce_turn(self):
-    # event A body="primeira", event B body="segunda"
-    result = correlate_turn(
-        contact_key="contact_x",
-        hermes_message="primeira\nsegunda",
-        candidate_events=[event_a, event_b],
-        ids=runtime_ids,
-    )
-    self.assertEqual(result.status, "correlated")
-    self.assertEqual(result.event_ids, ("waevt_a", "waevt_b"))
-```
+- [ ] **Step 2: Write fail-closed ambiguity tests**
 
-Also test an individual message containing a newline by partitioning the Hermes message into all contiguous line groups for the exact candidate count; require exactly one HMAC sequence match.
+Zero combinations -> `turn_not_correlated`; multiple exact combinations -> `ambiguous_transport_events`; no nearest-time fallback.
 
-- [ ] **Step 2: Write ambiguity tests**
+- [ ] **Step 3: Implement correlation**
 
-Prove two valid combinations return `ambiguous_transport_events`, and zero valid combinations return `turn_not_correlated`. No nearest-time fallback is allowed.
+Authorize the Hermes session against `state.db`, resolve the Hermes chat to canonical phone, derive `contact_key`, select candidate observer events in the supported debounce window, compare composed HMAC/length, and persist `whatsapp_turns`/`turn_events` only on unique proof.
 
-- [ ] **Step 3: Run RED**
-
-```bash
-PYTHONPATH=src .venv/bin/python -m unittest tests.test_turn_correlation -v
-```
-
-- [ ] **Step 4: Implement correlation and route**
-
-Use the authorized Hermes session to resolve the Hermes-side phone with `settings.whatsapp_session_dir`, derive the same `contact_key`, select inbound candidate events in a bounded window around the turn, then match content partitions using HMAC/length. Persist `whatsapp_turns` and `turn_events` only for a unique proof. Store no raw `user_message`.
-
-- [ ] **Step 5: Run focused tests and commit**
+- [ ] **Step 4: Run tests and commit**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_turn_correlation tests.test_gateway_api -v
@@ -377,7 +235,7 @@ git commit -m "feat: correlate Hermes turns to WhatsApp events"
 
 ---
 
-### Task 5: Replace the CEO phone-only bridge with `conversation_context()` and turn hooks
+### Task 5: Expose `conversation_context()` and official CEO hooks
 
 **Files:**
 - Modify: `integrations/hermes/brain-ceo-bridge/__init__.py`
@@ -390,68 +248,28 @@ git commit -m "feat: correlate Hermes turns to WhatsApp events"
 - Modify: `src/brain/service.py`
 
 **Interfaces:**
-- Native CEO tool `conversation_context({})` in toolset `brain-context`.
-- `pre_llm_call` hook posts current trusted session + `turn_id` + current `user_message` to `/internal/gateway/turn-register`.
-- `conversation_context()` posts trusted session + current `turn_id` to `/internal/gateway/conversation-context` and validates the bounded response shape.
-- `pre_tool_call` hook for CEO `kanban_create` rewrites only `idempotency_key` when the assignee is exactly `porteiro`, `cadastro`, or `reno` and the active surface is default-profile WhatsApp DM.
+- One CEO model-visible native tool: `conversation_context({})` in `brain-context`.
+- `pre_llm_call`: registers trusted current WhatsApp turn via `/internal/gateway/turn-register`.
+- `pre_tool_call`: for default-profile WhatsApp `kanban_create` and assignee exactly `porteiro|cadastro|reno`, modifies `idempotency_key` to `whatsapp:<wa_turn_id>:<assignee>`.
+- `/internal/gateway/conversation-context`: reauthorizes the session/current registered turn and returns bounded context.
 
-- [ ] **Step 1: Upgrade plugin test context to capture tools and hooks**
+- [ ] **Step 1: Upgrade plugin tests to capture tools/hooks**
 
-Change the fake context to:
+Assert exactly one model-visible tool `conversation_context` plus `pre_llm_call` and `pre_tool_call` hooks. Do not expose CEO `conversation_phone` after migration.
 
-```python
-class _Context:
-    def __init__(self):
-        self.tools = []
-        self.hooks = []
-    def register_tool(self, **kwargs):
-        self.tools.append(kwargs)
-    def register_hook(self, name, callback):
-        self.hooks.append((name, callback))
-```
+- [ ] **Step 2: Write contract/failure tests**
 
-Assert exactly one model-visible tool named `conversation_context`, plus registered `pre_llm_call` and `pre_tool_call` hooks.
+Success shape contains verified `contact.phone_e164`, optional display name/source, `turn.wa_turn_id`, ordered events with only `event_id`, `inbound_kind`, optional `source_app`. Oversized/malformed/private-route failures return controlled `status=unavailable` to model boundary.
 
-- [ ] **Step 2: Write failing turn-registration/tool tests**
+- [ ] **Step 3: Implement shared bounded localhost POST helper**
 
-Test that `pre_llm_call(turn_id="turn-A", user_message="hello", platform="whatsapp", ...)` sends the trusted session context and never sends a model-provided `chat_id`. Test `conversation_context({})` accepts only shapes like:
+Keep all session context sourced at call time from official `gateway.session_context.get_session_env()`. Never accept model-supplied chat/session identity.
 
-```python
-{
-    "status": "ok",
-    "contact": {"phone_e164": "5534999772714", "display_name": "Maria", "display_name_source": "whatsapp_profile"},
-    "turn": {"wa_turn_id": "waturn_abc"},
-    "events": [{"event_id": "waevt_abc", "inbound_kind": "ctwa_first_contact", "source_app": "instagram"}],
-}
-```
+- [ ] **Step 4: Implement idempotency rewrite using the current registered `wa_turn_id`**
 
-Malformed/oversized responses must become a controlled `status=unavailable` result.
+Use an in-process ContextVar keyed to the current hook turn or a Brain lookup by current upstream `turn_id`; never derive from message text/phone. Non-WhatsApp, non-default profile, unrelated tool, or other assignee is unchanged.
 
-- [ ] **Step 3: Implement tool and hook transport**
-
-Refactor `tools.py` to a shared `_post_json(endpoint, payload, token)` helper with the existing 5-second timeout/16KiB response bound. Keep all gateway context sourced from `gateway.session_context.get_session_env()` at call time.
-
-- [ ] **Step 4: Implement deterministic `pre_tool_call` idempotency rewrite**
-
-For `kanban_create`, derive `wa_turn_id` from the current Hermes `turn_id` by calling a Brain private lookup or by using the same HMAC through the turn-registration response cached in a ContextVar local to the plugin. Return the official directive shape:
-
-```python
-return {
-    "action": "modify",
-    "args": {
-        **args,
-        "idempotency_key": f"whatsapp:{wa_turn_id}:{assignee}",
-    },
-}
-```
-
-Do not rewrite unrelated tools, non-WhatsApp sessions, non-default profiles, or assignees outside `{porteiro,cadastro,reno}`.
-
-- [ ] **Step 5: Implement `/internal/gateway/conversation-context`**
-
-Brain reauthorizes the session against `state.db`, requires the current registered/correlated `wa_turn_id`, resolves the verified phone, reads unexpired `contact_ephemera`, and returns events in arrival order. Event output is limited to `event_id`, `inbound_kind`, and optional `source_app`.
-
-- [ ] **Step 6: Run focused plugin/gateway tests and commit**
+- [ ] **Step 5: Run tests and commit**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_ceo_bridge_plugin tests.test_gateway_api tests.test_turn_correlation -v
@@ -461,7 +279,7 @@ git commit -m "feat: add trusted CEO conversation context"
 
 ---
 
-### Task 6: Add health, compatibility, deployment examples, and regression coverage
+### Task 6: Add health, compatibility, deployment examples, and full regression gate
 
 **Files:**
 - Modify: `src/brain/service.py`
@@ -475,28 +293,22 @@ git commit -m "feat: add trusted CEO conversation context"
 - Modify: `docs/runbook.md`
 
 **Interfaces:**
-- Health adds `runtime_db` and `hermes_compatibility` fields while preserving controlled 503 behavior.
-- Compatibility checker verifies public hook availability, `pre_llm_call` includes `turn_id`, `pre_tool_call` supports modify directives, Hermes session ContextVars still exist, and the supported batching contract is still present.
+- Health adds `runtime_db` and `hermes_compatibility` without PII.
+- Compatibility checker verifies required public hooks/payload IDs, session ContextVars, read-only schemas, delivery-ledger semantics, and supported WhatsApp batching behavior; it never writes upstream.
 
-- [ ] **Step 1: Write deployment-contract tests**
+- [ ] **Step 1: Add deployment-contract RED tests**
 
-Add tests asserting the new example has `runtime_db`, `observer_session_dir`, distinct observer/writer principals, and default gateway tool `conversation_context`. Assert the plugin doctor expectation changes from `{conversation_phone}` to `{conversation_context}`.
+Require stable runtime/transport HMAC secrets, runtime/observer paths, default gateway capabilities `[conversation_context, turn_register]`, observer/writer principals, and CEO plugin expected tool `conversation_context`.
 
-- [ ] **Step 2: Run deployment tests and verify RED**
+- [ ] **Step 2: Implement compatibility/health updates**
 
-```bash
-PYTHONPATH=src .venv/bin/python -m unittest tests.test_deployment_contracts -v
-```
+Unsupported Hermes means Brain lifecycle/context degraded/unavailable and writes disabled; Hermes service itself continues.
 
-- [ ] **Step 3: Update health and compatibility checks**
+- [ ] **Step 3: Update docs/examples**
 
-`hermes_integration_check.py` must read the installed Hermes source only; never write it. Fail compatibility when required public hook names/payload identifiers or WhatsApp batching semantics are absent. Do not fail the Hermes service itself: the checker is a rollout gate for Brain lifecycle features.
+Document `/var/lib/brain/runtime` 0700, runtime DB 0600, secret separation, plugin deployment outside upstream, and rollback without upstream edits.
 
-- [ ] **Step 4: Update deployment docs and examples**
-
-Document `/var/lib/brain/runtime` mode `0700`, DB mode `0600`, the required stable HMAC secret, and the rollback rule: disabling the Brain plugin/observer must not require editing `/usr/local/lib/hermes-agent`.
-
-- [ ] **Step 5: Run full Brain quality gate**
+- [ ] **Step 4: Run full Brain quality gate**
 
 ```bash
 uv run ruff check src tests scripts integrations
@@ -506,7 +318,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/brain/service.py deploy scripts tests/test_deployment_contracts.py README.md docs/runbook.md
@@ -515,17 +327,18 @@ git commit -m "chore: harden Brain transport context deployment"
 
 ## Plan 1 Acceptance Gate
 
-Before starting the observer plan, prove locally with fixtures:
-
 ```text
 RUNTIME_DB_SCHEMA=PASS
-SERVICE_PRINCIPAL_ACL=PASS
+PRINCIPAL_MODE_ACL=PASS
+SAFE_TRANSPORT_ENVELOPE=PASS
+OUTBOX_REQUIRES_NO_RAW_MESSAGE=PASS
 TRANSPORT_INGEST_DEDUP=PASS
-TRANSPORT_PRIVACY=PASS
+TRANSPORT_IDENTITY_REVERIFY=PASS
 TURN_SINGLE_EVENT=PASS
 TURN_BATCHED_EVENTS=PASS
 TURN_AMBIGUITY_FAIL_CLOSED=PASS
 CONVERSATION_CONTEXT_CONTRACT=PASS
 KANBAN_IDEMPOTENCY_REWRITE=PASS
+HERMES_COMPATIBILITY_CHECK=PASS
 HERMES_CORE_FILES_TOUCHED=NO
 ```
