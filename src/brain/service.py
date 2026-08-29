@@ -27,6 +27,7 @@ from .errors import BrainError, DatabaseUnavailable, InvalidRequest
 from .projection import ProjectedMessage, project_rows
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
+from .transport_service import TransportService
 from .whatsapp_identity import PhoneResolution, resolve_phone
 
 logger = logging.getLogger("brain.audit")
@@ -96,6 +97,11 @@ class BrainService:
                 settings.transport_hmac_secret,
             )
             self.runtime.initialize()
+        self.transport_service = TransportService(
+            settings,
+            self.runtime,
+            self.runtime_ids,
+        )
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
 

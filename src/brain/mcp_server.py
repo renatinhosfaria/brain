@@ -21,6 +21,7 @@ from starlette.routing import Route
 from .errors import BrainError
 from .gateway_api import GatewayAPI
 from .service import BrainService
+from .transport_api import TransportAPI
 
 RECENT_SCHEMA = {
     "type": "object",
@@ -72,6 +73,7 @@ class BrainMCPServer:
     def __init__(self, service: BrainService) -> None:
         self.service = service
         self.gateway_api = GatewayAPI(service)
+        self.transport_api = TransportAPI(service)
         self.server = Server(
             "brain",
             version="0.1.0",
@@ -130,6 +132,11 @@ class BrainMCPServer:
                 Route(
                     "/internal/gateway/conversation-phone",
                     self.gateway_api.conversation_phone,
+                    methods=["POST"],
+                ),
+                Route(
+                    "/internal/transport/events",
+                    self.transport_api.events,
                     methods=["POST"],
                 ),
             ],

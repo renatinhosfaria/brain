@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from .transport_models import RuntimeIds
 
 _PHONE_JID_RE = re.compile(r"^(?P<phone>[1-9][0-9]{6,14})@s\.whatsapp\.net$")
 _LID_JID_RE = re.compile(r"^(?P<lid>[0-9]{1,20})@lid$")
@@ -23,6 +26,14 @@ _MAX_MAPPING_BYTES = 4096
 class PhoneResolution:
     status: Literal["ok", "unavailable"]
     phone: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class TransportIdentityResolution:
+    status: Literal["ok", "unavailable"]
+    phone: str | None
+    contact_key: str | None
     reason: str
 
 
@@ -153,3 +164,90 @@ def same_verified_contact(chat_ids: Iterable[str], mapping_dir: Path) -> bool:
         return False
     phones = {resolution.phone for resolution in resolutions}
     return len(phones) == 1
+
+
+def _transport_unavailable(reason: str) -> TransportIdentityResolution:
+    return TransportIdentityResolution(
+        status="unavailable", phone=None, contact_key=None, reason=reason
+    )
+
+
+def _transport_mapping_pairs(mapping_dir: Path) -> set[tuple[str, str]]:
+    """Read only allowlisted observer mappings for transport identity proof."""
+    path = Path(mapping_dir)
+    if path.is_symlink() or not path.is_dir():
+        raise ValueError("observer mapping directory is unavailable")
+    pairs: set[tuple[str, str]] = set()
+    try:
+        entries = sorted(path.iterdir(), key=lambda entry: entry.name)
+    except OSError as exc:
+        raise ValueError("observer mapping directory is unreadable") from exc
+
+    for entry in entries:
+        if not entry.name.startswith(_MAPPING_FILE_PREFIX):
+            continue
+        if not (
+            _FORWARD_FILE_RE.fullmatch(entry.name)
+            or _REVERSE_FILE_RE.fullmatch(entry.name)
+        ):
+            raise ValueError("observer mapping filename is not allowlisted")
+        if entry.is_symlink() or not entry.is_file():
+            raise ValueError("observer mapping evidence is not a regular file")
+        try:
+            lid, phone = _parse_mapping_file(entry, entry.name)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("observer mapping evidence is invalid") from exc
+        pairs.add((lid, phone))
+    return pairs
+
+
+def verify_transport_identity(
+    *,
+    remote_jid_hmac: str,
+    contact_key: str | None,
+    mapping_dir: Path,
+    transport_ids: RuntimeIds,
+) -> TransportIdentityResolution:
+    """Prove one canonical phone from observer mapping evidence and HMACs.
+
+    The raw JIDs are constructed only in memory from allowlisted mapping
+    evidence. No caller-provided JID, display name, or arbitrary JSON is used.
+    """
+    if not isinstance(remote_jid_hmac, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", remote_jid_hmac
+    ):
+        return _transport_unavailable("REMOTE_JID_HMAC_INVALID")
+    if contact_key is not None and not re.fullmatch(r"[0-9a-f]{64}", contact_key):
+        return _transport_unavailable("CONTACT_KEY_INVALID")
+
+    try:
+        pairs = _transport_mapping_pairs(Path(mapping_dir))
+    except (OSError, TypeError, ValueError):
+        return _transport_unavailable("IDENTITY_UNAVAILABLE")
+
+    matching_phones: set[str] = set()
+    for lid, phone in pairs:
+        candidates = (f"{phone}@s.whatsapp.net", f"{lid}@lid")
+        if any(
+            hmac.compare_digest(remote_jid_hmac, transport_ids.jid_hmac(candidate))
+            for candidate in candidates
+        ):
+            matching_phones.add(phone)
+
+    if not matching_phones:
+        return _transport_unavailable("IDENTITY_UNAVAILABLE")
+    if len(matching_phones) != 1:
+        return _transport_unavailable("IDENTITY_AMBIGUOUS")
+
+    phone = next(iter(matching_phones))
+    derived_contact_key = transport_ids.contact_key(phone)
+    if contact_key is not None and not hmac.compare_digest(
+        contact_key, derived_contact_key
+    ):
+        return _transport_unavailable("CONTACT_KEY_MISMATCH")
+    return TransportIdentityResolution(
+        status="ok",
+        phone=phone,
+        contact_key=derived_contact_key,
+        reason="resolved",
+    )
