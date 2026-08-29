@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the deterministic Brain lifecycle engine that binds one proven CTWA origin to the exact Cadastro-created client, derives `Sem Atendimento` / `Não Respondeu` / `Em Atendimento` from durable facts, reconciles Hermes Kanban/delivery obligations read-only, and emits idempotent effects without writing FamaChat.
+**Goal:** Build the deterministic Brain lifecycle engine that binds one exact correlated `ctwa_candidate` transport origin to the exact Cadastro-created client, thereby establishes its `ctwa_first_contact` lifecycle meaning, derives `Sem Atendimento` / `Não Respondeu` / `Em Atendimento` from durable facts, reconciles Hermes Kanban/delivery obligations read-only, and emits idempotent effects without writing FamaChat.
 
 **Architecture:** Kanban idempotency keys reconstruct `wa_turn_id -> stage -> task`; Cadastro terminal run metadata proves the exact new `client_id`; Reno `response_ready` plus one unique Hermes `delivery_obligations.state=delivered` row proves first T1 send success; ordinary later transport events prove human inbound. Desired status is a pure function of facts. Writer claims contain a **transient** verified `expected_phone_e164` derived at claim time from lifecycle `contact_key` and current trusted WhatsApp mapping evidence; raw phone is never persisted in Brain runtime or logged.
 
@@ -14,7 +14,9 @@
 
 - Never write Hermes `state.db` or `kanban.db`; all evidence reads use the read-only abstraction.
 - Add every newly queried Hermes table/column to compatibility schema guards first; missing schema disables lifecycle automation.
-- Lifecycle only for terminal Cadastro decision `LEAD_NOVO_CADASTRADO` with one exact `client_id`, one bound `wa_turn_id`, one verified contact, and one proven `ctwa_first_contact` origin.
+- Lifecycle only for terminal Cadastro decision `LEAD_NOVO_CADASTRADO` with one exact `client_id`, one bound `wa_turn_id`, one verified contact, and one exact correlated transport event with `transport_kind == ctwa_candidate`.
+- Lifecycle origin creation must not require a pre-existing `ctwa_first_contact` label. Binding `lead_lifecycles.origin_event_id` itself materializes/defines that event's lifecycle-relative `ctwa_first_contact` semantic.
+- Never select the first or earliest CTWA candidate for a contact. Origin proof requires exact `wa_turn_id`, contact, Cadastro task/run, and created-client evidence; a historical event may belong to another lifecycle/campaign.
 - `JA_E_CLIENTE`, `CORRETOR_ATIVO`, `INCONCLUSIVO`, failed Cadastro readback, ambiguity, or missing CTWA correlation creates no automated lifecycle.
 - Facts are idempotent/immutable by lifecycle + fact type; ordering never controls final state.
 - Desired status: human fact -> `Em Atendimento`; else T1-success -> `Não Respondeu`; else `Sem Atendimento`.
@@ -80,7 +82,7 @@ Accept only `whatsapp:waturn_<safe-id>:<approved-stage>`. Reject `unavailable`, 
 
 - [ ] **Step 2: Write lifecycle-binding tests**
 
-Seed one correlated CTWA origin and Cadastro run metadata such as:
+Seed one exact `wa_turn_id`-correlated event with `transport_kind == ctwa_candidate`, matching contact/task evidence, and Cadastro run metadata such as:
 
 ```python
 {
@@ -92,7 +94,7 @@ Seed one correlated CTWA origin and Cadastro run metadata such as:
 }
 ```
 
-Require one lifecycle. Replay = no-op. Same origin→different client = hard binding conflict. `JA_E_CLIENTE`/`INCONCLUSIVO` = zero lifecycle.
+Require one lifecycle whose `origin_event_id` binding establishes `inbound_kind == ctwa_first_contact` for that origin. The candidate must be selected from the exact correlated turn, never from contact-global CTWA chronology. Replay = no-op. Same origin→different client = hard binding conflict. `JA_E_CLIENTE`/`INCONCLUSIVO` = zero lifecycle.
 
 - [ ] **Step 3: Implement one exact structured metadata parser**
 

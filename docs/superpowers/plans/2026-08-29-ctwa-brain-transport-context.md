@@ -28,7 +28,8 @@
 - Gateway/default capabilities are `turn_register` and `conversation_context`; worker fallback `conversation_phone` remains for Porteiro/Cadastro.
 - Service principals are distinct and cannot use worker Task/Run identity as authority.
 - Correlation is fail-closed: zero matches -> `turn_not_correlated`; multiple matches -> `ambiguous_transport_events`.
-- A later event matching the proven CTWA detector is `ctwa_attributed_inbound`, never automatically `human_inbound`.
+- Plan 1 owns transport facts and correlation, not lifecycle interpretation. `transport_kind` is `ctwa_candidate|ordinary_inbound`; `inbound_kind` is lifecycle-relative and remains `null` until an exact lifecycle binding exists.
+- Never infer lifecycle origin or semantics from contact-global chronology. A historical CTWA candidate for the same phone may belong to another lifecycle/campaign.
 - Every behavior change follows TDD and every task ends with tests plus a focused commit.
 
 ---
@@ -259,7 +260,7 @@ Assert exactly one model-visible tool `conversation_context` plus `pre_llm_call`
 
 - [ ] **Step 2: Write contract/failure tests**
 
-Success shape contains verified `contact.phone_e164`, optional display name/source, `turn.wa_turn_id`, ordered events with only `event_id`, `inbound_kind`, optional `source_app`. Oversized/malformed/private-route failures return controlled `status=unavailable` to model boundary.
+Success shape contains verified `contact.phone_e164`, optional display name/source, `turn.wa_turn_id`, and events ordered by `turn_events.ordinal`. Each event exposes only `event_id`, `transport_kind`, optional `source_app`, and `inbound_kind`. In Plan 1, `inbound_kind` is always `null`; no lifecycle-semantic or contact-chronology inference is permitted. Oversized/malformed/private-route failures return controlled `status=unavailable` to model boundary.
 
 - [ ] **Step 3: Implement shared bounded localhost POST helper**
 

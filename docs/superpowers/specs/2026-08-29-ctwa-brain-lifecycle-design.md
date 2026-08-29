@@ -233,6 +233,13 @@ After 24 hours, delete the raw display name; only presence/HMAC metadata may rem
 
 ## 7. Transport classification
 
+Transport classification and lifecycle-relative semantic classification are separate layers:
+
+- `transport_kind` is transport-level evidence. Before a lifecycle exists, its bounded values are `ctwa_candidate` and `ordinary_inbound`.
+- `inbound_kind` is lifecycle-relative semantic evidence. Before an exact lifecycle binding exists, it is `null`; transport evidence alone must not be called `ctwa_first_contact`, `human_inbound`, or `ctwa_attributed_inbound`.
+
+No contact-global chronological rule is valid. In particular, Brain must never infer a lifecycle origin as the first or earliest CTWA event ever observed for a phone/contact, because that event may belong to a previous lifecycle or campaign.
+
 ### 7.1 Proven historical CTWA detector
 
 A transport event may be classified as a CTWA attribution candidate when:
@@ -245,15 +252,17 @@ A transport event may be classified as a CTWA attribution candidate when:
 
 ### 7.2 `ctwa_first_contact`
 
-For a new lifecycle, the first unique inbound transport event that matches the proven CTWA detector and is correlated to the current CEO turn is classified `ctwa_first_contact`.
+Lifecycle creation requires one exact event correlated to the Cadastro `wa_turn_id`, for the same verified contact and exact created client, with `transport_kind == ctwa_candidate`. It does not require a pre-existing `ctwa_first_contact` label.
+
+The durable lifecycle binding itself establishes the semantic fact `lead_lifecycles.origin_event_id => ctwa_first_contact`. Until that binding exists, the event remains only a `ctwa_candidate` and its `inbound_kind` is `null`.
 
 That event does **not** count as a human reply, even when `containsAutoReply=false`.
 
 ### 7.3 Later inbound classification
 
-A later distinct inbound event from the same verified contact creates `human_inbound` only when that later event does **not** match the proven CTWA detector.
+A later distinct event belonging to the same exact lifecycle is interpreted relative to its bound origin. An event after the origin with `transport_kind == ordinary_inbound` has `inbound_kind == human_inbound` and may create the human-inbound fact.
 
-If a later distinct event itself carries the proven CTWA attribution signature, classify it as `ctwa_attributed_inbound` and do not create a human-reply fact from it. This prevents a second ad-prefilled message from being mistaken for a manually typed response.
+If a later distinct event in that lifecycle has `transport_kind == ctwa_candidate`, its `inbound_kind` is `ctwa_attributed_inbound` and it does not create a human-reply fact. This prevents a second ad-prefilled message from being mistaken for a manually typed response.
 
 A duplicate delivery of an existing `event_id` never creates a human fact.
 
@@ -307,11 +316,12 @@ turn:
   wa_turn_id: "waturn_..."
 events:
   - event_id: "waevt_..."
-    inbound_kind: ctwa_first_contact
+    transport_kind: ctwa_candidate
     source_app: instagram
-  - event_id: "waevt_..."
-    inbound_kind: human_inbound
+    inbound_kind: null
 ```
+
+`transport_kind` is always present. `inbound_kind` is also always present but remains `null` before lifecycle binding. Once the lifecycle engine has an exact durable binding, the same stable shape may expose `ctwa_first_contact` for the bound origin, `human_inbound` for a later ordinary event, or `ctwa_attributed_inbound` for a later CTWA candidate. `conversation_context()` must not infer those meanings from contact chronology.
 
 The response never exposes raw transport payloads, JIDs/LIDs, `ctwaClid`, full URLs, session credentials, or arbitrary `contextInfo`.
 

@@ -9,13 +9,13 @@
 ## Component Plans
 
 1. `docs/superpowers/plans/2026-08-29-ctwa-brain-transport-context.md`
-   - Brain runtime DB, privacy-safe event ingestion, turn correlation, `conversation_context()`, CEO plugin hooks/idempotency.
+   - Brain runtime DB, privacy-safe transport facts, turn correlation, safe `conversation_context()` hooks, and CEO plugin idempotency. It does not depend on lifecycle semantics.
 2. `docs/superpowers/plans/2026-08-29-ctwa-whatsapp-observer.md`
    - second linked-device observer, own pinned Baileys, safe durable outbox, health/systemd.
 3. `docs/superpowers/plans/2026-08-29-ctwa-hermes-profile-contracts.md`
    - Fama-owned CEO/Porteiro/Cadastro/Reno SOUL/skills/config allowlists and deterministic workflow contracts.
 4. `docs/superpowers/plans/2026-08-29-ctwa-lifecycle-engine.md`
-   - Kanban/delivery reconciliation, exact lifecycle binding, facts/state/effects, writer claim/result APIs.
+   - Kanban/delivery reconciliation, exact lifecycle binding, lifecycle-relative semantic interpretation, facts/state/effects, and writer claim/result APIs.
 5. `docs/superpowers/plans/2026-08-29-ctwa-lifecycle-writer-rollout.md`
    - deterministic writer, FamaChat atomic-write proof, upstream integrity, shadow/go-live gates.
 
@@ -25,6 +25,9 @@
 - Fama-owned operational files in `renatinhosfaria/hermes` may change only as enumerated in Plan 3 above (component plan filename #3).
 - Hermes state/Kanban DB access from Brain remains read-only.
 - The observer safe envelope may include a `transport_kind` hint for diagnostics, but **Brain is authoritative**: Brain recomputes/validates `ctwa_candidate` vs ordinary from the sanitized CTWA fields before persistence/lifecycle use. A mismatch is rejected or normalized deterministically; never trust a free-form classification string from the wire.
+- `transport_kind` is transport evidence. `inbound_kind` is semantic evidence relative to a durable lifecycle binding and remains `null` before that binding.
+- Plan 1 produces transport facts, correlation, and a stable context shape containing both fields; the lifecycle plan later interprets those facts. Plan 1 does not depend on Plan 4/lifecycle, so there is no dependency cycle.
+- Lifecycle creation requires one exact correlated `ctwa_candidate` for the same `wa_turn_id`, contact, Cadastro task/run, and created client. The `origin_event_id` binding itself establishes `ctwa_first_contact`; no contact-global chronological inference is allowed.
 - Observer outbox contains no raw message text, raw JID/LID, raw observer message ID, raw source ID, raw ctwaClid, or full URL. Safe HMAC/length/hostname metadata only, plus sanitized display name until its 24h expiry.
 - `wa_turn_id` and `event_id` remain distinct. Kanban idempotency always uses `wa_turn_id`; lifecycle origin uses `event_id`.
 - CEO uses one `conversation_context()` capability; worker `conversation_phone()` remains fallback only for Porteiro/Cadastro.
@@ -47,6 +50,7 @@
 ### Stage 1 — Brain transport/context foundation
 
 - [ ] Execute all tasks in `2026-08-29-ctwa-brain-transport-context.md` using TDD.
+- [ ] Validate the pre-lifecycle context contract with `transport_kind` present and `inbound_kind=null`; do not require the lifecycle engine.
 - [ ] Run Plan 1 acceptance gate locally/against read-only supported Hermes evidence.
 - [ ] Do not deploy a status writer.
 
