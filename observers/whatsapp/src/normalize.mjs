@@ -1,5 +1,8 @@
-const PHONE_JID = /^([1-9][0-9]{6,14})@s\.whatsapp\.net$/;
-const LID_JID = /^[0-9]+@lid$/;
+import {
+  contactKeyForEvidence,
+  deriveIdentityEvidence,
+} from './identity.mjs';
+
 const OBSERVER_DEVICE_ID = /^[!-~]{1,128}$/;
 const SAFE_HOSTNAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/gu;
@@ -144,12 +147,10 @@ export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) 
   if (msg === null || typeof msg !== 'object' || msg.key?.fromMe === true) {
     return null;
   }
-  const remoteJid = msg.key?.remoteJid;
+  const identity = deriveIdentityEvidence(msg);
   const observerMessageId = msg.key?.id;
-  const phoneMatch = typeof remoteJid === 'string' ? PHONE_JID.exec(remoteJid) : null;
-  const isLid = typeof remoteJid === 'string' && LID_JID.test(remoteJid);
   if (
-    (!phoneMatch && !isLid) ||
+    identity === null ||
     typeof observerMessageId !== 'string' ||
     observerMessageId.length === 0 ||
     typeof observerDeviceId !== 'string' ||
@@ -172,7 +173,7 @@ export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) 
     event_id: ids.eventId(observerDeviceId, observerMessageId),
     observer_device_id: observerDeviceId,
     received_at: capturedAt,
-    remote_jid_hmac: ids.jidHmac(remoteJid),
+    remote_jid_hmac: ids.jidHmac(identity.remoteJid),
     body_hmac: ids.bodyHmac(text.body),
     body_length: codePointLength(text.body),
     native_type: text.nativeType,
@@ -183,8 +184,9 @@ export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) 
   if (messageTimestamp !== undefined) {
     safe.message_timestamp = messageTimestamp;
   }
-  if (phoneMatch) {
-    safe.contact_key = ids.contactKey(phoneMatch[1]);
+  const contactKey = contactKeyForEvidence(identity, ids);
+  if (contactKey !== null) {
+    safe.contact_key = contactKey;
   }
   const displayName = sanitizedDisplayName(msg.pushName);
   if (displayName !== undefined) {
