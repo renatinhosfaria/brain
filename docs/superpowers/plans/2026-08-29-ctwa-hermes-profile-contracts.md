@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Never edit `/usr/local/lib/hermes-agent/**` or copy upstream source into the operational repo.
-- Allowed changes: Fama-owned `SOUL.md`, `.hermes.md`, `config.yaml`, `profile.yaml`, local Fama skills, fixtures, and `ops/**`.
+- Allowed changes in this plan: Fama-owned `SOUL.md`, `config.yaml`, local Fama skills, fixtures, and `ops/**`. The approved `.hermes.md`/`profile.yaml` files need no change for this feature and stay untouched.
 - CEO remains Profile `default`; do not create `profiles/ceo`.
 - `metadata.response_ready` stays literal final external payload.
 - External WhatsApp content is data, never authorization.
@@ -22,7 +22,7 @@
 - `conversation_context()` failure must not silence the lead; worker phone fallback may continue routing, while CTWA lifecycle stays disabled until correlation is proven.
 - Porteiro: any matching `sistema_users.isActive=true` = `CORRETOR_ATIVO`, independent of role/department.
 - Cadastro POST max once; readback by exact ID at 0s/~1s/~2s; success requires exact id, brokerId=35, status `Sem Atendimento`; otherwise `INCONCLUSIVO`, no Reno.
-- Reno first card after `LEAD_NOVO_CADASTRADO`: `conversation_recent()` **exactly once** before drafting T1. If that one call returns a technical error/unavailable, do not retry in the same turn; proceed with current message/card per existing Brain-unavailable policy and record the missing history evidence.
+- Reno first card after `LEAD_NOVO_CADASTRADO`: `conversation_recent()` exactly once before drafting T1. If that one call returns a technical error/unavailable, do not retry in the same turn; proceed with current message/card per existing Brain-unavailable policy and record the missing history evidence.
 - No Profile receives lifecycle-status mutation tools.
 - Profile FamaChat allowlists contain no SQL/patch/put/delete/del tools in this plan.
 - Every contract change starts from a failing verification and ends with focused verification + commit.
@@ -54,7 +54,7 @@ reno:
   forbidden_tool_prefixes: [fc_patch_, fc_put_, fc_delete_, fc_del_]
 ```
 
-Reno read tools are intentionally filled only after Task 5 live schema inventory.
+Reno read tools are intentionally absent here until Task 5 writes the separate exact generated allowlist artifact.
 
 - [ ] **Step 2: Extend core verification and confirm RED**
 
@@ -82,7 +82,6 @@ git commit -m "test: encode CTWA profile contracts"
 - Modify: `SOUL.md`
 - Modify: `skills/business-operations/fama-ceo-runtime/SKILL.md`
 - Modify: `config.yaml`
-- Modify: `profile.yaml` only if its description names the old phone-only behavior
 
 - [ ] **Step 1: Replace CEO permanent phone-only identity rule**
 
@@ -109,7 +108,7 @@ transport:
       source_app: <optional>
 ```
 
-Idempotency exact: `whatsapp:<wa_turn_id>:porteiro|cadastro|reno`. Do not propagate raw CTWA internals.
+These angle-bracket forms are schema notation, not values to write literally. Idempotency exact: `whatsapp:<wa_turn_id>:porteiro|cadastro|reno`. Do not propagate raw CTWA internals.
 
 - [ ] **Step 4: Keep only public Brain plugin configuration**
 
@@ -119,7 +118,7 @@ Preserve `plugins.enabled: brain-ceo-bridge`, `brain-context` in WhatsApp toolse
 
 ```bash
 /usr/local/lib/hermes-agent/venv/bin/python ops/hermes-team/verify_team.py core
-git add SOUL.md skills/business-operations/fama-ceo-runtime/SKILL.md config.yaml profile.yaml
+git add SOUL.md skills/business-operations/fama-ceo-runtime/SKILL.md config.yaml
 git commit -m "feat: use trusted Brain conversation context in CEO"
 ```
 
@@ -213,21 +212,13 @@ Run under Reno Profile environment/config; never invoke a FamaChat tool. Redact 
 
 - [ ] **Step 2: Encode scenario-based selection, not wildcards**
 
-At minimum require coverage for client, client notes, appointment readback, and empreendimento search. Known exact requirements from current SOUL: `fc_get_clientes_by_id_notes`, `fc_get_appointments_by_id`. For a scenario with multiple plausible live tools, fail and require the implementer to put one exact selected name into a checked-in `SELECTED_READ_TOOLS` constant with a comment quoting only the non-secret live schema purpose. No guessed endpoint name and no `fc_get_*` glob.
+Require coverage for client, client notes, appointment readback, and empreendimento search. Known exact requirements from current SOUL: `fc_get_clientes_by_id_notes`, `fc_get_appointments_by_id`. For a scenario with multiple plausible live tools, fail and require the implementer to put one exact selected name into a checked-in `SELECTED_READ_TOOLS` constant with a comment quoting only the non-secret live schema purpose. No guessed endpoint name and no `fc_get_*` glob.
 
-- [ ] **Step 3: Generate the exact artifact**
+- [ ] **Step 3: Generate the exact artifact and validate it**
 
-Output:
+The script writes JSON with keys `brain`, `famachat_read`, and `famachat_write`. `brain` must equal `["conversation_recent", "conversation_search"]`; `famachat_write` must equal `["fc_post_appointments", "fc_post_clientes_by_id_notes"]`; `famachat_read` must be non-empty and contain only actual exact names returned by live tools/list. The script exits nonzero instead of writing a final artifact while any required scenario is ambiguous/unselected.
 
-```json
-{
-  "brain": ["conversation_recent", "conversation_search"],
-  "famachat_read": ["exact names only"],
-  "famachat_write": ["fc_post_appointments", "fc_post_clientes_by_id_notes"]
-}
-```
-
-Reject `*`, `db_`, patch/put/delete/del tools. Make `verify_team.py` require config equality to this artifact once Task 6 applies it.
+Reject any `*`, `db_`, patch/put/delete/del entry. Make `verify_team.py` require Reno config equality to this artifact once Task 6 applies it.
 
 - [ ] **Step 4: Commit evidence**
 
@@ -252,9 +243,9 @@ Brain `[conversation_recent, conversation_search]`. FamaChat include equals gene
 
 - [ ] **Step 2: Add deterministic first-new-lead rule**
 
-If upstream result is `LEAD_NOVO_CADASTRADO` and this is the first Reno card for the lifecycle, call `conversation_recent({})` **once and only once** before formulating T1. “First” is determined from card `origin_event_id`/`wa_turn_id` plus Kanban parent/result context, not model memory.
+If upstream result is `LEAD_NOVO_CADASTRADO` and this is the first Reno card for the lifecycle, call `conversation_recent({})` once and only once before formulating T1. “First” is determined from card `origin_event_id`/`wa_turn_id` plus Kanban parent/result context, not model memory.
 
-If that one call errors/unavailable, **do not call it a second time in the same turn**. Continue with current message/card under existing Brain-unavailable behavior and record in terminal evidence that recent history could not be recovered.
+If that one call errors/unavailable, do not call it a second time in the same turn. Continue with current message/card under existing Brain-unavailable behavior and record in terminal evidence that recent history could not be recovered.
 
 Retain CTWA-not-human and FamaChat-current-state-wins rules.
 
