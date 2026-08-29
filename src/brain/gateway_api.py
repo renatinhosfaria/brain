@@ -22,6 +22,7 @@ _CONTEXT_FIELDS = frozenset(
 _TURN_FIELDS = _CONTEXT_FIELDS | frozenset(
     {"turn_id", "user_message", "turn_timestamp"}
 )
+_CONVERSATION_CONTEXT_FIELDS = _CONTEXT_FIELDS | frozenset({"wa_turn_id"})
 _MAX_CONTEXT_VALUE = 512
 _MAX_TURN_ID = 512
 _MAX_USER_MESSAGE = 12_000
@@ -88,6 +89,27 @@ def _parse_turn(payload: object) -> TurnPayload:
     ):
         raise _request_error()
     return TurnPayload(context, turn_id, user_message, float(timestamp))
+
+
+@dataclass(frozen=True)
+class ConversationContextPayload:
+    context: GatewaySessionContext
+    wa_turn_id: str
+
+
+def _parse_conversation_context(payload: object) -> ConversationContextPayload:
+    if not isinstance(payload, dict) or set(payload) != _CONVERSATION_CONTEXT_FIELDS:
+        raise _request_error()
+    context = _parse_context({key: payload[key] for key in _CONTEXT_FIELDS})
+    wa_turn_id = payload["wa_turn_id"]
+    if (
+        not isinstance(wa_turn_id, str)
+        or not wa_turn_id.startswith("waturn_")
+        or not (8 <= len(wa_turn_id) <= 128)
+        or any(unicodedata.category(char).startswith("C") for char in wa_turn_id)
+    ):
+        raise _request_error()
+    return ConversationContextPayload(context, wa_turn_id)
 
 
 class GatewayAPI:
@@ -171,6 +193,45 @@ class GatewayAPI:
                 turn.turn_id,
                 turn.user_message,
                 turn.turn_timestamp,
+            )
+            return JSONResponse(result, status_code=200)
+        except BrainError as exc:
+            return self._response_for_error(exc)
+        except (OSError, TypeError, UnicodeError, ValueError):
+            return self._response_for_error(_request_error())
+
+    async def conversation_context(self, request: Request) -> JSONResponse:
+        if request.method != "POST":
+            return JSONResponse({"error": "method not allowed"}, status_code=405)
+        headers = dict(request.headers)
+        try:
+            self.service.authorizer.parse_gateway_headers(
+                headers, "conversation_context"
+            )
+            declared_length = request.headers.get("content-length")
+            if declared_length is not None:
+                try:
+                    if not (0 <= int(declared_length) <= _MAX_BODY_BYTES):
+                        raise _request_error()
+                except ValueError:
+                    raise _request_error() from None
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > _MAX_BODY_BYTES:
+                    raise _request_error()
+                chunks.append(chunk)
+            try:
+                payload: Any = json.loads(b"".join(chunks))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                raise _request_error() from None
+            parsed = _parse_conversation_context(payload)
+            result = await asyncio.to_thread(
+                self.service.gateway_conversation_context,
+                headers,
+                parsed.context,
+                parsed.wa_turn_id,
             )
             return JSONResponse(result, status_code=200)
         except BrainError as exc:

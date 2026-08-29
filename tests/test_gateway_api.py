@@ -15,6 +15,7 @@ from brain.gateway_api import GatewayAPI
 from brain.mcp_server import BrainMCPServer, _tools
 from brain.service import BrainService
 from brain.transport_models import RuntimeIds
+from brain.turn_correlation import session_key_hmac
 
 
 class GatewayAPITests(unittest.TestCase):
@@ -72,7 +73,9 @@ class GatewayAPITests(unittest.TestCase):
                     "default",
                     "gateway",
                     token_digest("gateway-secret"),
-                    frozenset({"conversation_phone", "turn_register"}),
+                    frozenset(
+                        {"conversation_phone", "turn_register", "conversation_context"}
+                    ),
                 ),
                 "reno": PrincipalConfig(
                     "reno",
@@ -180,6 +183,29 @@ class GatewayAPITests(unittest.TestCase):
             json=lambda: json.loads(response.body),
         )
 
+    def post_context(
+        self,
+        payload: object,
+        token: str = "gateway-secret",
+        *,
+        method: str = "POST",
+    ) -> SimpleNamespace:
+        response = asyncio.run(
+            self.api.conversation_context(
+                self.request(
+                    payload,
+                    token,
+                    path="/internal/gateway/conversation-context",
+                    method=method,
+                )
+            )
+        )
+        return SimpleNamespace(
+            status_code=response.status_code,
+            text=response.body.decode("utf-8"),
+            json=lambda: json.loads(response.body),
+        )
+
     def valid_turn(self) -> dict[str, object]:
         return {
             **self.valid_context(),
@@ -193,29 +219,73 @@ class GatewayAPITests(unittest.TestCase):
             '"123456789012345"', encoding="utf-8"
         )
 
-    def seed_event(self, body: str = "hello") -> str:
-        event_id = self.ids.event_id("observer-a", f"event-{body}")
+    def seed_event(
+        self,
+        body: str = "hello",
+        *,
+        transport_kind: str = "ordinary_inbound",
+        source_app: str | None = None,
+        suffix: str = "",
+        timestamp: float = 999.0,
+    ) -> str:
+        event_id = self.ids.event_id("observer-a", f"event-{body}-{suffix}")
         contact_key = self.ids.contact_key("5534999772714")
         self.service.runtime.write(
             lambda conn: conn.execute(
                 "INSERT INTO transport_events (event_id, observer_device_id, "
                 "contact_key, direction, received_at, message_timestamp, body_hmac, "
-                "body_length, native_type, transport_kind, created_at) "
+                "body_length, native_type, transport_kind, source_app, created_at) "
                 "VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, 'conversation', "
-                "'ordinary_inbound', ?)",
+                "?, ?, ?)",
                 (
                     event_id,
                     "observer-a",
                     contact_key,
-                    999.1,
-                    999.0,
+                    timestamp + 0.1,
+                    timestamp,
                     self.ids.body_hmac(body),
                     len(body),
-                    999.2,
+                    transport_kind,
+                    source_app,
+                    timestamp + 0.2,
                 ),
             )
         )
         return event_id
+
+    def context_payload(self, wa_turn_id: str) -> dict[str, str]:
+        return {**self.valid_context(), "wa_turn_id": wa_turn_id}
+
+    def insert_turn(self, status: str, turn_id: str = "opaque-context") -> str:
+        wa_turn_id = self.ids.wa_turn_id(turn_id)
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO whatsapp_turns (wa_turn_id, hermes_session_id, "
+                "session_key_hmac, contact_key, body_hmac, body_length, "
+                "turn_timestamp, correlation_status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    wa_turn_id,
+                    "g-one",
+                    session_key_hmac(b"r" * 32, "wa:g"),
+                    self.ids.contact_key("5534999772714"),
+                    self.ids.body_hmac("body"),
+                    4,
+                    1000.0,
+                    status,
+                    1000.1,
+                ),
+            )
+        )
+        return wa_turn_id
+
+    def link_event(self, wa_turn_id: str, event_id: str, ordinal: int) -> None:
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO turn_events (wa_turn_id, event_id, ordinal) VALUES (?, ?, ?)",
+                (wa_turn_id, event_id, ordinal),
+            )
+        )
 
     def test_gateway_context_resolves_phone_after_state_revalidation(self) -> None:
         (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(
@@ -368,6 +438,154 @@ class GatewayAPITests(unittest.TestCase):
             with self.subTest(payload=payload, method=method):
                 response = self.post_turn(payload, method=method)
                 self.assertIn(response.status_code, {400, 405})
+
+    def test_conversation_context_route_is_private_post_only(self) -> None:
+        app = BrainMCPServer(self.service).app()
+        routes = {route.path: route for route in app.routes if hasattr(route, "path")}
+
+        self.assertIn("/internal/gateway/conversation-context", routes)
+        self.assertEqual(
+            routes["/internal/gateway/conversation-context"].methods, {"POST"}
+        )
+        self.assertNotIn("conversation_context", {tool.name for tool in _tools()})
+        response = self.post_context(
+            self.context_payload("waturn_missing"), method="GET"
+        )
+        self.assertEqual(response.status_code, 405)
+
+    def test_conversation_context_returns_ordered_safe_transport_facts(self) -> None:
+        self.prepare_turn_identity()
+        wa_turn_id = self.insert_turn("correlated")
+        ordinary = self.seed_event("second", suffix="ordinary", timestamp=999.2)
+        ctwa = self.seed_event(
+            "first",
+            transport_kind="ctwa_candidate",
+            source_app="instagram",
+            suffix="ctwa",
+            timestamp=999.1,
+        )
+        self.link_event(wa_turn_id, ordinary, 1)
+        self.link_event(wa_turn_id, ctwa, 0)
+
+        response = self.post_context(self.context_payload(wa_turn_id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "status": "ok",
+                "contact": {
+                    "phone_e164": "5534999772714",
+                    "display_name": None,
+                    "display_name_source": None,
+                },
+                "turn": {"wa_turn_id": wa_turn_id},
+                "events": [
+                    {
+                        "event_id": ctwa,
+                        "transport_kind": "ctwa_candidate",
+                        "source_app": "instagram",
+                        "inbound_kind": None,
+                    },
+                    {
+                        "event_id": ordinary,
+                        "transport_kind": "ordinary_inbound",
+                        "source_app": None,
+                        "inbound_kind": None,
+                    },
+                ],
+            },
+        )
+        event_fields = {"event_id", "transport_kind", "source_app", "inbound_kind"}
+        self.assertTrue(
+            all(set(event) == event_fields for event in response.json()["events"])
+        )
+        serialized = response.text
+        for private_field in (
+            "body_hmac",
+            "contact_key",
+            "session_key",
+            "hermes_session_id",
+            "source_id_hmac",
+            "ctwa_clid_hmac",
+        ):
+            self.assertNotIn(private_field, serialized)
+
+    def test_conversation_context_returns_only_valid_display_name_ephemera(
+        self,
+    ) -> None:
+        self.prepare_turn_identity()
+        for suffix, expires_at, expected in (
+            ("valid", 4_000_000_000.0, ("Maria Silva", "whatsapp_profile")),
+            ("expired", 1.0, (None, None)),
+        ):
+            with self.subTest(suffix=suffix):
+                wa_turn_id = self.insert_turn("correlated", f"turn-{suffix}")
+                event_id = self.seed_event("body", suffix=suffix)
+                self.link_event(wa_turn_id, event_id, 0)
+                self.service.runtime.write(
+                    lambda conn, expires_at=expires_at: conn.execute(
+                        "INSERT OR REPLACE INTO contact_ephemera "
+                        "(contact_key, display_name, display_name_hmac, expires_at, "
+                        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            self.ids.contact_key("5534999772714"),
+                            "Maria Silva",
+                            self.ids.opaque_hmac("Maria Silva"),
+                            expires_at,
+                            1.0,
+                            1.0,
+                        ),
+                    )
+                )
+                response = self.post_context(self.context_payload(wa_turn_id))
+                contact = response.json()["contact"]
+                self.assertEqual(
+                    (contact["display_name"], contact["display_name_source"]), expected
+                )
+
+    def test_conversation_context_missing_pending_ambiguous_or_wrong_turn_unavailable(
+        self,
+    ) -> None:
+        self.prepare_turn_identity()
+        for status in ("pending", "ambiguous"):
+            with self.subTest(status=status):
+                wa_turn_id = self.insert_turn(status, f"turn-{status}")
+                response = self.post_context(self.context_payload(wa_turn_id))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["status"], "unavailable")
+        missing = self.post_context(self.context_payload("waturn_missing"))
+        self.assertEqual(missing.status_code, 200)
+        self.assertEqual(missing.json()["status"], "unavailable")
+
+        other_context = self.valid_context()
+        other_context["session_id"] = "other"
+        wrong = self.post_context({**other_context, "wa_turn_id": "waturn_missing"})
+        self.assertNotEqual(wrong.status_code, 200)
+
+    def test_conversation_context_denies_wrong_capability_before_body_read(
+        self,
+    ) -> None:
+        body_read = False
+
+        async def receive() -> dict[str, object]:
+            nonlocal body_read
+            body_read = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/internal/gateway/conversation-context",
+                "headers": [(b"authorization", b"Bearer reno-secret")],
+            },
+            receive,
+        )
+        response = asyncio.run(self.api.conversation_context(request))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(body_read)
 
 
 if __name__ == "__main__":

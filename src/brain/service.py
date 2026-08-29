@@ -32,6 +32,7 @@ from .turn_correlation import (
     TurnConflictError,
     TurnCorrelationService,
     TurnRegistration,
+    session_key_hmac,
 )
 from .whatsapp_identity import PhoneResolution, resolve_phone
 
@@ -404,6 +405,148 @@ class BrainService:
                 error="DB_UNAVAILABLE",
             )
             raise DatabaseUnavailable() from exc
+
+    def gateway_conversation_context(
+        self,
+        headers: Mapping[str, str],
+        context: GatewaySessionContext,
+        wa_turn_id: str,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        identity: dict[str, Any] = {
+            "profile": "unknown",
+            "mode": "unknown",
+            "task_id": None,
+            "run_id": None,
+        }
+        try:
+            request_identity = self.authorizer.parse_gateway_headers(
+                headers, "conversation_context"
+            )
+            identity["profile"] = request_identity.principal
+            identity["mode"] = self.settings.principals[request_identity.principal].mode
+            capability = self.authorizer.authorize_gateway(request_identity, context)
+            resolution = resolve_phone(
+                capability.chat_id, self.settings.whatsapp_session_dir
+            )
+            if resolution.status != "ok" or not resolution.phone:
+                result = {"status": "unavailable", "reason": "contact_not_resolved"}
+            elif self.runtime_ids is None:
+                raise DatabaseUnavailable()
+            else:
+                contact_key = self.runtime_ids.contact_key(resolution.phone)
+                expected_session_hmac = session_key_hmac(
+                    self.settings.runtime_hmac_secret, capability.session_key
+                )
+                result = self.runtime.read(
+                    lambda conn: self._conversation_context_from_runtime(
+                        conn,
+                        wa_turn_id=wa_turn_id,
+                        hermes_session_id=context.session_id,
+                        session_key_digest=expected_session_hmac,
+                        contact_key=contact_key,
+                        phone_e164=resolution.phone,
+                        now=time.time(),
+                    )
+                )
+            self._audit(
+                identity=identity,
+                tool="conversation_context",
+                decision="allow" if result["status"] == "ok" else "unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error=result.get("reason"),
+            )
+            return result
+        except BrainError as exc:
+            self._audit(
+                identity=identity,
+                tool="conversation_context",
+                decision="deny" if not exc.unavailable else "unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error=exc.code,
+            )
+            raise
+        except Exception as exc:
+            logger.exception("brain context request failed: %s", type(exc).__name__)
+            self._audit(
+                identity=identity,
+                tool="conversation_context",
+                decision="unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error="DB_UNAVAILABLE",
+            )
+            raise DatabaseUnavailable() from exc
+
+    @staticmethod
+    def _conversation_context_from_runtime(
+        conn: sqlite3.Connection,
+        *,
+        wa_turn_id: str,
+        hermes_session_id: str,
+        session_key_digest: str,
+        contact_key: str,
+        phone_e164: str,
+        now: float,
+    ) -> dict[str, Any]:
+        turn = conn.execute(
+            "SELECT hermes_session_id, session_key_hmac, contact_key, "
+            "correlation_status FROM whatsapp_turns WHERE wa_turn_id = ?",
+            (wa_turn_id,),
+        ).fetchone()
+        if turn is None:
+            return {"status": "unavailable", "reason": "current_turn_not_registered"}
+        if (
+            str(turn["hermes_session_id"]) != hermes_session_id
+            or not hmac.compare_digest(
+                str(turn["session_key_hmac"]), session_key_digest
+            )
+            or not hmac.compare_digest(str(turn["contact_key"]), contact_key)
+        ):
+            return {"status": "unavailable", "reason": "current_turn_not_registered"}
+        correlation_status = str(turn["correlation_status"])
+        if correlation_status != "correlated":
+            reason = (
+                "ambiguous_transport_events"
+                if correlation_status == "ambiguous"
+                else "turn_not_correlated"
+            )
+            return {"status": "unavailable", "reason": reason}
+
+        rows = conn.execute(
+            "SELECT event.event_id, event.transport_kind, event.source_app "
+            "FROM turn_events AS binding JOIN transport_events AS event "
+            "ON event.event_id = binding.event_id WHERE binding.wa_turn_id = ? "
+            "ORDER BY binding.ordinal",
+            (wa_turn_id,),
+        ).fetchall()
+        if not rows:
+            return {"status": "unavailable", "reason": "turn_not_correlated"}
+        ephemera = conn.execute(
+            "SELECT display_name FROM contact_ephemera "
+            "WHERE contact_key = ? AND expires_at > ? AND display_name IS NOT NULL",
+            (contact_key, now),
+        ).fetchone()
+        display_name = str(ephemera["display_name"]) if ephemera else None
+        return {
+            "status": "ok",
+            "contact": {
+                "phone_e164": phone_e164,
+                "display_name": display_name,
+                "display_name_source": "whatsapp_profile" if display_name else None,
+            },
+            "turn": {"wa_turn_id": wa_turn_id},
+            "events": [
+                {
+                    "event_id": str(row["event_id"]),
+                    "transport_kind": str(row["transport_kind"]),
+                    "source_app": str(row["source_app"])
+                    if row["source_app"] is not None
+                    else None,
+                    "inbound_kind": None,
+                }
+                for row in rows
+            ],
+        }
 
     @staticmethod
     def _validate_limit(

@@ -140,6 +140,11 @@ class BrainMCPServer:
                     methods=["POST"],
                 ),
                 Route(
+                    "/internal/gateway/conversation-context",
+                    self.gateway_api.conversation_context,
+                    methods=["POST"],
+                ),
+                Route(
                     "/internal/transport/events",
                     self.transport_api.events,
                     methods=["POST"],

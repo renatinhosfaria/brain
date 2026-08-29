@@ -1,8 +1,11 @@
 name: brain-ceo-bridge
 version: 1.0.0
-description: "Expose the verified WhatsApp transport phone to the CEO through the local Brain gateway."
+description: "Expose trusted current-turn WhatsApp transport context to the CEO through the local Brain gateway."
 author: Brain maintainers
 provides_tools:
-  - conversation_phone
+  - conversation_context
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
 requires_env:
   - BRAIN_GATEWAY_TOKEN
