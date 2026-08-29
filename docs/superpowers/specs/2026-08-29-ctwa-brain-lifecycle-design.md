@@ -144,7 +144,9 @@ Session path is independent of Hermes, for example:
 
 with directory mode `0700` and credential/evidence files `0600`.
 
-The observer reuses the exact compatible Baileys version selected for the deployed Brain implementation. It must never copy or reuse `/root/.hermes/platforms/whatsapp/session`.
+Production Brain owns and pins its own Baileys dependency. The first supported version is the validated `@whiskeysockets/baileys 7.0.0-rc13`. The observer must not import, modify, or depend at runtime on the package tree under `/usr/local/lib/hermes-agent`; a future Hermes upgrade must not silently change the observer dependency. A new observer/Baileys version requires the compatibility tests in this spec before rollout.
+
+The observer must never copy or reuse `/root/.hermes/platforms/whatsapp/session`.
 
 ### 4.3 `brain-lifecycle-writer.service`
 
@@ -215,13 +217,13 @@ Persist only bounded, allowlisted metadata:
 - contact key;
 - CTWA classification;
 - source type/app;
-- source ID in bounded representation when operationally needed;
-- source URL hostname, not the full URL;
-- HMAC of `ctwaClid`;
+- source ID presence/length plus HMAC, not the raw source ID;
+- source URL hostname, length plus HMAC, not the full URL;
+- `ctwaClid` presence/length plus HMAC, not the raw value;
 - boolean CTWA flags;
 - key names/types for unproven future CTWA families when useful for diagnostics.
 
-Do not persist raw message text, raw JID/LID, full `contextInfo`, full `externalAdReply`, full source URL, raw `ctwaClid`, secrets, session keys, thumbnails, or opaque arbitrary payloads.
+Do not persist raw message text, raw JID/LID, full `contextInfo`, full `externalAdReply`, full source URL, raw `sourceId`, raw `ctwaClid`, secrets, session keys, thumbnails, or opaque arbitrary payloads.
 
 ### 6.5 Display name
 
@@ -247,18 +249,24 @@ For a new lifecycle, the first unique inbound transport event that matches the p
 
 That event does **not** count as a human reply, even when `containsAutoReply=false`.
 
-### 7.3 `human_inbound`
+### 7.3 Later inbound classification
 
-Any later distinct inbound message from the same verified contact is a `human_inbound` for that lifecycle, regardless of whether WhatsApp repeats some ad attribution metadata on it. Duplicate delivery of the same `event_id` never creates a human fact.
+A later distinct inbound event from the same verified contact creates `human_inbound` only when that later event does **not** match the proven CTWA detector.
 
-This rule handles the approved edge case:
+If a later distinct event itself carries the proven CTWA attribution signature, classify it as `ctwa_attributed_inbound` and do not create a human-reply fact from it. This prevents a second ad-prefilled message from being mistaken for a manually typed response.
+
+A duplicate delivery of an existing `event_id` never creates a human fact.
+
+The approved fast-human edge case remains supported when the second manually typed message is an ordinary non-CTWA event:
 
 ```text
 12:00:00 CTWA T0
-12:00:02 manually typed second message
+12:00:02 manually typed ordinary message
 ```
 
-The first event is CTWA origin; the second distinct event is human even if Hermes batches both into one CEO turn.
+The first event is CTWA origin; the second is human even if Hermes batches both into one CEO turn.
+
+If future evidence shows that WhatsApp repeats the full CTWA signature on a manually typed second message, that ambiguous transport shape remains fail-closed until a controlled test produces a reliable discriminator. It must not be guessed as human.
 
 ## 8. Turn correlation
 
@@ -272,10 +280,12 @@ Brain receives the Hermes turn registration from the plugin and correlates it ag
 4. require both sides to resolve to the same canonical phone/contact key;
 5. use the Hermes turn message content only transiently to calculate body HMAC/length; do not persist raw text;
 6. select observer events in the bounded debounce/time window;
-7. require a unique ordered combination whose body HMAC/length composition matches the Hermes turn;
+7. compose candidate event bodies using the exact batching/join semantics proven for the supported Hermes version and require a unique body HMAC/length match to the Hermes turn;
 8. persist the `turn_events` mapping only after unique proof.
 
 If zero or multiple candidate combinations remain, return `turn_not_correlated` or `ambiguous_transport_events`. Do not select the nearest or most likely candidate.
+
+Brain maintains an explicit Hermes-compatibility check for the state/Kanban schemas, required hook payloads, delivery-ledger semantics, and WhatsApp batching assumptions used by correlation. A Hermes upgrade may be installed normally, but lifecycle automation remains shadow/disabled until compatibility tests pass for the new version. Normal Hermes service must continue even when Brain declares the integration incompatible.
 
 ## 9. CEO `conversation_context()` contract
 
@@ -324,6 +334,8 @@ reason: ambiguous_transport_events
 
 The CEO SOUL/skill must require `conversation_context()` before the first identity-dependent Kanban card for each external WhatsApp turn and must forbid fabrication of phone, `wa_turn_id`, or `event_id`.
 
+If `conversation_context()` is unavailable, the lead must not be silenced. The CEO may create the minimum Porteiro task marked `context_resolution_failed`; the official `pre_tool_call` extension can still derive/enforce `wa_turn_id` idempotency from the Hermes hook turn when available. Porteiro/Cadastro may use their existing zero-argument `conversation_phone()` fallback for identity. Commercial routing may continue if identity is independently proven, but CTWA-origin lifecycle automation for that turn remains disabled until transport-event correlation is proven.
+
 `conversation_phone()` remains available only as a fallback capability for Porteiro/Cadastro workers that receive an incomplete card.
 
 ## 10. Kanban idempotency and bindings
@@ -340,7 +352,7 @@ Kanban cards for the WhatsApp turn use:
 
 ### 10.2 Deterministic enforcement
 
-Our Brain/Hermes extension registers a public `pre_tool_call` plugin hook. When the default CEO creates an approved Porteiro/Cadastro/Reno Kanban Task for a WhatsApp DM, the hook validates and, when necessary, replaces the model-supplied idempotency key with the correct value derived from the registered `wa_turn_id`.
+Our Brain/Hermes extension registers a public `pre_tool_call` plugin hook. When the default CEO creates an approved Porteiro/Cadastro/Reno Kanban Task for a WhatsApp DM, the hook validates and, when necessary, replaces the model-supplied idempotency key with the correct value derived from the current Hermes `turn_id`/registered `wa_turn_id`.
 
 The hook does not modify Hermes code. It uses the official plugin interface.
 
@@ -350,7 +362,9 @@ The durable source of truth is still `kanban.db`. Brain's reconciler discovers T
 
 Cadastro does not need a model-visible `lead_lifecycle_bind` tool.
 
-After Cadastro completes, Brain uses the official Kanban completion hook as a fast path and then verifies the durable Task/run in `kanban.db` read-only. Only a terminal Cadastro result with structured decision `LEAD_NOVO_CADASTRADO` and a single proven `client_id` can create a lifecycle binding.
+After Cadastro completes, Brain uses the official Kanban completion hook as a fast path and then verifies the durable Task/run in `kanban.db` read-only. In the supported Hermes version, worker completion metadata is persisted on the run; Brain reads the terminal run's structured metadata rather than trusting a hook payload or parsing notification text when structured data is available.
+
+Only a terminal Cadastro result with structured decision `LEAD_NOVO_CADASTRADO` and a single proven `client_id` can create a lifecycle binding.
 
 Brain ties:
 
@@ -372,7 +386,8 @@ Update the operational CEO SOUL/skill/config so that external WhatsApp work:
 - propagates the minimum event facts needed by downstream workers;
 - uses `wa_turn_id`-based idempotency;
 - treats `ctwa_first_contact` as ad origin, not as human interest or reply;
-- continues to deliver `metadata.response_ready` literally.
+- continues to deliver `metadata.response_ready` literally;
+- follows the fail-open-for-service/fail-closed-for-lifecycle behavior defined in section 9 when Brain context is unavailable.
 
 ### 11.2 Porteiro
 
@@ -400,7 +415,7 @@ The approved real-mode contract is:
 
 On the first Reno turn following `LEAD_NOVO_CADASTRADO`, Reno must call exactly one `conversation_recent()` before producing its first commercial response.
 
-Reno must not treat an ad click, CTWA attribution, or the CTWA first-contact message as proof of human interest. A later distinct human inbound may be used as genuine conversation evidence.
+Reno must not treat an ad click, CTWA attribution, or the CTWA first-contact message as proof of human interest. A later distinct non-CTWA human inbound may be used as genuine conversation evidence.
 
 FamaChat structured state remains authoritative over historical Brain conversation content.
 
@@ -446,7 +461,7 @@ FamaChat must use an explicit enumerated allowlist of the GET operations require
 - `fc_post_clientes_by_id_notes`;
 - `fc_post_appointments`.
 
-Do not use a production wildcard such as `fc_get_*` until the exact required GET list has been enumerated during implementation planning. Explicitly deny exposure of patch/put/delete/SQL tools by omission from `include`.
+Do not use a production wildcard such as `fc_get_*`. The implementation plan must enumerate the exact currently required GET tools from the Reno workflow and tests before changing the Profile config. Explicitly deny exposure of patch/put/delete/SQL tools by omission from `include`.
 
 ### 12.4 CEO
 
@@ -479,6 +494,8 @@ Minimum facts:
 - `first_t1_send_success`;
 - `first_human_inbound`.
 
+When a lifecycle binding is first created, Brain immediately evaluates already-correlated transport events after the origin CTWA; a qualifying ordinary later event may therefore materialize `first_human_inbound` even if it arrived before Cadastro completed.
+
 Desired state is derived:
 
 ```text
@@ -502,13 +519,17 @@ This makes out-of-order events safe.
 
 **Human before T1:**
 
-`CTWA -> human reply -> client created/T1`
+`CTWA -> ordinary human reply -> client created/T1`
 
 The lifecycle becomes `Em Atendimento` directly. A later T1 success does not downgrade it.
 
 **CTWA + human inside Hermes debounce:**
 
-One `wa_turn_id` maps to two `event_id` values. The CTWA event creates the origin; the second event creates `first_human_inbound`, so the desired state is `Em Atendimento`.
+One `wa_turn_id` maps to two `event_id` values. The CTWA event creates the origin; a second qualifying ordinary event creates `first_human_inbound`, so the desired state is `Em Atendimento`.
+
+**Second CTWA-attributed message:**
+
+A later event that itself matches the proven CTWA detector does not create `first_human_inbound`; it remains attribution evidence only unless a future controlled test establishes a reliable human discriminator.
 
 ## 15. Proving first T1 send success
 
@@ -632,12 +653,17 @@ Official plugin hooks are best-effort. Durable truth is reconstructed from `stat
 
 Fail closed. Do not create lifecycle facts/effects from probabilistic matches.
 
+### Unsupported Hermes compatibility
+
+Hermes continues serving normally. Brain context/lifecycle capabilities return controlled unavailable/degraded states, and lifecycle writes remain disabled until the compatibility suite passes for the new Hermes version/schema/semantics.
+
 ## 21. Health, audit, and metrics
 
 Expose health without PII:
 
 - Brain runtime DB status;
 - read-only Hermes state/Kanban access;
+- Hermes compatibility status;
 - observer connection state;
 - observer outbox depth/oldest age;
 - lifecycle mode (`shadow`, `dry_run`, `write`);
@@ -654,6 +680,7 @@ Required alerts include:
 - effects stuck retryable;
 - write readback mismatch;
 - attempted downgrade/conflict;
+- unsupported Hermes compatibility;
 - protected Hermes installation integrity changed.
 
 Metrics must not use phone, name, message text, client ID, or other PII as labels.
@@ -670,15 +697,17 @@ Prove at minimum:
 
 - CTWA-only T0 remains `Sem Atendimento` until T1;
 - successful T1 produces desired `Não Respondeu` in shadow;
-- human after T1 produces desired `Em Atendimento`;
-- human before T1 skips `Não Respondeu`;
-- CTWA + human inside one debounce turn produces two events and desired `Em Atendimento`;
+- ordinary human after T1 produces desired `Em Atendimento`;
+- ordinary human before T1 skips `Não Respondeu`;
+- CTWA + ordinary human inside one debounce turn produces two events and desired `Em Atendimento`;
+- a second CTWA-attributed event is not falsely counted as human;
 - `JA_E_CLIENTE` creates no new lifecycle;
 - `CORRETOR_ATIVO` creates no lifecycle;
 - failed Cadastro readback creates no active lifecycle/Reno handoff;
 - failed Hermes send creates no T1-success fact;
 - restart/reconnect does not duplicate events/effects;
-- manual CRM state changes are never downgraded.
+- manual CRM state changes are never downgraded;
+- unsupported Hermes compatibility disables lifecycle automation without harming normal Hermes service.
 
 All deterministic cases must pass before writes are considered.
 
@@ -717,6 +746,7 @@ All must be `PASS` before lifecycle writes are enabled:
 - `LIFECYCLE_SHADOW`;
 - `RESTART_RECOVERY`;
 - `FAMACHAT_CONDITIONAL_WRITE`;
+- `HERMES_COMPATIBILITY`;
 - `HERMES_ORIGINAL_INTEGRITY`.
 
 A gate in `FAIL` or `NOT_PROVEN` keeps `BRAIN_LIFECYCLE_WRITE_ENABLED=false`.
@@ -729,7 +759,7 @@ This project does not:
 - replace the Hermes WhatsApp device/session;
 - make the Brain observer send WhatsApp messages;
 - infer CTWA from message text alone;
-- treat T0 as a human reply;
+- treat T0 or any later independently CTWA-attributed event as a human reply;
 - wait for WhatsApp two-tick/read receipts before `Não Respondeu`;
 - give Reno/CEO direct authority to change lifecycle status;
 - reactivate or mutate archived/other-broker records during Cadastro;
@@ -752,7 +782,7 @@ raw observer event
   -> Hermes delivery_obligation delivered
   -> first_t1_send_success fact
   -> desired Não Respondeu
-  -> later distinct human inbound
+  -> later distinct proven ordinary human inbound
   -> desired Em Atendimento
   -> atomic, idempotent FamaChat effect
 ```
