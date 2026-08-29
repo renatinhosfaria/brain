@@ -62,18 +62,22 @@ class Health:
     status: str
     hermes_state_db: str
     hermes_kanban_db: str
+    runtime_db: str
     whatsapp_identity: str
     gateway_bridge: str
     schema: str
+    hermes_compatibility: str
 
     def as_dict(self) -> dict[str, str]:
         return {
             "status": self.status,
             "hermes_state_db": self.hermes_state_db,
             "hermes_kanban_db": self.hermes_kanban_db,
+            "runtime_db": self.runtime_db,
             "whatsapp_identity": self.whatsapp_identity,
             "gateway_bridge": self.gateway_bridge,
             "schema": self.schema,
+            "hermes_compatibility": self.hermes_compatibility,
         }
 
 
@@ -124,13 +128,21 @@ class BrainService:
         schema_ok = state_ok and kanban_ok and self.schema.check()
         identity_ok = self._identity_directory_compatible()
         gateway_ok = self._gateway_bridge_configured()
+        runtime_ok = self._runtime_compatible()
+        compatibility_ok = schema_ok and gateway_ok
         return Health(
-            status="ok" if schema_ok and identity_ok and gateway_ok else "unavailable",
+            status=(
+                "ok"
+                if compatibility_ok and identity_ok and runtime_ok
+                else "unavailable"
+            ),
             hermes_state_db="ok" if state_ok else "unavailable",
             hermes_kanban_db="ok" if kanban_ok else "unavailable",
+            runtime_db="ok" if runtime_ok else "unavailable",
             whatsapp_identity="compatible" if identity_ok else "incompatible",
             gateway_bridge="configured" if gateway_ok else "unconfigured",
             schema="compatible" if schema_ok else "incompatible",
+            hermes_compatibility=("compatible" if compatibility_ok else "incompatible"),
         )
 
     def _identity_directory_compatible(self) -> bool:
@@ -149,8 +161,28 @@ class BrainService:
         return bool(
             gateway
             and gateway.mode == "gateway"
-            and "conversation_phone" in gateway.tools
+            and {"conversation_context", "turn_register"}.issubset(gateway.tools)
         )
+
+    def _runtime_compatible(self) -> bool:
+        if self.runtime_ids is None or not self.runtime.path.is_file():
+            return False
+        required = {"transport_events", "whatsapp_turns", "turn_events"}
+        try:
+            return self.runtime.read(
+                lambda conn: required.issubset(
+                    {
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type = 'table' AND name IN (?, ?, ?)",
+                            tuple(sorted(required)),
+                        )
+                    }
+                )
+            )
+        except (OSError, sqlite3.Error):
+            return False
 
     @staticmethod
     def _db_openable(db: ReadOnlyDatabase) -> bool:

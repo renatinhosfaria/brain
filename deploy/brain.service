@@ -10,6 +10,10 @@ Group=root
 WorkingDirectory=/root/brain
 EnvironmentFile=/etc/brain/brain.env
 Environment=PYTHONUNBUFFERED=1
+# `/etc/brain/brain.toml` binds 127.0.0.1 and sets the Brain-owned runtime DB to
+# /var/lib/brain/runtime/brain-runtime.db. Create the directory as mode 0700;
+# Brain creates/maintains the database as mode 0600 under UMask=0077.
+Environment=BRAIN_CONFIG=/etc/brain/brain.toml
 ExecStart=/root/brain/.venv/bin/brain
 Restart=on-failure
 RestartSec=2
@@ -25,6 +29,7 @@ RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The future whatsapp-observer service is not installed or enabled by this unit.
 # ProtectHome=true is intentionally absent: V2 must read /root/.hermes.
 # ProtectSystem=strict is intentionally left for the live WAL/SHM hardening
 # validation described in the PRD; do not enable it without that test. Never

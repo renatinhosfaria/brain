@@ -20,7 +20,7 @@ def main() -> int:
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8765/mcp")
     parser.add_argument(
         "--gateway-url",
-        default="http://127.0.0.1:8765/internal/gateway/conversation-phone",
+        default="http://127.0.0.1:8765/internal/gateway/conversation-context",
     )
     parser.add_argument("--gateway-env", type=Path, default=Path("/root/.hermes/.env"))
     parser.add_argument("--state-db", type=Path, default=Path("/root/.hermes/state.db"))
@@ -87,9 +87,11 @@ def main() -> int:
         "status": "ok",
         "hermes_state_db": "ok",
         "hermes_kanban_db": "ok",
+        "runtime_db": "ok",
         "whatsapp_identity": "compatible",
         "gateway_bridge": "configured",
         "schema": "compatible",
+        "hermes_compatibility": "compatible",
     }
     if status != 200 or payload != expected:
         print("FAIL: Brain health is incompatible", file=sys.stderr)
@@ -117,6 +119,8 @@ def main() -> int:
     if not gateway_token:
         print("FAIL: Brain gateway credential is unavailable", file=sys.stderr)
         return 1
+    # An empty context payload is intentionally invalid. A controlled 400 proves
+    # authentication/routing without exposing or fabricating a live identity.
     gateway_body = b"{}"
     gateway_request = urllib.request.Request(
         args.gateway_url,

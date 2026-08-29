@@ -32,6 +32,7 @@ class BrainFixture(unittest.TestCase):
         self.state_path = root / "state.db"
         self.kanban_path = root / "kanban.db"
         self.mapping_dir = root / "whatsapp-session"
+        self.runtime_path = root / "runtime" / "brain-runtime.db"
         self.mapping_dir.mkdir()
         self._create_state()
         self._create_kanban()
@@ -44,7 +45,7 @@ class BrainFixture(unittest.TestCase):
                     "default",
                     "gateway",
                     token_digest("gateway-secret"),
-                    frozenset({"conversation_phone"}),
+                    frozenset({"conversation_context", "turn_register"}),
                 ),
                 "porteiro": PrincipalConfig(
                     "porteiro",
@@ -74,6 +75,9 @@ class BrainFixture(unittest.TestCase):
             cursor_secret=b"c" * 32,
             history_budget_chars=1_000,
             message_max_chars=120,
+            runtime_db=self.runtime_path,
+            runtime_hmac_secret=b"r" * 32,
+            transport_hmac_secret=b"t" * 32,
         )
         self.service = BrainService(self.settings)
 
@@ -254,9 +258,11 @@ class BrainFixture(unittest.TestCase):
                 "status": "ok",
                 "hermes_state_db": "ok",
                 "hermes_kanban_db": "ok",
+                "runtime_db": "ok",
                 "whatsapp_identity": "compatible",
                 "gateway_bridge": "configured",
                 "schema": "compatible",
+                "hermes_compatibility": "compatible",
             },
         )
 
@@ -413,10 +419,84 @@ class BrainFixture(unittest.TestCase):
                 "status": "ok",
                 "hermes_state_db": "ok",
                 "hermes_kanban_db": "ok",
+                "runtime_db": "ok",
                 "whatsapp_identity": "compatible",
                 "gateway_bridge": "configured",
                 "schema": "compatible",
+                "hermes_compatibility": "compatible",
             },
+        )
+
+    def test_health_runtime_is_unavailable_without_runtime_configuration(self) -> None:
+        settings = BrainSettings(
+            state_db=self.state_path,
+            kanban_db=self.kanban_path,
+            whatsapp_session_dir=self.mapping_dir,
+            principals=self.settings.principals,
+            cursor_secret=b"u" * 32,
+            runtime_db=Path(self.temp_dir.name) / "absent" / "runtime.db",
+        )
+
+        health = BrainService(settings).health()
+
+        self.assertEqual(health.runtime_db, "unavailable")
+        self.assertEqual(health.status, "unavailable")
+
+    def test_health_compatibility_fails_closed_when_gateway_contract_changes(
+        self,
+    ) -> None:
+        principals = dict(self.settings.principals)
+        principals["default"] = PrincipalConfig(
+            "default",
+            "gateway",
+            token_digest("gateway-secret"),
+            frozenset({"conversation_context"}),
+        )
+        settings = BrainSettings(
+            state_db=self.state_path,
+            kanban_db=self.kanban_path,
+            whatsapp_session_dir=self.mapping_dir,
+            principals=principals,
+            cursor_secret=b"i" * 32,
+            runtime_db=Path(self.temp_dir.name) / "incompatible-runtime.db",
+            runtime_hmac_secret=b"r" * 32,
+            transport_hmac_secret=b"t" * 32,
+        )
+
+        health = BrainService(settings).health()
+
+        self.assertEqual(health.hermes_compatibility, "incompatible")
+        self.assertEqual(health.status, "unavailable")
+
+    def test_health_contains_no_conversation_pii(self) -> None:
+        health = self.service.health().as_dict()
+
+        self.assertFalse(
+            {
+                "phone",
+                "phone_e164",
+                "chat_id",
+                "session_id",
+                "session_key",
+                "display_name",
+                "message",
+                "body",
+                "path",
+            }.intersection(health)
+        )
+        self.assertTrue(
+            all(
+                value
+                in {
+                    "ok",
+                    "unavailable",
+                    "compatible",
+                    "incompatible",
+                    "configured",
+                    "unconfigured",
+                }
+                for value in health.values()
+            )
         )
 
     def test_health_fails_when_identity_directory_is_unavailable(self) -> None:
@@ -1103,8 +1183,10 @@ class BrainFixture(unittest.TestCase):
                     "unavailable",
                     "ok",
                     "ok",
+                    "ok",
                     "compatible",
                     "configured",
+                    "incompatible",
                     "incompatible",
                 )
 

@@ -22,10 +22,86 @@ class DeploymentContractTests(unittest.TestCase):
         )
         self.assertIn("whatsapp_session_dir", data["server"])
 
+    def test_runtime_and_observer_paths_are_private_and_separate(self) -> None:
+        data = tomllib.loads(
+            (ROOT / "deploy/brain.toml.example").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            data["server"]["runtime_db"],
+            "/var/lib/brain/runtime/brain-runtime.db",
+        )
+        self.assertEqual(
+            data["server"]["observer_session_dir"],
+            "/var/lib/brain/whatsapp-observer/session",
+        )
+        self.assertNotEqual(
+            data["server"]["observer_session_dir"],
+            data["server"]["whatsapp_session_dir"],
+        )
+
+    def test_env_example_has_distinct_hmac_domains_and_principal_credentials(
+        self,
+    ) -> None:
+        source = (ROOT / "deploy/brain.env.example").read_text(encoding="utf-8")
+
+        for name in (
+            "BRAIN_RUNTIME_HMAC_SECRET",
+            "BRAIN_TRANSPORT_HMAC_SECRET",
+            "BRAIN_GATEWAY_TOKEN",
+            "BRAIN_OBSERVER_TOKEN",
+            "BRAIN_WRITER_TOKEN",
+        ):
+            self.assertIn(f"{name}=", source)
+        self.assertIn("distinct", source.lower())
+        self.assertNotRegex(source, r"(?i)\b[0-9a-f]{64}\b")
+
+    def test_gateway_and_service_principal_capabilities_are_exact(self) -> None:
+        data = tomllib.loads(
+            (ROOT / "deploy/brain.toml.example").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            data["principals"]["default"]["tools"],
+            ["conversation_context", "turn_register"],
+        )
+        self.assertEqual(data["principals"]["observer"]["tools"], ["transport_ingest"])
+        self.assertEqual(
+            data["principals"]["writer"]["tools"],
+            ["lifecycle_claim", "lifecycle_result"],
+        )
+
+    def test_service_example_is_localhost_private_and_documents_runtime_permissions(
+        self,
+    ) -> None:
+        source = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
+
+        self.assertIn("127.0.0.1", source)
+        self.assertIn("/var/lib/brain/runtime", source)
+        self.assertIn("0700", source)
+        self.assertIn("0600", source)
+        self.assertNotIn("0.0.0.0", source)
+
+    def test_examples_do_not_enable_observer_or_lifecycle_writes(self) -> None:
+        unit = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
+        ceo = (ROOT / "deploy/hermes-ceo-brain.example.yaml").read_text(
+            encoding="utf-8"
+        )
+        active_ceo = "\n".join(
+            line for line in ceo.splitlines() if not line.lstrip().startswith("#")
+        )
+
+        self.assertNotIn("whatsapp-observer.service", unit)
+        self.assertNotIn("lifecycle_claim", active_ceo)
+        self.assertNotIn("lifecycle_result", active_ceo)
+        self.assertIn("not installed", unit.lower())
+
     def test_smoke_expected_tools_are_v2_surface(self) -> None:
         source = (ROOT / "scripts/smoke_test.py").read_text(encoding="utf-8")
 
-        self.assertIn('"conversation_phone"', source)
+        self.assertIn("conversation-context", source)
+        self.assertIn('"runtime_db": "ok"', source)
+        self.assertIn('"hermes_compatibility": "compatible"', source)
         self.assertIn('"whatsapp_identity": "compatible"', source)
         self.assertIn('"gateway_bridge": "configured"', source)
 
@@ -47,6 +123,8 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("brain-context", source)
         self.assertIn("whatsapp:", source)
         self.assertIn("Do not add `brain-context` to cli/telegram", source)
+        self.assertIn("conversation_context", source)
+        self.assertIn("turn_register", source)
 
     def test_hermes_check_covers_gateway_plugin_and_context_scope(self) -> None:
         source = (ROOT / "scripts/hermes_integration_check.py").read_text(
@@ -61,6 +139,12 @@ class DeploymentContractTests(unittest.TestCase):
             "HERMES_SESSION_CHAT_ID",
             "HERMES_SESSION_KEY",
             "HERMES_SESSION_ID",
+            "pre_llm_call",
+            "pre_tool_call",
+            "turn_id",
+            "delivery_obligations",
+            "_enqueue_text_event",
+            "create_task",
         ):
             self.assertIn(required, source)
 
@@ -77,7 +161,7 @@ class DeploymentContractTests(unittest.TestCase):
         source = (ROOT / "scripts/smoke_test.py").read_text(encoding="utf-8")
 
         self.assertIn("BRAIN_GATEWAY_TOKEN", source)
-        self.assertIn("gateway/conversation-phone", source)
+        self.assertIn("gateway/conversation-context", source)
         self.assertIn("Content-Length", source)
 
     def test_secret_installation_restores_all_snapshots_after_failure(self) -> None:
@@ -106,8 +190,23 @@ class DeploymentContractTests(unittest.TestCase):
             "disable `brain-ceo-bridge`",
             "Porteiro",
             "Cadastro",
+            "/var/lib/brain/whatsapp-observer/session",
+            "/root/.hermes/platforms/whatsapp/session",
+            "do not require reverting",
         ):
             self.assertIn(required, runbook)
+
+    def test_docs_preserve_upstream_and_distinguish_implemented_from_pending(
+        self,
+    ) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+        combined = f"{readme}\n{runbook}".lower()
+
+        self.assertIn("no upstream hermes modification", combined)
+        self.assertIn("production observer", combined)
+        self.assertIn("not implemented", combined)
+        self.assertIn("/usr/local/lib/hermes-agent", combined)
 
     def test_v2_metadata_describes_identity_and_implementation_status(self) -> None:
         prd = (ROOT / "PRD.md").read_text(encoding="utf-8")

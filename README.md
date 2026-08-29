@@ -1,9 +1,10 @@
-# Brain V2
+# Brain Plan 1 foundation
 
-Brain is a localhost-only, read-only, capability-scoped service for Hermes. It
-is the authority for the authorized WhatsApp conversation and for resolving a
-verified transport phone. It never accepts identity as a tool argument, never
-writes Hermes databases, and never modifies the installed Hermes core at
+Brain is a localhost-only, capability-scoped service for Hermes. It reads
+Hermes `state.db` and `kanban.db` without writing them and owns a separate
+runtime database at `/var/lib/brain/runtime/brain-runtime.db`. Identity is
+derived from trusted execution/session context, never accepted as a worker tool
+argument. Plan 1 makes no upstream Hermes modification at
 `/usr/local/lib/hermes-agent`.
 
 The MCP surface has exactly three tools:
@@ -15,15 +16,32 @@ The MCP surface has exactly three tools:
 
 The CEO does not receive the worker MCP server. The external
 `integrations/hermes/brain-ceo-bridge/` plugin reads the current gateway
-`ContextVar` session and calls Brain's authenticated localhost route. This
-keeps identity authority in Brain while allowing Hermes to continue using
-`hermes update` without a core fork.
+`ContextVar` session and uses official `pre_llm_call`/`pre_tool_call` hooks. It
+registers each Hermes `turn_id`, obtains bounded `conversation_context`, and
+derives deterministic Kanban idempotency. This keeps identity authority in
+Brain while allowing `hermes update` without a core fork.
+
+## Plan 1 status
+
+Implemented: the Brain runtime DB, distinct runtime/transport HMAC domains,
+safe transport ingestion with fail-closed identity proof, Hermes turn
+registration, deterministic single/batched correlation, `conversation_context`,
+official public hooks, deterministic Kanban idempotency, and a read-only Hermes
+compatibility checker. The runtime DB stores technical metadata and HMACs, not
+raw message bodies.
+
+Not implemented: the production observer service, lifecycle engine, lifecycle
+writer, FamaChat CRM status automation, and production lifecycle write
+enablement. The observer session path is reserved as
+`/var/lib/brain/whatsapp-observer/session`; it must never share Hermes' session
+at `/root/.hermes/platforms/whatsapp/session`. Plan 1 is a transport/context
+foundation, not a production-ready CTWA lifecycle system.
 
 ## Run locally
 
 Create the locked virtual environment, copy
 [`deploy/brain.env.example`](deploy/brain.env.example) to `/etc/brain/brain.env`,
-and put the five SHA-256 token digests in a TOML file based on
+and put the distinct principal SHA-256 token digests in a TOML file based on
 [`deploy/brain.toml.example`](deploy/brain.toml.example), then run:
 
 Generate each digest interactively with `/root/brain/scripts/brain-token-hash`.
@@ -33,9 +51,10 @@ Generate each digest interactively with `/root/brain/scripts/brain-token-hash`.
 BRAIN_CONFIG=/etc/brain/brain.toml /root/brain/.venv/bin/brain
 ```
 
-The service listens on `127.0.0.1:8765`, exposes MCP at `/mcp`, the private CEO
-bridge at `/internal/gateway/conversation-phone`, and the schema-guarded
-health endpoint at `/health`.
+The service listens on `127.0.0.1:8765`, exposes MCP at `/mcp`, private gateway
+routes at `/internal/gateway/conversation-context` and
+`/internal/gateway/turn-register`, and the schema-guarded health endpoint at
+`/health`.
 
 For an LID, Brain scans only the configured WhatsApp session directory and
 accepts semantically validated `lid-mapping-{phone}.json` and
@@ -68,7 +87,8 @@ Install the CEO bridge only after reviewing it and
 [`deploy/hermes-ceo-brain.example.yaml`](deploy/hermes-ceo-brain.example.yaml).
 Copy the versioned source to `/root/.hermes/plugins/brain-ceo-bridge`, enable
 `brain-ceo-bridge` in the CEO `plugins.enabled` list, and expose its
-`brain-context` toolset on WhatsApp only. Do not add `brain-context` to CLI or
+`brain-context` toolset on WhatsApp only. Its public tool is
+`conversation_context`; its hooks call `turn_register` privately. Do not add `brain-context` to CLI or
 Telegram, and do not configure the worker Brain MCP server in the CEO. The
 installer and runbook configure `BRAIN_GATEWAY_TOKEN` for that plugin. This
 production copy is intentionally outside this repository; development here

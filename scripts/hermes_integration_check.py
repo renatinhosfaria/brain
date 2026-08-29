@@ -4,12 +4,190 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
+import inspect
 import os
+import sqlite3
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+STATE_SCHEMA = {
+    "sessions": {"id", "session_key", "source", "chat_id", "chat_type", "started_at"},
+    "messages": {
+        "id",
+        "session_id",
+        "role",
+        "content",
+        "timestamp",
+        "active",
+        "compacted",
+        "display_kind",
+        "_compressed_summary",
+        "tool_calls",
+        "tool_name",
+    },
+}
+KANBAN_SCHEMA = {
+    "tasks": {"id", "assignee", "status", "current_run_id", "session_id"},
+    "task_runs": {"id", "task_id", "status"},
+    "kanban_notify_subs": {
+        "task_id",
+        "platform",
+        "chat_id",
+        "chat_type",
+        "notifier_profile",
+    },
+}
+
+
+def parsed_source(path: Path) -> ast.Module:
+    if not path.is_file():
+        fail(f"required Hermes source is missing: {path}")
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def calls(tree: ast.AST, name: str) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == name)
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == name)
+        )
+    ]
+
+
+def literal_strings(tree: ast.AST) -> set[str]:
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+
+def check_sqlite_schema(path: Path, requirements: dict[str, set[str]]) -> None:
+    if not path.is_file():
+        fail(f"Hermes database is missing: {path.name}")
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        for table, expected in requirements.items():
+            actual = {
+                str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            if not expected.issubset(actual):
+                fail(f"Hermes {path.name} schema changed: {table}")
+    finally:
+        conn.close()
+
+
+def check_upstream_contracts(hermes_root: Path) -> None:
+    from gateway.session_context import _VAR_MAP, get_session_env
+    from hermes_cli.plugins import VALID_HOOKS, PluginContext, invoke_hook
+
+    if (
+        not callable(invoke_hook)
+        or "hook_name" not in inspect.signature(PluginContext.register_hook).parameters
+    ):
+        fail("Hermes public plugin hook API changed")
+    if not {"pre_llm_call", "pre_tool_call"}.issubset(VALID_HOOKS):
+        fail("Hermes required hooks are unavailable")
+
+    required_context_fields = {
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_CHAT_TYPE",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_SESSION_KEY",
+        "HERMES_SESSION_ID",
+        "HERMES_SESSION_PROFILE",
+    }
+    if not callable(get_session_env) or not required_context_fields.issubset(_VAR_MAP):
+        fail("Hermes gateway session ContextVar API changed")
+
+    turn_tree = parsed_source(hermes_root / "agent/turn_context.py")
+    pre_llm_calls = [
+        call
+        for call in calls(turn_tree, "_invoke_hook")
+        if call.args
+        and isinstance(call.args[0], ast.Constant)
+        and call.args[0].value == "pre_llm_call"
+    ]
+    if not pre_llm_calls or "turn_id" not in {
+        keyword.arg for keyword in pre_llm_calls[0].keywords
+    }:
+        fail("Hermes pre_llm_call no longer supplies turn_id")
+
+    plugins_tree = parsed_source(hermes_root / "hermes_cli/plugins.py")
+    plugin_literals = literal_strings(plugins_tree)
+    if not {"pre_tool_call", "modify", "args"}.issubset(plugin_literals):
+        fail("Hermes pre_tool_call modification contract changed")
+    if not calls(plugins_tree, "update"):
+        fail("Hermes pre_tool_call no longer merges modified arguments")
+
+    adapter_tree = parsed_source(hermes_root / "plugins/platforms/whatsapp/adapter.py")
+    adapter_literals = literal_strings(adapter_tree)
+    if "\n" not in adapter_literals:
+        fail('Hermes WhatsApp batching separator is not exact "\\n"')
+    if not calls(adapter_tree, "cancel") or not calls(adapter_tree, "create_task"):
+        fail("Hermes WhatsApp debounce timer reset contract changed")
+    adapter_classes = {
+        node.name for node in ast.walk(adapter_tree) if isinstance(node, ast.ClassDef)
+    }
+    adapter_methods = {
+        node.name
+        for node in ast.walk(adapter_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if "WhatsAppAdapter" not in adapter_classes or not {
+        "_enqueue_text_event",
+        "_flush_text_batch",
+    }.issubset(adapter_methods):
+        fail("Hermes WhatsApp adapter contract changed")
+
+    bridge = hermes_root / "scripts/whatsapp-bridge/bridge.js"
+    bridge_source = bridge.read_text(encoding="utf-8")
+    identity_source = (hermes_root / "gateway/whatsapp_identity.py").read_text(
+        encoding="utf-8"
+    )
+    if not all(
+        fragment in bridge_source
+        for fragment in ("SESSION_DIR", "lid-mapping-", "readFileSync", "JSON.parse")
+    ) or not all(
+        fragment in identity_source for fragment in ("lid-mapping-", "_reverse")
+    ):
+        fail("Hermes WhatsApp bridge/identity adapter contract changed")
+
+    ledger_path = hermes_root / "gateway/delivery_ledger.py"
+    ledger_tree = parsed_source(ledger_path)
+    ledger_source = ledger_path.read_text(encoding="utf-8")
+    ledger_functions = {
+        node.name
+        for node in ast.walk(ledger_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required_ledger = {
+        "record_obligation",
+        "mark_attempting",
+        "mark_delivered",
+        "mark_failed",
+        "sweep_recoverable",
+        "ledger_enabled",
+    }
+    if not required_ledger.issubset(ledger_functions) or not all(
+        fragment in ledger_source
+        for fragment in (
+            "state='pending'",
+            "state='attempting'",
+            "state='delivered'",
+            "state='failed'",
+            "delivery_obligations",
+        )
+    ):
+        fail("Hermes delivery ledger semantics changed")
 
 
 def fail(message: str) -> None:
@@ -69,11 +247,14 @@ def main() -> int:
 
     import yaml  # type: ignore[import-not-found]
     from agent.secret_scope import load_env_file
-    from gateway.session_context import _VAR_MAP, get_session_env
     from hermes_cli.plugin_dev import doctor_plugin
     from hermes_cli.plugins import discover_plugins
     from hermes_cli.tools_config import _get_platform_tools
     from tools.mcp_tool import _interpolate_env_vars
+
+    check_upstream_contracts(args.hermes_root)
+    check_sqlite_schema(hermes_home / "state.db", STATE_SCHEMA)
+    check_sqlite_schema(hermes_home / "kanban.db", KANBAN_SCHEMA)
 
     def load(path: Path) -> dict:
         if not path.is_file():
@@ -180,10 +361,16 @@ def main() -> int:
         hermes_home / ".env"
     ).get("BRAIN_GATEWAY_TOKEN")
     gateway_principal = configured_principals.get("default") or {}
-    if gateway_principal.get("mode") != expected_modes["default"] or set(
-        gateway_principal.get("tools") or []
-    ) != {"conversation_phone"}:
-        fail("default: principal mode or tool ACL changed")
+    gateway_tools = set(gateway_principal.get("tools") or [])
+    supported_gateway_tools = {
+        frozenset({"conversation_phone"}),
+        frozenset({"conversation_context", "turn_register"}),
+    }
+    if (
+        gateway_principal.get("mode") != expected_modes["default"]
+        or frozenset(gateway_tools) not in supported_gateway_tools
+    ):
+        fail("default: deployed principal is neither legacy nor Plan 1 compatible")
     gateway_digest = gateway_principal.get("token_sha256")
     if not gateway_token or not isinstance(gateway_digest, str):
         fail("default: Brain gateway credentials are incomplete")
@@ -204,17 +391,21 @@ def main() -> int:
     enabled_plugins = (ceo.get("plugins") or {}).get("enabled") or []
     if "brain-ceo-bridge" not in enabled_plugins:
         fail("CEO: brain-ceo-bridge is not enabled")
-    plugin_path = hermes_home / "plugins" / "brain-ceo-bridge"
+    plugin_path = Path(__file__).parents[1] / "integrations/hermes/brain-ceo-bridge"
     if not plugin_path.is_dir():
-        fail(f"CEO: installed Brain bridge is missing: {plugin_path}")
+        fail(f"CEO: versioned Brain bridge is missing: {plugin_path}")
     report = doctor_plugin(plugin_path)
-    if not report.ok or set(report.registered_tools) != {"conversation_phone"}:
-        fail("CEO: installed Brain bridge failed Hermes Plugin Doctor")
+    if (
+        not report.ok
+        or set(report.registered_tools) != {"conversation_context"}
+        or set(report.registered_hooks) != {"pre_llm_call", "pre_tool_call"}
+    ):
+        fail("CEO: versioned Brain bridge failed Hermes Plugin Doctor")
     plugin_source = plugin_path / "tools.py"
     if not plugin_source.is_file() or "get_session_env" not in plugin_source.read_text(
         encoding="utf-8"
     ):
-        fail("CEO: installed Brain bridge does not use gateway session context")
+        fail("CEO: versioned Brain bridge does not use gateway session context")
 
     cli = _get_platform_tools(ceo, "cli", include_default_mcp_servers=True)
     telegram = _get_platform_tools(ceo, "telegram", include_default_mcp_servers=True)
@@ -223,33 +414,6 @@ def main() -> int:
         fail("CEO: brain-context must be disabled outside WhatsApp")
     if "brain-context" not in whatsapp:
         fail("CEO: brain-context is not enabled for WhatsApp")
-
-    required_context_fields = {
-        "HERMES_SESSION_PLATFORM",
-        "HERMES_SESSION_CHAT_TYPE",
-        "HERMES_SESSION_CHAT_ID",
-        "HERMES_SESSION_KEY",
-        "HERMES_SESSION_ID",
-        "HERMES_SESSION_PROFILE",
-    }
-    if not callable(get_session_env) or not required_context_fields.issubset(_VAR_MAP):
-        fail("Hermes gateway session context contract changed")
-
-    bridge_source = (args.hermes_root / "scripts/whatsapp-bridge/bridge.js").read_text(
-        encoding="utf-8"
-    )
-    identity_source = (args.hermes_root / "gateway/whatsapp_identity.py").read_text(
-        encoding="utf-8"
-    )
-    if (
-        not all(
-            fragment in bridge_source
-            for fragment in ("lid-mapping-", "readFileSync", "JSON.parse")
-        )
-        or "lid-mapping-" not in identity_source
-        or "_reverse" not in identity_source
-    ):
-        fail("Hermes WhatsApp LID mapping contract changed")
 
     kanban = ceo.get("kanban") or {}
     if kanban.get("auto_subscribe_on_create") is not True:
@@ -292,12 +456,9 @@ def main() -> int:
     if not all(fragment in tool_source for fragment in required_subscription_evidence):
         fail("Hermes trusted auto-subscription derivation changed")
 
-    state_source = (args.hermes_root / "hermes_state.py").read_text(encoding="utf-8")
-    if "_compressed_summary" not in state_source or "compacted" not in state_source:
-        fail("Hermes compaction persistence contract changed")
-
     print(
-        "OK: Hermes resolver, headers, worker env and trusted subscription are compatible"
+        "OK: Hermes plugin hooks, schemas, WhatsApp batching, delivery ledger, "
+        "resolver and trusted subscription are compatible"
     )
     return 0
 

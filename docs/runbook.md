@@ -22,7 +22,10 @@
    and `BRAIN_GATEWAY_TOKEN` remains in the CEO scope. For an intentional
    rotation, rerun with `--force` and restart Brain.
 4. Confirm `/etc/brain/brain.toml` and `/etc/brain/brain.env` are owned by root,
-   mode `0600`, and the Reno/FamaAgent `.env` files remain mode `0600`.
+   mode `0600`, and the Reno/FamaAgent `.env` files remain mode `0600`. Create
+   `/var/lib/brain/runtime` with mode `0700`; keep
+   `/var/lib/brain/runtime/brain-runtime.db` mode `0600`. Configure distinct
+   values for `BRAIN_RUNTIME_HMAC_SECRET` and `BRAIN_TRANSPORT_HMAC_SECRET`.
 5. Merge `deploy/hermes-brain.example.yaml` into Porteiro and Cadastro, and
    preserve `famachat` in their CLI toolsets. Merge
    `deploy/hermes-brain-memory.example.yaml` into Reno, preserving `famachat`,
@@ -85,11 +88,11 @@ uv run python scripts/hermes_integration_check.py
 uv run python scripts/smoke_test.py
 ```
 
-Confirm `curl -fsS http://127.0.0.1:8765/health` returns the exact six-field
+Confirm `curl -fsS http://127.0.0.1:8765/health` returns the exact eight-field
 compatible payload:
 
 ```json
-{"status":"ok","hermes_state_db":"ok","hermes_kanban_db":"ok","whatsapp_identity":"compatible","gateway_bridge":"configured","schema":"compatible"}
+{"status":"ok","hermes_state_db":"ok","hermes_kanban_db":"ok","runtime_db":"ok","whatsapp_identity":"compatible","gateway_bridge":"configured","schema":"compatible","hermes_compatibility":"compatible"}
 ```
 
 Confirm the endpoint is not listening on a non-loopback address. Also verify a
@@ -113,6 +116,25 @@ If any security check fails, stop the rollout and disable Brain until the
 compatibility issue is corrected. Do not use `hermes tools list --platform` as
 proof of MCP containment; only the resolver check is authoritative.
 
+The checker is read-only: it inspects public plugin/hook APIs, `turn_id` and
+argument-modification contracts, session ContextVars, state/Kanban schemas,
+WhatsApp bridge batching (`"\n"` join and timer reset), adapter identity, and
+delivery-ledger states. It never repairs Hermes or writes its databases.
+
+## Plan 1 boundary
+
+Implemented: Brain-owned runtime persistence, separate HMAC domains, safe
+transport ingestion, fail-closed identity proof, turn registration,
+deterministic batch correlation, `conversation_context`, public Hermes hooks,
+Kanban idempotency, and compatibility checks. There is no upstream Hermes
+modification.
+
+Not implemented: a production observer service, lifecycle engine, lifecycle
+writer, FamaChat CRM automation, or production write enablement. Reserve
+`/var/lib/brain/whatsapp-observer/session` for the future observer and keep it
+separate from `/root/.hermes/platforms/whatsapp/session`; never copy or share
+the Hermes session directory. No observer unit is installed by Plan 1.
+
 ## Degradation and rollback
 
 If Brain is unavailable, workers continue from the current task without
@@ -128,6 +150,10 @@ Porteiro/Cadastro behavior for a missing phone (controlled block; never infer)
 and keep the worker Profiles' Brain MCP entries disabled. Stopping
 `brain.service` is safe: Brain owns no transcript and writes no Hermes domain
 data.
+
+Rollback does not require reverting files under `/usr/local/lib/hermes-agent`;
+those files are never deployment targets for Brain. Brain rollback and
+Hermes-core rollback do not require reverting the same artifacts.
 
 Never put tokens, Authorization headers, transcript text, phone numbers,
 `chat_id`, `session_key` or database paths in incident notes or logs.
