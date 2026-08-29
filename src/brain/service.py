@@ -28,6 +28,11 @@ from .projection import ProjectedMessage, project_rows
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
 from .transport_service import TransportService
+from .turn_correlation import (
+    TurnConflictError,
+    TurnCorrelationService,
+    TurnRegistration,
+)
 from .whatsapp_identity import PhoneResolution, resolve_phone
 
 logger = logging.getLogger("brain.audit")
@@ -102,6 +107,13 @@ class BrainService:
             self.runtime,
             self.runtime_ids,
         )
+        self.turn_correlation: TurnCorrelationService | None = None
+        if self.runtime_ids is not None:
+            self.turn_correlation = TurnCorrelationService(
+                self.runtime,
+                self.runtime_ids,
+                runtime_secret=settings.runtime_hmac_secret,
+            )
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
 
@@ -319,6 +331,74 @@ class BrainService:
             self._audit(
                 identity=identity,
                 tool="conversation_phone",
+                decision="unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error="DB_UNAVAILABLE",
+            )
+            raise DatabaseUnavailable() from exc
+
+    def gateway_register_turn(
+        self,
+        headers: Mapping[str, str],
+        context: GatewaySessionContext,
+        turn_id: str,
+        user_message: str,
+        turn_timestamp: float,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        identity: dict[str, Any] = {
+            "profile": "unknown",
+            "mode": "unknown",
+            "task_id": None,
+            "run_id": None,
+        }
+        try:
+            request_identity = self.authorizer.parse_gateway_headers(
+                headers, "turn_register"
+            )
+            identity["profile"] = request_identity.principal
+            identity["mode"] = self.settings.principals[request_identity.principal].mode
+            capability = self.authorizer.authorize_gateway(request_identity, context)
+            resolution = resolve_phone(
+                capability.chat_id, self.settings.whatsapp_session_dir
+            )
+            if resolution.status != "ok" or not resolution.phone:
+                raise BrainError("PHONE_NOT_RESOLVED", unavailable=True)
+            if self.runtime_ids is None or self.turn_correlation is None:
+                raise DatabaseUnavailable()
+            result = self.turn_correlation.register(
+                TurnRegistration(
+                    hermes_session_id=context.session_id,
+                    session_key=capability.session_key,
+                    contact_key=self.runtime_ids.contact_key(resolution.phone),
+                    turn_id=turn_id,
+                    user_message=user_message,
+                    turn_timestamp=turn_timestamp,
+                )
+            )
+            self._audit(
+                identity=identity,
+                tool="turn_register",
+                decision=str(result["correlation"]),
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
+            return result
+        except TurnConflictError as exc:
+            raise BrainError("TURN_CONFLICT") from exc
+        except BrainError as exc:
+            self._audit(
+                identity=identity,
+                tool="turn_register",
+                decision="deny" if not exc.unavailable else "unavailable",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error=exc.code,
+            )
+            raise
+        except Exception as exc:
+            logger.exception("brain turn registration failed: %s", type(exc).__name__)
+            self._audit(
+                identity=identity,
+                tool="turn_register",
                 decision="unavailable",
                 duration_ms=(time.perf_counter() - started) * 1000,
                 error="DB_UNAVAILABLE",

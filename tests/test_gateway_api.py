@@ -12,8 +12,9 @@ from starlette.requests import Request
 
 from brain.config import BrainSettings, PrincipalConfig, token_digest
 from brain.gateway_api import GatewayAPI
-from brain.mcp_server import BrainMCPServer
+from brain.mcp_server import BrainMCPServer, _tools
 from brain.service import BrainService
+from brain.transport_models import RuntimeIds
 
 
 class GatewayAPITests(unittest.TestCase):
@@ -22,6 +23,7 @@ class GatewayAPITests(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.state_path = root / "state.db"
         self.kanban_path = root / "kanban.db"
+        self.runtime_path = root / "runtime" / "brain-runtime.db"
         self.mapping_dir = root / "whatsapp-session"
         self.mapping_dir.mkdir()
         state = sqlite3.connect(self.state_path)
@@ -70,7 +72,7 @@ class GatewayAPITests(unittest.TestCase):
                     "default",
                     "gateway",
                     token_digest("gateway-secret"),
-                    frozenset({"conversation_phone"}),
+                    frozenset({"conversation_phone", "turn_register"}),
                 ),
                 "reno": PrincipalConfig(
                     "reno",
@@ -78,11 +80,21 @@ class GatewayAPITests(unittest.TestCase):
                     token_digest("reno-secret"),
                     frozenset({"conversation_recent"}),
                 ),
+                "observer": PrincipalConfig(
+                    "observer",
+                    "service",
+                    token_digest("observer-secret"),
+                    frozenset({"transport_ingest"}),
+                ),
             },
             cursor_secret=b"g" * 32,
+            runtime_db=self.runtime_path,
+            runtime_hmac_secret=b"r" * 32,
+            transport_hmac_secret=b"t" * 32,
         )
         self.service = BrainService(settings)
         self.api = GatewayAPI(self.service)
+        self.ids = RuntimeIds(b"r" * 32, b"t" * 32)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -102,6 +114,9 @@ class GatewayAPITests(unittest.TestCase):
         payload: object,
         token: str = "gateway-secret",
         declared_length: int | None = None,
+        *,
+        path: str = "/internal/gateway/conversation-phone",
+        method: str = "POST",
     ) -> Request:
         if isinstance(payload, bytes):
             body = payload
@@ -124,8 +139,8 @@ class GatewayAPITests(unittest.TestCase):
             headers.append((b"content-length", str(declared_length).encode()))
         scope = {
             "type": "http",
-            "method": "POST",
-            "path": "/internal/gateway/conversation-phone",
+            "method": method,
+            "path": path,
             "headers": headers,
         }
         return Request(scope, receive)
@@ -141,6 +156,66 @@ class GatewayAPITests(unittest.TestCase):
             text=response.body.decode("utf-8"),
             json=lambda: json.loads(response.body),
         )
+
+    def post_turn(
+        self,
+        payload: object,
+        token: str = "gateway-secret",
+        *,
+        method: str = "POST",
+    ) -> SimpleNamespace:
+        response = asyncio.run(
+            self.api.turn_register(
+                self.request(
+                    payload,
+                    token,
+                    path="/internal/gateway/turn-register",
+                    method=method,
+                )
+            )
+        )
+        return SimpleNamespace(
+            status_code=response.status_code,
+            text=response.body.decode("utf-8"),
+            json=lambda: json.loads(response.body),
+        )
+
+    def valid_turn(self) -> dict[str, object]:
+        return {
+            **self.valid_context(),
+            "turn_id": "opaque-turn-1",
+            "user_message": "hello",
+            "turn_timestamp": 1000.0,
+        }
+
+    def prepare_turn_identity(self) -> None:
+        (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(
+            '"123456789012345"', encoding="utf-8"
+        )
+
+    def seed_event(self, body: str = "hello") -> str:
+        event_id = self.ids.event_id("observer-a", f"event-{body}")
+        contact_key = self.ids.contact_key("5534999772714")
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO transport_events (event_id, observer_device_id, "
+                "contact_key, direction, received_at, message_timestamp, body_hmac, "
+                "body_length, native_type, transport_kind, created_at) "
+                "VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, 'conversation', "
+                "'ordinary_inbound', ?)",
+                (
+                    event_id,
+                    "observer-a",
+                    contact_key,
+                    999.1,
+                    999.0,
+                    self.ids.body_hmac(body),
+                    len(body),
+                    999.2,
+                ),
+            )
+        )
+        return event_id
 
     def test_gateway_context_resolves_phone_after_state_revalidation(self) -> None:
         (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(
@@ -234,6 +309,65 @@ class GatewayAPITests(unittest.TestCase):
         paths = {route.path for route in app.routes if hasattr(route, "path")}
 
         self.assertIn("/internal/gateway/conversation-phone", paths)
+
+    def test_turn_register_route_correlates_and_is_not_model_visible(self) -> None:
+        self.prepare_turn_identity()
+        self.seed_event()
+
+        response = self.post_turn(self.valid_turn())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["correlation"], "correlated")
+        app = BrainMCPServer(self.service).app()
+        paths = {route.path for route in app.routes if hasattr(route, "path")}
+        self.assertIn("/internal/gateway/turn-register", paths)
+        self.assertNotIn("turn_register", {tool.name for tool in _tools()})
+
+    def test_turn_register_denies_worker_service_and_invalid_tokens(self) -> None:
+        self.prepare_turn_identity()
+        for token in ("reno-secret", "observer-secret", "invalid"):
+            with self.subTest(token=token):
+                response = self.post_turn(self.valid_turn(), token=token)
+                self.assertEqual(response.status_code, 403)
+
+    def test_turn_register_authenticates_before_reading_body(self) -> None:
+        body_read = False
+
+        async def receive() -> dict[str, object]:
+            nonlocal body_read
+            body_read = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/internal/gateway/turn-register",
+                "headers": [(b"authorization", b"Bearer invalid")],
+            },
+            receive,
+        )
+        response = asyncio.run(self.api.turn_register(request))
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(body_read)
+
+    def test_turn_register_rejects_unknown_invalid_scope_timestamp_and_get(
+        self,
+    ) -> None:
+        self.prepare_turn_identity()
+        cases = (
+            ({**self.valid_turn(), "unknown": True}, "POST"),
+            ({**self.valid_turn(), "turn_timestamp": True}, "POST"),
+            ({**self.valid_turn(), "turn_timestamp": float("inf")}, "POST"),
+            ({**self.valid_turn(), "platform": "telegram"}, "POST"),
+            ({**self.valid_turn(), "chat_type": "group"}, "POST"),
+            (self.valid_turn(), "GET"),
+        )
+        for payload, method in cases:
+            with self.subTest(payload=payload, method=method):
+                response = self.post_turn(payload, method=method)
+                self.assertIn(response.status_code, {400, 405})
 
 
 if __name__ == "__main__":

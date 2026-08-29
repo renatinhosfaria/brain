@@ -135,6 +135,11 @@ class BrainMCPServer:
                     methods=["POST"],
                 ),
                 Route(
+                    "/internal/gateway/turn-register",
+                    self.gateway_api.turn_register,
+                    methods=["POST"],
+                ),
+                Route(
                     "/internal/transport/events",
                     self.transport_api.events,
                     methods=["POST"],

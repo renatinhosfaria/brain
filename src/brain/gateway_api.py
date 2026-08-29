@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import unicodedata
+from dataclasses import dataclass
 from typing import Any
 
 from starlette.requests import Request
@@ -16,7 +19,12 @@ from .service import BrainService
 _CONTEXT_FIELDS = frozenset(
     {"platform", "chat_type", "chat_id", "session_key", "session_id"}
 )
+_TURN_FIELDS = _CONTEXT_FIELDS | frozenset(
+    {"turn_id", "user_message", "turn_timestamp"}
+)
 _MAX_CONTEXT_VALUE = 512
+_MAX_TURN_ID = 512
+_MAX_USER_MESSAGE = 12_000
 _MAX_BODY_BYTES = 16_384
 
 
@@ -47,6 +55,39 @@ def _parse_context(payload: object) -> GatewaySessionContext:
         session_key=payload["session_key"],
         session_id=payload["session_id"],
     )
+
+
+@dataclass(frozen=True)
+class TurnPayload:
+    context: GatewaySessionContext
+    turn_id: str
+    user_message: str
+    turn_timestamp: float
+
+
+def _parse_turn(payload: object) -> TurnPayload:
+    if not isinstance(payload, dict) or set(payload) != _TURN_FIELDS:
+        raise _request_error()
+    context = _parse_context({key: payload[key] for key in _CONTEXT_FIELDS})
+    turn_id = payload["turn_id"]
+    if (
+        not isinstance(turn_id, str)
+        or not (1 <= len(turn_id) <= _MAX_TURN_ID)
+        or any(unicodedata.category(char).startswith("C") for char in turn_id)
+    ):
+        raise _request_error()
+    user_message = payload["user_message"]
+    if not isinstance(user_message, str) or len(user_message) > _MAX_USER_MESSAGE:
+        raise _request_error()
+    timestamp = payload["turn_timestamp"]
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or not math.isfinite(float(timestamp))
+        or float(timestamp) <= 0
+    ):
+        raise _request_error()
+    return TurnPayload(context, turn_id, user_message, float(timestamp))
 
 
 class GatewayAPI:
@@ -91,6 +132,45 @@ class GatewayAPI:
             context = _parse_context(payload)
             result = await asyncio.to_thread(
                 self.service.gateway_conversation_phone, headers, context
+            )
+            return JSONResponse(result, status_code=200)
+        except BrainError as exc:
+            return self._response_for_error(exc)
+        except (OSError, TypeError, UnicodeError, ValueError):
+            return self._response_for_error(_request_error())
+
+    async def turn_register(self, request: Request) -> JSONResponse:
+        if request.method != "POST":
+            return JSONResponse({"error": "method not allowed"}, status_code=405)
+        headers = dict(request.headers)
+        try:
+            self.service.authorizer.parse_gateway_headers(headers, "turn_register")
+            declared_length = request.headers.get("content-length")
+            if declared_length is not None:
+                try:
+                    if not (0 <= int(declared_length) <= _MAX_BODY_BYTES):
+                        raise _request_error()
+                except ValueError:
+                    raise _request_error() from None
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > _MAX_BODY_BYTES:
+                    raise _request_error()
+                chunks.append(chunk)
+            try:
+                payload: Any = json.loads(b"".join(chunks))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                raise _request_error() from None
+            turn = _parse_turn(payload)
+            result = await asyncio.to_thread(
+                self.service.gateway_register_turn,
+                headers,
+                turn.context,
+                turn.turn_id,
+                turn.user_message,
+                turn.turn_timestamp,
             )
             return JSONResponse(result, status_code=200)
         except BrainError as exc:
