@@ -2,46 +2,53 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn the successful disposable second-Baileys spike into a production, receive-only `brain-whatsapp-observer.service` that owns its own linked-device session, durably spools privacy-bounded events, and delivers them to Brain's authenticated transport-ingestion route without touching Hermes' WhatsApp session or source tree.
+**Goal:** Turn the successful disposable second-Baileys spike into a production receive-only `brain-whatsapp-observer.service` with its own linked-device session, its own pinned Baileys dependency, and a durable outbox containing only privacy-safe HMAC/allowlisted metadata.
 
-**Architecture:** A small Node service pins its own `@whiskeysockets/baileys 7.0.0-rc13`, receives only non-self DM `messages.upsert`, normalizes to the allowlisted Brain ingestion contract, writes each pending event as an atomic file in a private spool directory, POSTs to localhost Brain, and deletes the file only after Brain acknowledges durable ingestion. A tiny localhost health server exposes connection/outbox state. The observer contains no send/read/presence/reaction APIs and never imports the Baileys package installed under `/usr/local/lib/hermes-agent`.
+**Architecture:** A Node service pins `@whiskeysockets/baileys 7.0.0-rc13`, receives only non-self DM `messages.upsert`, derives a safe event envelope **before durable storage**, atomically spools that safe envelope, POSTs it to Brain's authenticated localhost ingestion route, and deletes it only after durable ACK. The observer shares only the dedicated transport-HMAC key with Brain; it never receives Brain's runtime/turn HMAC key. No raw message text, raw JID/LID, raw observer message ID, raw `sourceId`, raw `ctwaClid`, or full URL is written to the outbox.
 
-**Tech Stack:** Node.js 20+, ESM, `@whiskeysockets/baileys==7.0.0-rc13`, `qrcode-terminal==0.12.0`, built-in `node:test`, filesystem atomic rename/fsync, built-in HTTP/fetch.
+**Tech Stack:** Node.js 20+, ESM, `@whiskeysockets/baileys==7.0.0-rc13`, `qrcode-terminal==0.12.0`, built-in `node:test`, built-in crypto/fs/http/fetch.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-ctwa-brain-lifecycle-design.md`
 
 ## Global Constraints
 
-- Never read, copy, write, link, or reuse `/root/.hermes/platforms/whatsapp/session`.
-- Never import any Node dependency from `/usr/local/lib/hermes-agent` at runtime.
-- Production observer session: `/var/lib/brain/whatsapp-observer/session`, mode `0700`; credential files `0600` under service umask `0077`.
-- Pending spool: `/var/lib/brain/whatsapp-observer/outbox`, one atomic JSON file per observer message; no raw body text, raw JID/LID, raw `pushName`, raw `sourceId`, raw `ctwaClid`, full URL, thumbnail, or opaque payload may be written there.
-- The body may be sent transiently to Brain over localhost because Brain needs its HMAC for exact turn correlation; the durable spool stores `body` encrypted? No: to preserve restart delivery without persisting raw text, store only the already-normalized body HMAC/length **and** keep the raw body in process memory only. Therefore an event not ACKed before process loss cannot be fully re-correlated from the spool. To satisfy durable recovery without raw-text persistence, the spool must store a one-time HMAC-ready `body_digest_input` encrypted with a local observer spool key, not plaintext. The implementation must use authenticated encryption from Node's built-in crypto (`aes-256-gcm`) and delete ciphertext after ACK; the key lives only in `/etc/brain/observer.env`, never Git. Brain decrypts nothing: the observer decrypts immediately before retransmission and POSTs plaintext only over localhost. This bounded encrypted spool is retained no longer than 72 hours.
+- Never read/copy/write/link/reuse `/root/.hermes/platforms/whatsapp/session`.
+- Never import Node code from `/usr/local/lib/hermes-agent`; observer owns its exact package lock.
+- Observer session: `/var/lib/brain/whatsapp-observer/session`, 0700; credential/mapping files 0600 under `UMask=0077`.
+- Safe outbox: `/var/lib/brain/whatsapp-observer/outbox`, 0700; event files 0600.
+- Outbox never contains raw body text, raw JID/LID, raw observer message ID, raw `pushName`, raw `sourceId`, raw `ctwaClid`, full URL, thumbnail, `contextInfo`, or opaque WhatsApp payload.
+- The optional sanitized display name is the only human-readable WhatsApp profile field allowed in the safe outbox; it carries `display_name_expires_at` and is stripped from pending records after 24 hours.
+- `BRAIN_TRANSPORT_HMAC_SECRET` is shared only with Brain and is used to derive `event_id`, `contact_key`, `body_hmac`, `remote_jid_hmac`, and opaque CTWA HMACs.
+- Only `msg.key.fromMe === false`, non-group inbound messages enter the pipeline.
 - The observer never calls `sendMessage`, `readMessages`, `sendPresenceUpdate`, reactions, group/contact/profile mutation, FamaChat, Kanban, or any LLM.
-- Only `msg.key.fromMe === false`, non-group inbound messages are ingested.
-- `messages.upsert` duplicate delivery is allowed; Brain deduplicates by `event_id`.
-- A protocol reconnect/pairing `515` must reconnect with the observer session, never trigger Hermes operations.
-- Every behavior change follows TDD and every task ends with tests plus a commit.
+- Normal Baileys protocol ACK behavior is accepted/documented; no explicit read/receipt APIs are added.
+- `messages.upsert` duplicates are safe; Brain deduplicates by `event_id`.
+- Unresolved identity is fail-closed and retried from the safe spool using `remote_jid_hmac` plus the observer mapping directory; do not persist the raw JID to make retry easier.
+- Reconnect/restart-required (`515`) reuses only observer's own session and never invokes Hermes operations.
+- Every task follows TDD and ends with tests plus a focused commit.
 
 ---
 
-### Task 1: Scaffold the pinned observer package and pure event normalizer
+### Task 1: Scaffold the pinned package and pure raw-to-safe normalizer
 
 **Files:**
 - Create: `observers/whatsapp/package.json`
 - Create: `observers/whatsapp/package-lock.json`
+- Create: `observers/whatsapp/src/hmac.mjs`
 - Create: `observers/whatsapp/src/normalize.mjs`
+- Create: `observers/whatsapp/test/hmac.test.mjs`
 - Create: `observers/whatsapp/test/normalize.test.mjs`
 - Modify: `.gitignore`
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Produces `normalizeInboundMessage(msg, capturedAt) -> NormalizedObserverEvent | null`.
-- `NormalizedObserverEvent` contains only `observer_device_id` later, `message_id`, timestamps, transient `remote_jid`, transient `push_name`, transient `body`, `native_type`, and bounded `external_ad_reply` fields accepted by Plan 1.
+- `TransportIds(secret)` -> `eventId`, `contactKey`, `bodyHmac`, `jidHmac`, `opaqueHmac`.
+- `normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) -> SafeObserverEvent | null`.
+- Raw WhatsApp objects exist only inside the callback/normalizer call stack.
 
-- [ ] **Step 1: Create package metadata with exact dependency pins**
+- [ ] **Step 1: Pin exact Node dependencies**
 
-`observers/whatsapp/package.json`:
+`package.json`:
 
 ```json
 {
@@ -57,78 +64,68 @@
 }
 ```
 
-Run `npm install --package-lock-only --ignore-scripts` from `observers/whatsapp` and commit the resulting lockfile. Do not use `latest` or a range.
+Generate/commit lockfile with `npm install --package-lock-only --ignore-scripts`; no ranges/latest.
 
-- [ ] **Step 2: Write failing normalization tests**
+- [ ] **Step 2: Write HMAC domain-separation tests**
 
-Use plain object fixtures modeled on the proven CTWA shape:
+Use the same canonical formulas as Plan 1. Prove stable event/contact/body/JID HMACs and distinct domains.
 
-```javascript
-test('normalizes historical CTWA without arbitrary contextInfo', () => {
-  const event = normalizeInboundMessage({
-    key: {id: 'MSG1', fromMe: false, remoteJid: '123@lid'},
-    pushName: 'Maria',
-    messageTimestamp: 100,
-    message: {
-      extendedTextMessage: {
-        text: 'Oi',
-        contextInfo: {
-          externalAdReply: {
-            sourceType: 'ad', sourceApp: 'instagram', sourceId: 'source-secret',
-            sourceUrl: 'https://www.instagram.com/p/example', ctwaClid: 'clid-secret',
-            showAdAttribution: true, clickToWhatsappCall: true,
-            containsAutoReply: false, thumbnail: Buffer.from('never-forward')
-          },
-          mentionedJid: ['do-not-forward@s.whatsapp.net']
-        }
-      }
-    }
-  }, '2026-08-29T12:57:00-03:00');
-  assert.equal(event.native_type, 'extendedTextMessage');
-  assert.equal(event.external_ad_reply.sourceType, 'ad');
-  assert.equal(event.external_ad_reply.sourceUrl, 'https://www.instagram.com/p/example');
-  assert.equal('thumbnail' in event.external_ad_reply, false);
-  assert.equal('contextInfo' in event, false);
-});
-```
+- [ ] **Step 3: Write safe-normalization tests before implementation**
 
-Also prove `fromMe`, groups, empty/non-message events return `null`.
-
-- [ ] **Step 3: Run RED then implement the normalizer**
-
-Run:
-
-```bash
-cd observers/whatsapp
-npm test
-```
-
-Expected: RED before `normalize.mjs`, then PASS after implementation.
-
-Body extraction must support the proven `extendedTextMessage.text` plus ordinary `conversation` text; add only message forms observed/required by tests. Do not serialize arbitrary message trees.
-
-- [ ] **Step 4: Add source-level forbidden-call regression and CI**
-
-Add a test reading all `src/*.mjs` and asserting the forbidden strings are absent:
+A historical CTWA fixture must produce a record shaped like:
 
 ```javascript
-for (const forbidden of ['sendMessage(', 'readMessages(', 'sendPresenceUpdate(', 'sendReaction']) {
-  assert.equal(source.includes(forbidden), false, forbidden);
+{
+  event_id: 'waevt_...',
+  observer_device_id: 'observer-a',
+  received_at: '...',
+  message_timestamp: 123,
+  remote_jid_hmac: '...',
+  contact_key: '...',          // when phone evidence is already resolvable
+  body_hmac: '...',
+  body_length: 62,
+  display_name: 'Maria',       // sanitized optional, expires separately
+  native_type: 'extendedTextMessage',
+  transport_kind: 'ctwa_candidate',
+  external_ad_reply: {
+    source_type: 'ad',
+    source_app: 'instagram',
+    source_id_present: true,
+    source_id_length: 20,
+    source_id_hmac: '...',
+    source_url_hostname: 'www.instagram.com',
+    source_url_length: 80,
+    source_url_hmac: '...',
+    ctwa_clid_present: true,
+    ctwa_clid_length: 40,
+    ctwa_clid_hmac: '...',
+    show_ad_attribution: true,
+    click_to_whatsapp_call: true,
+    contains_auto_reply: false
+  }
 }
 ```
 
-Update CI with Node 20 setup and `npm ci && npm test` under `observers/whatsapp`.
+Serialize the safe event and assert it does **not** contain fixture body, raw JID, raw message ID, raw source ID, raw clid, or full URL.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Implement only proven text/context paths**
+
+Support the proven `extendedTextMessage.text` and ordinary `conversation` text. Extract only the explicit `contextInfo.externalAdReply` fields required by the spec; never recursively serialize the message tree.
+
+- [ ] **Step 5: Add forbidden-call/source regression and CI**
+
+Source test scans observer `src/` for explicit forbidden send/read/presence/reaction calls. CI runs Node 20 `npm ci && npm test`.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add observers/whatsapp .gitignore .github/workflows/ci.yml
-git commit -m "feat: scaffold receive-only WhatsApp observer"
+git commit -m "feat: scaffold privacy-safe WhatsApp observer"
 ```
 
 ---
 
-### Task 2: Add observer identity evidence and independent LID mapping files
+### Task 2: Produce observer identity mappings and contact proof without raw outbox identity
 
 **Files:**
 - Create: `observers/whatsapp/src/identity.mjs`
@@ -136,50 +133,34 @@ git commit -m "feat: scaffold receive-only WhatsApp observer"
 - Modify: `observers/whatsapp/src/normalize.mjs`
 
 **Interfaces:**
-- Produces `deriveIdentityEvidence(msg) -> {remoteJid, phoneJid|null, lid|null}`.
-- Produces `persistLidMapping(sessionDir, evidence)` using the same semantic filenames Brain already understands: `lid-mapping-{phone}.json` and `lid-mapping-{lid}_reverse.json`.
+- `deriveIdentityEvidence(msg) -> {remoteJid, phoneJid|null, lid|null}` in memory only.
+- `persistLidMapping(sessionDir, evidence)` writes the exact mapping-file semantics Brain already validates.
+- `contactKeyForEvidence(evidence, transportIds) -> string|null`.
 
 - [ ] **Step 1: Write fail-closed identity tests**
 
-Test direct PN JID, LID with one matching PN-alt field, conflicting alt PNs, groups, and malformed identifiers. The accepted evidence must be numeric PN `@s.whatsapp.net` plus numeric LID `@lid` only.
-
-```javascript
-test('lid plus remoteJidAlt creates one proven mapping', () => {
-  const evidence = deriveIdentityEvidence({
-    key: {remoteJid: '123456789012345@lid', remoteJidAlt: '5534999772714@s.whatsapp.net'}
-  });
-  assert.deepEqual(evidence, {
-    remoteJid: '123456789012345@lid',
-    phoneJid: '5534999772714@s.whatsapp.net',
-    lid: '123456789012345'
-  });
-});
-```
-
-If the validated Baileys fixture uses `participantAlt` instead, support it only with a corresponding test; do not scan arbitrary nested strings for a phone.
+Test direct PN JID, LID plus one validated PN-alt field, malformed/group IDs, and conflicting PN alternatives. Accept only numeric `@s.whatsapp.net` and numeric `@lid` patterns.
 
 - [ ] **Step 2: Implement atomic mapping writes**
 
-Write JSON string values exactly as Brain's resolver expects, via temp file + fsync + rename, mode `0600`. If existing forward/reverse evidence conflicts, do not overwrite; log only an opaque error code and skip event ingestion until identity can be resolved safely.
+Use temp file + fsync + rename, 0600. Filenames/values match Brain's mapping resolver semantics (`lid-mapping-{phone}.json`, `lid-mapping-{lid}_reverse.json`). Existing conflicting evidence is never overwritten; event remains unresolved/retryable.
 
-- [ ] **Step 3: Run tests**
+- [ ] **Step 3: Keep raw identity in memory only**
+
+Before returning the safe event, derive `remote_jid_hmac` and, where resolvable, `contact_key`. Remove raw identity/message IDs from the returned object.
+
+- [ ] **Step 4: Run and commit**
 
 ```bash
 cd observers/whatsapp && npm test
-```
-
-Expected: PASS.
-
-- [ ] **Step 4: Commit**
-
-```bash
+cd /root/brain
 git add observers/whatsapp/src/identity.mjs observers/whatsapp/test/identity.test.mjs observers/whatsapp/src/normalize.mjs
-git commit -m "feat: persist observer WhatsApp identity mappings"
+git commit -m "feat: persist observer identity evidence safely"
 ```
 
 ---
 
-### Task 3: Add encrypted durable spool and authenticated Brain delivery
+### Task 3: Add atomic raw-data-free outbox and authenticated Brain client
 
 **Files:**
 - Create: `observers/whatsapp/src/spool.mjs`
@@ -188,21 +169,20 @@ git commit -m "feat: persist observer WhatsApp identity mappings"
 - Create: `observers/whatsapp/test/brain-client.test.mjs`
 
 **Interfaces:**
-- `EncryptedSpool(rootDir, key)` with `put(record)`, `list()`, `read(id)`, `ack(id)`, `purgeOlderThan(cutoff)`.
-- `BrainClient({url, token})` with `ingest(event) -> {event_id, duplicate}`.
-- Spool files are `outbox/<message-id-hmac>.json` and contain AES-256-GCM ciphertext/IV/tag plus non-sensitive retry timestamps, never plaintext user text/JID/pushName.
+- `SafeSpool(rootDir)` -> `put`, `list`, `read`, `ack`, `purgeOlderThan`, `expireDisplayNames`.
+- `BrainClient.ingest(safeEvent)` -> `{event_id, duplicate}`.
 
-- [ ] **Step 1: Write spool encryption tests**
+- [ ] **Step 1: Write outbox privacy tests**
 
-Prove the raw body and JID are absent from bytes on disk but survive decrypt/reload with the correct key. Prove wrong key rejects authentication. Prove `ack()` deletes exactly the target file.
+Persist a safe event derived from a fixture whose raw body/JID/message ID/source IDs are known to the test. Read every outbox byte and assert none of those raw values occur. Assert only allowlisted JSON keys exist.
 
-- [ ] **Step 2: Implement AES-256-GCM spool**
+- [ ] **Step 2: Implement atomic event files**
 
-Use `crypto.createCipheriv('aes-256-gcm', key, randomBytes(12))`; require a 32-byte key decoded from `BRAIN_OBSERVER_SPOOL_KEY` hex. Atomic write via `open(tmp, 'wx', 0o600)`, write, sync, close, rename.
+File name is HMAC event ID, not raw message ID. Write to `*.tmp` with mode 0600, fsync, rename. Safe event retention maximum 72 hours. On every scan, if `display_name_expires_at <= now`, rewrite the pending record without the display name before retransmission.
 
-- [ ] **Step 3: Write Brain client tests with a local HTTP test server**
+- [ ] **Step 3: Write Brain HTTP client tests**
 
-Assert exact route `/internal/transport/events`, bearer token, JSON content type, bounded 5-second timeout, and retry on network/5xx but not endless tight-loop retry on 4xx.
+Local fake server asserts exact route `/internal/transport/events`, bearer observer token, bounded timeout, JSON body equal to safe event, retry on network/5xx, controlled drop/quarantine on permanent 4xx schema rejection.
 
 - [ ] **Step 4: Implement and run tests**
 
@@ -210,57 +190,67 @@ Assert exact route `/internal/transport/events`, bearer token, JSON content type
 cd observers/whatsapp && npm test
 ```
 
-Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
 git add observers/whatsapp/src/spool.mjs observers/whatsapp/src/brain-client.mjs observers/whatsapp/test
-git commit -m "feat: add encrypted observer delivery spool"
+git commit -m "feat: add privacy-safe observer outbox"
 ```
 
 ---
 
-### Task 4: Build the Baileys runtime and local health server
+### Task 4: Build Baileys runtime, retry loop, health, and systemd deployment
 
 **Files:**
 - Create: `observers/whatsapp/src/main.mjs`
 - Create: `observers/whatsapp/src/health.mjs`
 - Create: `observers/whatsapp/test/health.test.mjs`
+- Create: `observers/whatsapp/test/runtime.test.mjs`
 - Create: `deploy/brain-whatsapp-observer.service`
 - Create: `deploy/brain-whatsapp-observer.env.example`
 - Modify: `docs/runbook.md`
 - Modify: `tests/test_deployment_contracts.py`
 
 **Interfaces:**
-- Process consumes `BRAIN_OBSERVER_SESSION_DIR`, `BRAIN_OBSERVER_OUTBOX_DIR`, `BRAIN_OBSERVER_TOKEN`, `BRAIN_OBSERVER_DEVICE_ID`, `BRAIN_OBSERVER_SPOOL_KEY`, `BRAIN_URL`.
-- Local health: `GET http://127.0.0.1:8775/health` -> `{status, whatsapp, outbox_depth, oldest_pending_seconds}` without PII.
+- Env: `BRAIN_OBSERVER_SESSION_DIR`, `BRAIN_OBSERVER_OUTBOX_DIR`, `BRAIN_OBSERVER_TOKEN`, `BRAIN_OBSERVER_DEVICE_ID`, `BRAIN_TRANSPORT_HMAC_SECRET`, `BRAIN_URL`.
+- Health `127.0.0.1:8775/health`: status, WhatsApp connection, outbox depth/oldest age, unresolved-identity count; no PII.
 
-- [ ] **Step 1: Implement the connection lifecycle using dependency injection**
+- [ ] **Step 1: Implement/test connection lifecycle with dependency injection**
 
-Keep a small `runObserver({makeSocket, authState, normalize, spool, client})` seam so tests do not connect to WhatsApp. On `connection.update.qr`, render QR using `qrcode-terminal`. On open, set health `connected`. On restart-required close, reconstruct the socket from the same observer session. Never call logout automatically.
+`runObserver({makeSocket, authState, ids, normalize, spool, client})` allows tests without network. QR renders through `qrcode-terminal`. Restart-required reconnects with observer session; never programmatic logout of another device.
 
-- [ ] **Step 2: Wire `messages.upsert`**
+- [ ] **Step 2: Wire `messages.upsert` raw-to-safe flow**
 
-For every normalized event: persist any proven LID mapping, put encrypted event into spool, attempt Brain POST, and ACK only after `{status:'ok'}`. On startup/reconnect, drain oldest spool entries first with bounded exponential backoff.
+Order is strict:
 
-- [ ] **Step 3: Write health and source-contract tests**
+```text
+receive raw msg in memory
+reject fromMe/group
+persist any validated mapping evidence
+normalize to safe HMAC envelope
+zero references to raw msg outside callback scope
+safeSpool.put(event)
+Brain POST
+ACK/remove only after Brain durable success
+```
 
-Prove health never includes chat/message values. Extend deployment test to assert service hardening includes `UMask=0077`, private `/var/lib/brain/whatsapp-observer`, localhost-only health, and no dependency on Hermes session path.
+If Brain returns identity-unavailable because mapping is not yet verifiable, keep the safe event and retry after mapping updates. No raw field is reintroduced for retry.
 
-- [ ] **Step 4: Create systemd unit**
+- [ ] **Step 3: Drain safe outbox on startup/reconnect**
 
-`deploy/brain-whatsapp-observer.service` must use `/usr/bin/node /root/brain/observers/whatsapp/src/main.mjs`, `EnvironmentFile=/etc/brain/observer.env`, `Restart=on-failure`, `UMask=0077`, `NoNewPrivileges=true`, and writable paths only under `/var/lib/brain/whatsapp-observer`.
+Oldest-first, bounded exponential backoff; duplicate ACK is success. Expire display names at 24h and events at 72h with non-PII dropped-event counter/alert.
 
-- [ ] **Step 5: Run full observer/Brain tests**
+- [ ] **Step 4: Add health/source/deployment tests**
+
+Health contains no chat/message/profile values. Unit requires `UMask=0077`, private writable paths only under `/var/lib/brain/whatsapp-observer`, and no Hermes session/source runtime dependency.
+
+- [ ] **Step 5: Create hardened systemd unit and run full observer suite**
 
 ```bash
 cd observers/whatsapp && npm ci && npm test
 cd /root/brain
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_deployment_contracts tests.test_transport_ingest -v
 ```
-
-Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -271,13 +261,15 @@ git commit -m "feat: add production WhatsApp observer service"
 
 ## Plan 2 Acceptance Gate
 
-Run first in a non-sending production shadow checkpoint with the existing Hermes device still connected:
-
 ```text
 OBSERVER_OWN_BAILEYS_PIN=PASS
 OBSERVER_OWN_SESSION=PASS
 OBSERVER_FORBIDDEN_SEND_APIS=PASS
-OBSERVER_ENCRYPTED_SPOOL=PASS
+OUTBOX_RAW_MESSAGE_TEXT=ABSENT
+OUTBOX_RAW_JID_LID=ABSENT
+OUTBOX_RAW_SOURCE_IDS=ABSENT
+OUTBOX_RESTART_REPLAY=PASS
+OBSERVER_IDENTITY_MAPPING=PASS
 OBSERVER_RECONNECT=PASS
 OBSERVER_HEALTH=PASS
 HERMES_COEXISTENCE=PASS
@@ -285,4 +277,4 @@ CTWA_INGEST_TO_BRAIN=PASS
 HERMES_CORE_FILES_TOUCHED=NO
 ```
 
-Do not proceed to lifecycle binding until a real CTWA event reaches Brain and `conversation_context()` correlates it successfully in shadow mode.
+Do not proceed to lifecycle write work until a real CTWA reaches Brain and `conversation_context()` correlates it successfully in shadow mode.
