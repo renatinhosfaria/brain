@@ -35,6 +35,11 @@ class GatewayRequestIdentity:
 
 
 @dataclass(frozen=True)
+class ServiceRequestIdentity:
+    principal: str
+
+
+@dataclass(frozen=True)
 class GatewaySessionContext:
     platform: str
     chat_type: str
@@ -138,14 +143,26 @@ class Authorizer:
         )
 
     def parse_gateway_headers(
-        self, headers: Mapping[str, str]
+        self,
+        headers: Mapping[str, str],
+        required_capability: str = "conversation_phone",
     ) -> GatewayRequestIdentity:
         principal = self._authenticate(headers)
         if principal.mode != "gateway":
             raise BrainError("AUTH_MODE_MISMATCH")
-        if "conversation_phone" not in principal.tools:
+        if required_capability not in principal.tools:
             raise BrainError("AUTH_TOOL_DENIED")
         return GatewayRequestIdentity(principal=principal.name)
+
+    def parse_service_headers(
+        self, headers: Mapping[str, str], required_capability: str
+    ) -> ServiceRequestIdentity:
+        principal = self._authenticate(headers)
+        if principal.mode != "service":
+            raise BrainError("AUTH_MODE_MISMATCH")
+        if required_capability not in principal.tools:
+            raise BrainError("AUTH_TOOL_DENIED")
+        return ServiceRequestIdentity(principal=principal.name)
 
     def authorize_worker(
         self,

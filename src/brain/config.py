@@ -21,9 +21,20 @@ from typing import Literal
 DEFAULT_STATE_DB = Path("/root/.hermes/state.db")
 DEFAULT_KANBAN_DB = Path("/root/.hermes/kanban.db")
 DEFAULT_WHATSAPP_SESSION_DIR = Path("/root/.hermes/platforms/whatsapp/session")
-VALID_MODES = frozenset({"worker", "gateway"})
+DEFAULT_RUNTIME_DB = Path("/var/lib/brain/runtime/brain-runtime.db")
+DEFAULT_OBSERVER_SESSION_DIR = Path("/var/lib/brain/whatsapp-observer/session")
+VALID_MODES = frozenset({"worker", "gateway", "service"})
 VALID_TOOLS = frozenset(
-    {"conversation_recent", "conversation_search", "conversation_phone"}
+    {
+        "conversation_recent",
+        "conversation_search",
+        "conversation_phone",
+        "turn_register",
+        "conversation_context",
+        "transport_ingest",
+        "lifecycle_claim",
+        "lifecycle_result",
+    }
 )
 _PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 logger = logging.getLogger("brain.config")
@@ -46,7 +57,7 @@ def _valid_digest(value: str) -> bool:
 @dataclass(frozen=True)
 class PrincipalConfig:
     name: str
-    mode: Literal["worker", "gateway"] | str
+    mode: Literal["worker", "gateway", "service"] | str
     token_sha256: str
     tools: frozenset[str]
 
@@ -54,7 +65,7 @@ class PrincipalConfig:
         if not isinstance(self.name, str) or not _PRINCIPAL_RE.fullmatch(self.name):
             raise ValueError("principal name is invalid")
         if self.mode not in VALID_MODES:
-            raise ValueError("principal mode must be worker or gateway")
+            raise ValueError("principal mode must be worker, gateway, or service")
         if not _valid_digest(self.token_sha256):
             raise ValueError(f"invalid credential digest for {self.name}")
         normalized_digest = self.token_sha256.lower()
@@ -70,11 +81,17 @@ class BrainSettings:
     state_db: Path = DEFAULT_STATE_DB
     kanban_db: Path = DEFAULT_KANBAN_DB
     whatsapp_session_dir: Path = DEFAULT_WHATSAPP_SESSION_DIR
+    runtime_db: Path = DEFAULT_RUNTIME_DB
+    observer_session_dir: Path = DEFAULT_OBSERVER_SESSION_DIR
     board: str = "default"
     host: str = "127.0.0.1"
     port: int = 8765
     principals: Mapping[str, PrincipalConfig] = field(default_factory=dict)
     cursor_secret: bytes = b""
+    runtime_hmac_secret: bytes = b""
+    transport_hmac_secret: bytes = b""
+    transport_retention_days: int = 90
+    display_name_ttl_hours: int = 24
     history_budget_chars: int = 12_000
     message_max_chars: int = 2_000
     busy_retries: int = 2
@@ -95,6 +112,10 @@ class BrainSettings:
             raise ValueError("busy_retries must be between 0 and 5")
         if self.busy_timeout_seconds <= 0:
             raise ValueError("busy_timeout_seconds must be positive")
+        if self.transport_retention_days <= 0:
+            raise ValueError("transport_retention_days must be positive")
+        if self.display_name_ttl_hours <= 0:
+            raise ValueError("display_name_ttl_hours must be positive")
         if not self.principals:
             raise ValueError("at least one Brain principal is required")
         normalized: dict[str, PrincipalConfig] = {}
@@ -118,6 +139,10 @@ class BrainSettings:
         object.__setattr__(
             self, "whatsapp_session_dir", Path(self.whatsapp_session_dir)
         )
+        object.__setattr__(self, "runtime_db", Path(self.runtime_db))
+        object.__setattr__(
+            self, "observer_session_dir", Path(self.observer_session_dir)
+        )
         if not self.cursor_secret:
             logger.warning(
                 "BRAIN_CURSOR_SECRET is not configured; generated an ephemeral "
@@ -127,6 +152,16 @@ class BrainSettings:
             object.__setattr__(self, "cursor_secret", secrets.token_bytes(32))
         if len(self.cursor_secret) < 32:
             raise ValueError("cursor_secret must contain at least 32 bytes")
+        if self.runtime_hmac_secret and len(self.runtime_hmac_secret) < 32:
+            raise ValueError("runtime_hmac_secret must contain at least 32 bytes")
+        if self.transport_hmac_secret and len(self.transport_hmac_secret) < 32:
+            raise ValueError("transport_hmac_secret must contain at least 32 bytes")
+        if (
+            self.runtime_hmac_secret
+            and self.transport_hmac_secret
+            and self.runtime_hmac_secret == self.transport_hmac_secret
+        ):
+            raise ValueError("runtime and transport HMAC secrets must be distinct")
 
     @classmethod
     def from_env(cls, config_path: Path | None = None) -> BrainSettings:
@@ -173,6 +208,20 @@ class BrainSettings:
             else (cursor_value.encode("utf-8") if cursor_value else b"")
         )
 
+        def required_hmac_secret(name: str) -> bytes:
+            value = os.environ.get(name)
+            if not value:
+                raise ValueError(f"{name} is required")
+            parsed = (
+                bytes.fromhex(value) if _valid_digest(value) else value.encode("utf-8")
+            )
+            if len(parsed) < 32:
+                raise ValueError(f"{name} must contain at least 32 bytes")
+            return parsed
+
+        runtime_hmac_secret = required_hmac_secret("BRAIN_RUNTIME_HMAC_SECRET")
+        transport_hmac_secret = required_hmac_secret("BRAIN_TRANSPORT_HMAC_SECRET")
+
         return cls(
             state_db=Path(
                 os.environ.get(
@@ -190,6 +239,17 @@ class BrainSettings:
                     server.get("whatsapp_session_dir", DEFAULT_WHATSAPP_SESSION_DIR),
                 )
             ),
+            runtime_db=Path(
+                os.environ.get(
+                    "BRAIN_RUNTIME_DB", server.get("runtime_db", DEFAULT_RUNTIME_DB)
+                )
+            ),
+            observer_session_dir=Path(
+                os.environ.get(
+                    "BRAIN_OBSERVER_SESSION_DIR",
+                    server.get("observer_session_dir", DEFAULT_OBSERVER_SESSION_DIR),
+                )
+            ),
             board=str(
                 os.environ.get("BRAIN_KANBAN_BOARD", server.get("board", "default"))
             ),
@@ -197,6 +257,20 @@ class BrainSettings:
             port=int(os.environ.get("BRAIN_PORT", server.get("port", 8765))),
             principals=principals,
             cursor_secret=cursor_secret,
+            runtime_hmac_secret=runtime_hmac_secret,
+            transport_hmac_secret=transport_hmac_secret,
+            transport_retention_days=int(
+                os.environ.get(
+                    "BRAIN_TRANSPORT_RETENTION_DAYS",
+                    server.get("transport_retention_days", 90),
+                )
+            ),
+            display_name_ttl_hours=int(
+                os.environ.get(
+                    "BRAIN_DISPLAY_NAME_TTL_HOURS",
+                    server.get("display_name_ttl_hours", 24),
+                )
+            ),
             history_budget_chars=int(
                 os.environ.get(
                     "BRAIN_HISTORY_BUDGET_CHARS",
