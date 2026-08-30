@@ -27,7 +27,10 @@
 - The observer service is trusted to derive the safe envelope because it necessarily sees raw transport data; Brain re-verifies contact identity against the observer mapping directory before accepting the event.
 - Gateway/default capabilities are `turn_register` and `conversation_context`; worker fallback `conversation_phone` remains for Porteiro/Cadastro.
 - Service principals are distinct and cannot use worker Task/Run identity as authority.
-- Correlation is fail-closed: zero matches -> `turn_not_correlated`; multiple matches -> `ambiguous_transport_events`.
+- Correlation is by exact `message_id` join and is fail-closed: any identifier that does not resolve leaves the turn `pending`, then `uncorrelatable` after the grace period. No nearest-time or best-guess fallback.
+- Correlation is re-evaluated, never computed once. A turn registered before its events are ingested must still correlate when they arrive (spec premise P6).
+- `pre_gateway_dispatch` performs no I/O of any kind. It runs unbounded upstream, so blocking there wedges inbound dispatch for every message (spec premise P4).
+- All three Kanban stage cards for one lead carry the same origin turn; an internal re-invocation never becomes or replaces an origin turn (spec 10.1.1).
 - Plan 1 owns transport facts and correlation, not lifecycle interpretation. `transport_kind` is `ctwa_candidate|ordinary_inbound`; `inbound_kind` is lifecycle-relative and remains `null` until an exact lifecycle binding exists.
 - Never infer lifecycle origin or semantics from contact-global chronology. A historical CTWA candidate for the same phone may belong to another lifecycle/campaign.
 - Every behavior change follows TDD and every task ends with tests plus a focused commit.
@@ -199,39 +202,63 @@ git commit -m "feat: ingest privacy-safe WhatsApp transport events"
 
 ---
 
-### Task 4: Register Hermes turns and correlate batched messages
+### Task 4: Register Hermes turns and correlate by exact message identifier
+
+> **Amended 2026-08-30 (spec Amendment 1).** The originally shipped version of this task correlated by body HMAC over a debounce window and computed the result once, at registration. Spec premise P6 proved that non-deterministic in production. This task now describes the target contract; the code in `src/brain/turn_correlation.py` still implements the superseded one and must be migrated.
 
 **Files:**
-- Create: `src/brain/turn_correlation.py`
+- Modify: `src/brain/turn_correlation.py`
 - Modify: `src/brain/gateway_api.py`
+- Modify: `src/brain/transport_service.py`
 - Modify: `src/brain/service.py`
-- Create: `tests/test_turn_correlation.py`
+- Modify: `tests/test_turn_correlation.py`
 - Modify: `tests/test_gateway_api.py`
 
 **Interfaces:**
 - `POST /internal/gateway/turn-register`, gateway capability `turn_register`.
-- Input: trusted gateway session context + upstream Hermes `turn_id` + current `user_message` + timestamp.
-- Raw `user_message` is used only in memory to derive `body_hmac`/length and is never stored/logged.
-- Output: `status`, `wa_turn_id`, `correlation=correlated|pending|ambiguous`.
+- Input: trusted gateway session context + upstream Hermes `turn_id` + current `user_message` + timestamp + `message_ids` (ordered, possibly empty).
+- Raw `user_message` and raw `message_ids` are used only in memory, to derive `body_hmac`/length and candidate `event_id` values. Neither is stored or logged.
+- Output: `status`, `wa_turn_id`, `correlation=correlated|pending|uncorrelatable`.
+- `ambiguous` is no longer reachable from this route; exact-identifier correlation cannot produce it. The `conversation_context()` contract keeps the reason string (spec 8.4).
 
-- [ ] **Step 1: Write single-event, two-event debounce, and embedded-newline tests**
+**No schema migration is required.** `whatsapp_turns.correlation_status` has no `CHECK` constraint, so `uncorrelatable` is storable today, and `transport_events.event_id` is the primary key, so a derived identifier is a direct lookup with no new column or index.
 
-Seed safe transport events with `body_hmac`/length. Require the exact Hermes batching join (`"\n"`) to produce one unique ordered event combination. Include an event whose own body contains a newline so naive line-count matching fails and the implementation must test contiguous candidate partitions.
+- [ ] **Step 1: Write exact-join tests**
 
-- [ ] **Step 2: Write fail-closed ambiguity tests**
+For each supplied `message_id`, derive `event_id` with the observer's formula and require a direct hit. Cover the single-message turn and the multi-message debounce batch, asserting `turn_events.ordinal` follows dispatch order rather than timestamp order. Keep one embedded-newline case to prove the secondary body-HMAC consistency check still holds on the joined set.
 
-Zero combinations -> `turn_not_correlated`; multiple exact combinations -> `ambiguous_transport_events`; no nearest-time fallback.
+Derive candidates using the observer device identities Brain knows from configuration and from `transport_events.observer_device_id`; never accept a device identity supplied in the request.
 
-- [ ] **Step 3: Implement correlation**
+- [ ] **Step 2: Write arrival-order tests (the P6 regression)**
 
-Authorize the Hermes session against `state.db`, resolve the Hermes chat to canonical phone, derive `contact_key`, select candidate observer events in the supported debounce window, compare composed HMAC/length, and persist `whatsapp_turns`/`turn_events` only on unique proof.
+The decisive case: register the turn **before** the matching event is ingested, then ingest it. The turn must become `correlated` once the event arrives. Prove the reverse order still works, and that a duplicate ingestion does not duplicate `turn_events` rows.
 
-- [ ] **Step 4: Run tests and commit**
+This is the production failure the amendment exists to fix; it must fail before the fix and pass after.
+
+- [ ] **Step 3: Write fail-closed and terminal-state tests**
+
+An identifier that never resolves stays `pending` inside the grace period and becomes `uncorrelatable` after it. An identifier resolving to an event bound to a different contact is immediately `uncorrelatable`. A turn with an empty `message_ids` list is an internal re-invocation and creates **no** `whatsapp_turns` row. `uncorrelatable` is never re-evaluated. No nearest-time or best-guess fallback exists anywhere.
+
+- [ ] **Step 4: Decide the grace period explicitly**
+
+**Open decision, do not invent a value.** The grace period separates "observer is late" from "will never arrive". Current evidence is two samples: one race lost with the event and registration in the same second, one won with two seconds of margin. Either measure observer ingestion latency under real volume first, or choose a deliberately conservative value and record the reasoning here. Whatever is chosen becomes a named setting, not a literal.
+
+- [ ] **Step 5: Implement correlation and re-evaluation**
+
+Authorize the Hermes session against `state.db`, resolve the Hermes chat to canonical phone, derive `contact_key`, derive each candidate `event_id`, and persist `whatsapp_turns`/`turn_events` only when every identifier resolves for that contact.
+
+Re-evaluate `pending` turns on later transport ingestion for the same contact and on `conversation_context()`. Transport ingestion must stay durable if re-evaluation raises, matching the isolation Task 3 already requires.
+
+- [ ] **Step 6: Migrate existing rows**
+
+Rows registered under the superseded algorithm carry no identifiers and can never correlate. Sweep the `pending` ones to `uncorrelatable` once, and prove the sweep touches nothing already `correlated`.
+
+- [ ] **Step 7: Run tests and commit**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m unittest tests.test_turn_correlation tests.test_gateway_api -v
-git add src/brain/turn_correlation.py src/brain/gateway_api.py src/brain/service.py tests/test_turn_correlation.py tests/test_gateway_api.py
-git commit -m "feat: correlate Hermes turns to WhatsApp events"
+PYTHONPATH=src .venv/bin/python -m unittest tests.test_turn_correlation tests.test_transport_ingest tests.test_gateway_api -v
+git add src/brain/turn_correlation.py src/brain/gateway_api.py src/brain/transport_service.py src/brain/service.py tests/test_turn_correlation.py tests/test_gateway_api.py
+git commit -m "feat: correlate Hermes turns by exact message identifier"
 ```
 
 ---
@@ -248,15 +275,20 @@ git commit -m "feat: correlate Hermes turns to WhatsApp events"
 - Modify: `src/brain/gateway_api.py`
 - Modify: `src/brain/service.py`
 
+> **Amended 2026-08-30 (spec Amendment 1).** Adds the `pre_gateway_dispatch` hook and changes `pre_tool_call` to key on the retained **origin turn** instead of the current turn. Spec premise P7 recorded that the shipped behaviour gave Cadastro and Reno cards `wa_turn_id` values from Kanban-notification turns, making the spec 10.3 binding unreachable.
+
 **Interfaces:**
 - One CEO model-visible native tool: `conversation_context({})` in `brain-context`.
-- `pre_llm_call`: registers trusted current WhatsApp turn via `/internal/gateway/turn-register`.
-- `pre_tool_call`: for default-profile WhatsApp `kanban_create` and assignee exactly `porteiro|cadastro|reno`, modifies `idempotency_key` to `whatsapp:<wa_turn_id>:<assignee>`.
+- `pre_gateway_dispatch`: appends `event.message_id` to a bounded, TTL-expiring in-process buffer keyed by chat, and returns `None`. **Performs no network call, no disk I/O, and no blocking work of any kind** (spec 8.1, premise P4: upstream leaves this hook out of `_HOOK_TIMEOUT_BOUNDED_HOOKS`, so it runs unbounded and a slow dependency would wedge inbound dispatch for every message).
+- `pre_llm_call`: drains the buffer for the current chat and registers the turn with those `message_ids` via `/internal/gateway/turn-register`. All network I/O lives here, where upstream applies a fail-open timeout.
+- `pre_tool_call`: for default-profile WhatsApp `kanban_create` and assignee exactly `porteiro|cadastro|reno`, modifies `idempotency_key` to `whatsapp:<origin_wa_turn_id>:<assignee>`.
 - `/internal/gateway/conversation-context`: reauthorizes the session/current registered turn and returns bounded context.
 
 - [ ] **Step 1: Upgrade plugin tests to capture tools/hooks**
 
-Assert exactly one model-visible tool `conversation_context` plus `pre_llm_call` and `pre_tool_call` hooks. Do not expose CEO `conversation_phone` after migration.
+Assert exactly one model-visible tool `conversation_context` plus `pre_gateway_dispatch`, `pre_llm_call`, and `pre_tool_call` hooks. Do not expose CEO `conversation_phone` after migration.
+
+Add a source-scanning regression test proving the `pre_gateway_dispatch` callback contains no network, filesystem, subprocess, or sleep call. Premise P4 makes this a safety property of the Hermes runtime, not a style preference, so it needs a test rather than a comment.
 
 - [ ] **Step 2: Write contract/failure tests**
 
@@ -266,11 +298,21 @@ Success shape contains verified `contact.phone_e164`, optional display name/sour
 
 Keep all session context sourced at call time from official `gateway.session_context.get_session_env()`. Never accept model-supplied chat/session identity.
 
-- [ ] **Step 4: Implement idempotency rewrite using the current registered `wa_turn_id`**
+- [ ] **Step 4: Implement the message-identifier buffer**
 
-Use an in-process ContextVar keyed to the current hook turn or a Brain lookup by current upstream `turn_id`; never derive from message text/phone. Non-WhatsApp, non-default profile, unrelated tool, or other assignee is unchanged.
+Bounded per chat, TTL-expiring, guarded by the same lock discipline the current-turn map already uses. Premise P5 established that the gateway runs the agent turn in its own process, so this state is visible to `pre_llm_call`; a test must assert the buffer is drained exactly once per turn, so a retried or duplicated hook fire cannot replay identifiers into a later turn.
 
-- [ ] **Step 5: Run tests and commit**
+- [ ] **Step 5: Implement origin-turn retention and idempotency rewrite**
+
+Retain the origin turn per chat, refreshing it **only** when the drained buffer is non-empty, which by premise P2 means an external WhatsApp turn. A Kanban-notification turn must leave the retained origin untouched, so a Cadastro or Reno card created during it still carries the originating turn.
+
+When no origin turn is retained — TTL expired, or the gateway restarted mid-lead — leave the model-supplied key unchanged. Do not substitute the current internal turn: a wrong binding is silent and permanent, while an unrewritten key is still discoverable by the reconciler from `kanban.db`.
+
+Never derive identity from message text or phone. Non-WhatsApp, non-default profile, unrelated tool, or an assignee outside the approved set is unchanged.
+
+Tests must cover the full production sequence: external turn creates the Porteiro card, two notification turns follow, and all three cards carry one identical `wa_turn_id`.
+
+- [ ] **Step 6: Run tests and commit**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_ceo_bridge_plugin tests.test_gateway_api tests.test_turn_correlation -v
@@ -337,9 +379,14 @@ TRANSPORT_INGEST_DEDUP=PASS
 TRANSPORT_IDENTITY_REVERIFY=PASS
 TURN_SINGLE_EVENT=PASS
 TURN_BATCHED_EVENTS=PASS
-TURN_AMBIGUITY_FAIL_CLOSED=PASS
+TURN_EXACT_IDENTIFIER_JOIN=PASS
+TURN_LATE_EVENT_RECORRELATES=PASS
+TURN_UNCORRELATABLE_TERMINAL=PASS
+TURN_INTERNAL_INVOCATION_NO_ROW=PASS
+DISPATCH_HOOK_PERFORMS_NO_IO=PASS
 CONVERSATION_CONTEXT_CONTRACT=PASS
 KANBAN_IDEMPOTENCY_REWRITE=PASS
+KANBAN_STAGES_SHARE_ORIGIN_TURN=PASS
 HERMES_COMPATIBILITY_CHECK=PASS
 HERMES_CORE_FILES_TOUCHED=NO
 ```
