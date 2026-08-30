@@ -267,6 +267,19 @@ def _drain_message_ids(context: dict[str, str]) -> list[str]:
     return list(buffered[0]) if buffered else []
 
 
+def _platform_name(value: object) -> str | None:
+    """Read the platform whether it arrives as a Platform enum or a string.
+
+    ``Platform`` is an Enum with a ``_missing_`` hook for plugin platforms, and
+    not every path is guaranteed to hand this hook a member rather than the raw
+    value. Accepting both removes an assumption that would otherwise fail
+    silently: an unrecognised platform empties the buffer and every turn would
+    become uncorrelatable.
+    """
+    name = getattr(value, "value", value)
+    return name if isinstance(name, str) else None
+
+
 def pre_gateway_dispatch(event: Any = None, **_kwargs: Any) -> None:
     """Buffer this inbound message's key.id. Performs no I/O of any kind.
 
@@ -280,7 +293,7 @@ def pre_gateway_dispatch(event: Any = None, **_kwargs: Any) -> None:
         source = getattr(event, "source", None)
         if source is None or getattr(event, "internal", False):
             return
-        platform = getattr(getattr(source, "platform", None), "value", None)
+        platform = _platform_name(getattr(source, "platform", None))
         profile = getattr(source, "profile", None) or "default"
         chat_id = getattr(source, "chat_id", None)
         message_id = getattr(event, "message_id", None)

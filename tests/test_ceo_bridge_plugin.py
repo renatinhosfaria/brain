@@ -154,6 +154,7 @@ class CEOBridgePluginTests(unittest.TestCase):
         chat_id: str = "123456789012345@lid",
         profile: str | None = None,
         internal: bool = False,
+        plain_platform: bool = False,
     ) -> types.SimpleNamespace:
         """Mirror the MessageEvent shape gateway/platforms/base.py defines."""
         return types.SimpleNamespace(
@@ -161,7 +162,9 @@ class CEOBridgePluginTests(unittest.TestCase):
             internal=internal,
             text="oi",
             source=types.SimpleNamespace(
-                platform=types.SimpleNamespace(value=platform),
+                platform=platform
+                if plain_platform
+                else types.SimpleNamespace(value=platform),
                 chat_id=chat_id,
                 chat_type=chat_type,
                 profile=profile,
@@ -255,6 +258,15 @@ class CEOBridgePluginTests(unittest.TestCase):
             turn_id="kanban-notification-1",
         )
         self.assertIsNone(result)
+
+    def test_dispatch_accepts_enum_or_plain_platform(self) -> None:
+        """Not every path is guaranteed to pass a Platform member."""
+        requests: list[dict] = []
+        self.dispatch(self.inbound_event("3EB0PLAIN", plain_platform=True))
+
+        self.register_turn("opaque-turn", requests)
+
+        self.assertEqual(requests[0]["message_ids"], ["3EB0PLAIN"])
 
     def test_dispatch_hook_performs_no_io(self) -> None:
         """Premise P4: this hook runs unbounded upstream, so it must not block."""
