@@ -121,7 +121,7 @@ argument-modification contracts, session ContextVars, state/Kanban schemas,
 WhatsApp bridge batching (`"\n"` join and timer reset), adapter identity, and
 delivery-ledger states. It never repairs Hermes or writes its databases.
 
-## Plan 1 boundary
+## Plan 2 observer implementation boundary
 
 Implemented: Brain-owned runtime persistence, separate HMAC domains, safe
 transport ingestion, fail-closed identity proof, turn registration,
@@ -129,11 +129,35 @@ deterministic batch correlation, `conversation_context`, public Hermes hooks,
 Kanban idempotency, and compatibility checks. There is no upstream Hermes
 modification.
 
-Not implemented: a production observer service, lifecycle engine, lifecycle
-writer, FamaChat CRM automation, or production write enablement. Reserve
-`/var/lib/brain/whatsapp-observer/session` for the future observer and keep it
-separate from `/root/.hermes/platforms/whatsapp/session`; never copy or share
-the Hermes session directory. No observer unit is installed by Plan 1.
+The receive-only observer runtime is implemented with its own pinned Baileys,
+its own session path, raw-data-free safe spool, bounded retry, loopback health,
+and versioned systemd/env artifacts. Its future production state belongs under
+`/var/lib/brain/whatsapp-observer`, with its session at
+`/var/lib/brain/whatsapp-observer/session`; it must remain separate from
+`/root/.hermes/platforms/whatsapp/session`, which must never be copied, shared,
+or disconnected by the observer.
+
+Live deployment is still pending. This implementation task did not install or
+start the observer unit, create real observer directories, provision real
+secrets, render a real QR, pair a linked device, prove coexistence, run a real
+CTWA test, or prove `conversation_context` correlation end to end. The
+lifecycle engine, lifecycle writer, FamaChat CRM automation, and production
+write enablement are also not implemented.
+
+### Stage 3 live observer gate (not executed by Task 4)
+
+Perform Stage 3 only as a separately authorized controlled change:
+
+1. Require a passing integrity baseline before deployment.
+2. Create the private observer directories and secrets, install the dedicated
+   service artifact, and verify its loopback-only health endpoint.
+3. Pair manually as a **second linked device** using only the observer's own
+   session path. Never disconnect, replace, copy, or reuse the Hermes session.
+4. Run one controlled CTWA inbound flow and confirm durable Brain ingestion.
+5. Confirm the resulting `conversation_context` correlation end to end without
+   exposing message content or transport identity in the observer outbox.
+6. Re-run the complete integrity baseline and verify Hermes coexistence after
+   the controlled flow.
 
 ## Degradation and rollback
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import tomllib
 import unittest
@@ -11,6 +12,66 @@ ROOT = Path(__file__).parents[1]
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_whatsapp_observer_unit_is_hardened_and_isolated(self) -> None:
+        source = (ROOT / "deploy/brain-whatsapp-observer.service").read_text(
+            encoding="utf-8"
+        )
+
+        for required in (
+            "[Service]",
+            "Type=simple",
+            "UMask=0077",
+            "Restart=on-failure",
+            "NoNewPrivileges=true",
+            "PrivateTmp=true",
+            "ProtectSystem=strict",
+            "ReadWritePaths=/var/lib/brain/whatsapp-observer",
+            "EnvironmentFile=/etc/brain/whatsapp-observer.env",
+            "observers/whatsapp/src/main.mjs",
+        ):
+            self.assertIn(required, source)
+        self.assertNotIn("/root/.hermes/platforms/whatsapp/session", source)
+        self.assertNotIn("/usr/local/lib/hermes-agent", source)
+        self.assertNotIn("send", source.lower())
+        read_write_lines = [
+            line for line in source.splitlines() if line.startswith("ReadWritePaths=")
+        ]
+        self.assertEqual(
+            read_write_lines,
+            ["ReadWritePaths=/var/lib/brain/whatsapp-observer"],
+        )
+
+    def test_whatsapp_observer_env_uses_only_its_own_paths_and_secrets(self) -> None:
+        source = (ROOT / "deploy/brain-whatsapp-observer.env.example").read_text(
+            encoding="utf-8"
+        )
+
+        for required in (
+            "BRAIN_OBSERVER_SESSION_DIR=/var/lib/brain/whatsapp-observer/session",
+            "BRAIN_OBSERVER_OUTBOX_DIR=/var/lib/brain/whatsapp-observer/outbox",
+            "BRAIN_OBSERVER_TOKEN=<observer-service-token>",
+            "BRAIN_OBSERVER_DEVICE_ID=<observer-device-id>",
+            "BRAIN_TRANSPORT_HMAC_SECRET=<at-least-32-byte-transport-secret>",
+            "BRAIN_URL=http://127.0.0.1:8765",
+            "BRAIN_OBSERVER_HEALTH_HOST=127.0.0.1",
+            "BRAIN_OBSERVER_HEALTH_PORT=8775",
+        ):
+            self.assertIn(required, source)
+        self.assertNotIn("BRAIN_RUNTIME_HMAC_SECRET", source)
+        self.assertNotIn("/root/.hermes/platforms/whatsapp/session", source)
+        self.assertNotIn("/usr/local/lib/hermes-agent", source)
+        self.assertNotRegex(source, r"(?i)\b[0-9a-f]{64}\b")
+
+    def test_whatsapp_observer_baileys_dependencies_remain_exactly_pinned(self) -> None:
+        package = json.loads(
+            (ROOT / "observers/whatsapp/package.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            package["dependencies"]["@whiskeysockets/baileys"], "7.0.0-rc13"
+        )
+        self.assertEqual(package["dependencies"]["qrcode-terminal"], "0.12.0")
+
     def test_brain_toml_example_declares_v2_principals(self) -> None:
         data = tomllib.loads(
             (ROOT / "deploy/brain.toml.example").read_text(encoding="utf-8")
