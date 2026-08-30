@@ -118,6 +118,7 @@ class BrainService:
                 self.runtime,
                 self.runtime_ids,
                 runtime_secret=settings.runtime_hmac_secret,
+                observer_device_ids=settings.observer_device_ids,
             )
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
@@ -377,6 +378,7 @@ class BrainService:
         turn_id: str,
         user_message: str,
         turn_timestamp: float,
+        message_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         started = time.perf_counter()
         identity: dict[str, Any] = {
@@ -407,6 +409,7 @@ class BrainService:
                     turn_id=turn_id,
                     user_message=user_message,
                     turn_timestamp=turn_timestamp,
+                    message_ids=message_ids,
                 )
             )
             self._audit(

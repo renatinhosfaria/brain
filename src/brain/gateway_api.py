@@ -20,8 +20,10 @@ _CONTEXT_FIELDS = frozenset(
     {"platform", "chat_type", "chat_id", "session_key", "session_id"}
 )
 _TURN_FIELDS = _CONTEXT_FIELDS | frozenset(
-    {"turn_id", "user_message", "turn_timestamp"}
+    {"turn_id", "user_message", "turn_timestamp", "message_ids"}
 )
+_MAX_MESSAGE_IDS = 64
+_MAX_MESSAGE_ID = 128
 _CONVERSATION_CONTEXT_FIELDS = _CONTEXT_FIELDS | frozenset({"wa_turn_id"})
 _MAX_CONTEXT_VALUE = 512
 _MAX_TURN_ID = 512
@@ -64,6 +66,7 @@ class TurnPayload:
     turn_id: str
     user_message: str
     turn_timestamp: float
+    message_ids: tuple[str, ...]
 
 
 def _parse_turn(payload: object) -> TurnPayload:
@@ -88,7 +91,31 @@ def _parse_turn(payload: object) -> TurnPayload:
         or float(timestamp) <= 0
     ):
         raise _request_error()
-    return TurnPayload(context, turn_id, user_message, float(timestamp))
+    return TurnPayload(
+        context,
+        turn_id,
+        user_message,
+        float(timestamp),
+        _parse_message_ids(payload["message_ids"]),
+    )
+
+
+def _parse_message_ids(value: object) -> tuple[str, ...]:
+    """Ordered WhatsApp key.id values for this turn, empty for an internal one.
+
+    Used only in memory, to derive candidate event IDs. Brain never persists
+    a raw identifier (spec 6.4 and 8.2).
+    """
+    if not isinstance(value, list) or len(value) > _MAX_MESSAGE_IDS:
+        raise _request_error()
+    for entry in value:
+        if (
+            not isinstance(entry, str)
+            or not (1 <= len(entry) <= _MAX_MESSAGE_ID)
+            or not all(0x21 <= ord(char) <= 0x7E for char in entry)
+        ):
+            raise _request_error()
+    return tuple(value)
 
 
 @dataclass(frozen=True)
@@ -193,6 +220,7 @@ class GatewayAPI:
                 turn.turn_id,
                 turn.user_message,
                 turn.turn_timestamp,
+                turn.message_ids,
             )
             return JSONResponse(result, status_code=200)
         except BrainError as exc:

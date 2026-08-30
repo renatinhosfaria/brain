@@ -35,7 +35,7 @@ class CorrelationHarness(unittest.TestCase):
             self.runtime,
             self.ids,
             runtime_secret=self.runtime_secret,
-            window_seconds=15.0,
+            observer_device_ids=("observer-a",),
             clock=lambda: 2000.0,
         )
         self._event_counter = 0
@@ -107,110 +107,30 @@ class CorrelationHarness(unittest.TestCase):
         )
 
 
-class TurnCorrelationTests(CorrelationHarness):
-    """Superseded body-HMAC correlation. Replaced during GREEN."""
+class SupersededAlgorithmPortedTests(CorrelationHarness):
+    """Properties from the body-HMAC suite that outlived the algorithm.
 
-    def test_single_two_three_and_embedded_newline_batches_correlate(self) -> None:
-        cases = [
-            (["oi"], "oi"),
-            (["oi", "quero informações"], "oi\nquero informações"),
-            (["um", "dois", "três"], "um\ndois\ntrês"),
-            (["linha1\nlinha2", "ok"], "linha1\nlinha2\nok"),
-        ]
-        for index, (bodies, aggregate) in enumerate(cases):
-            with self.subTest(bodies=bodies):
-                self.runtime.write(lambda conn: conn.execute("DELETE FROM turn_events"))
-                self.runtime.write(
-                    lambda conn: conn.execute("DELETE FROM whatsapp_turns")
-                )
-                self.runtime.write(
-                    lambda conn: conn.execute("DELETE FROM transport_events")
-                )
-                event_ids = [
-                    self.add_event(body, 995.0 + offset)
-                    for offset, body in enumerate(bodies)
-                ]
-                result = self.correlator.register(
-                    self.registration(aggregate, turn_id=f"turn-{index}")
-                )
-                self.assertEqual(result["correlation"], "correlated")
-                mappings = self.rows("turn_events")
-                self.assertEqual(
-                    [(row["event_id"], row["ordinal"]) for row in mappings],
-                    [(event_id, ordinal) for ordinal, event_id in enumerate(event_ids)],
-                )
+    The window-and-content matching tests were deleted with spec Amendment 1.
+    These three assert privacy, idempotency, and Node/Python length parity,
+    none of which the amendment changed.
+    """
 
-    def test_zero_wrong_contact_out_of_window_hmac_and_length_are_pending(self) -> None:
-        scenarios = (
-            lambda: None,
-            lambda: self.add_event("hello", 999.0, contact_key=self.other_contact_key),
-            lambda: self.add_event("hello", 900.0),
-            lambda: self.add_event(
-                "hello", 999.0, body_hmac=self.ids.body_hmac("different")
-            ),
-            lambda: self.add_event("hello", 999.0, body_length=4),
+    DEVICE = "observer-a"
+
+    def add_event_for(self, key_id: str, body: str, timestamp: float, **kwargs) -> str:
+        return self.add_event(
+            body, timestamp, event_id=self.ids.event_id(self.DEVICE, key_id), **kwargs
         )
-        for index, prepare in enumerate(scenarios):
-            with self.subTest(index=index):
-                self.runtime.write(lambda conn: conn.execute("DELETE FROM turn_events"))
-                self.runtime.write(
-                    lambda conn: conn.execute("DELETE FROM whatsapp_turns")
-                )
-                self.runtime.write(
-                    lambda conn: conn.execute("DELETE FROM transport_events")
-                )
-                prepare()
-                result = self.correlator.register(
-                    self.registration("hello", turn_id=f"pending-{index}")
-                )
-                self.assertEqual(result["correlation"], "pending")
-                self.assertEqual(self.rows("turn_events"), [])
 
-    def test_separator_prefix_and_trailing_text_never_correlate(self) -> None:
-        for index, aggregate in enumerate(("a b", "a\n", "a\nb trailing")):
-            with self.subTest(aggregate=aggregate):
-                self.runtime.write(lambda conn: conn.execute("DELETE FROM turn_events"))
-                self.runtime.write(
-                    lambda conn: conn.execute("DELETE FROM whatsapp_turns")
-                )
-                self.runtime.write(
-                    lambda conn: conn.execute("DELETE FROM transport_events")
-                )
-                self.add_event("a", 998.0)
-                self.add_event("b", 999.0)
-                result = self.correlator.register(
-                    self.registration(aggregate, turn_id=f"exactness-{index}")
-                )
-                self.assertEqual(result["correlation"], "pending")
-
-    def test_only_exact_contiguous_ranges_are_considered(self) -> None:
-        first = self.add_event("ignore", 996.0)
-        wanted_a = self.add_event("a", 997.0)
-        wanted_b = self.add_event("b", 998.0)
-        last = self.add_event("ignore-too", 999.0)
-
-        result = self.correlator.register(self.registration("a\nb"))
-
-        self.assertEqual(result["correlation"], "correlated")
-        mapped = [row["event_id"] for row in self.rows("turn_events")]
-        self.assertEqual(mapped, [wanted_a, wanted_b])
-        self.assertNotIn(first, mapped)
-        self.assertNotIn(last, mapped)
-
-    def test_two_exact_ranges_are_ambiguous_and_create_no_mappings(self) -> None:
-        self.add_event("a", 996.0)
-        self.add_event("b", 997.0)
-        self.add_event("a", 998.0)
-        self.add_event("b", 999.0)
-
-        result = self.correlator.register(self.registration("a\nb"))
-
-        self.assertEqual(result["correlation"], "ambiguous")
-        self.assertEqual(self.rows("turn_events"), [])
+    def registration_with(self, user_message: str, message_ids, **kwargs):
+        return replace(
+            self.registration(user_message, **kwargs), message_ids=tuple(message_ids)
+        )
 
     def test_identical_repeat_is_idempotent_and_conflict_fails_closed(self) -> None:
-        self.add_event("hello", 999.0)
-        registration = self.registration("hello")
+        self.add_event_for("3EB0IDEM", "hello", 999.0)
+        registration = self.registration_with("hello", ["3EB0IDEM"])
+
         first = self.correlator.register(registration)
         second = self.correlator.register(registration)
 
@@ -218,18 +138,24 @@ class TurnCorrelationTests(CorrelationHarness):
         self.assertEqual(len(self.rows("whatsapp_turns")), 1)
         self.assertEqual(len(self.rows("turn_events")), 1)
         with self.assertRaises(TurnConflictError):
-            self.correlator.register(self.registration("different"))
+            self.correlator.register(self.registration_with("different", ["3EB0IDEM"]))
         self.assertEqual(len(self.rows("whatsapp_turns")), 1)
         self.assertEqual(len(self.rows("turn_events")), 1)
 
-    def test_turn_persistence_contains_only_hmaced_identity_and_content(self) -> None:
+    def test_persistence_contains_only_hmaced_identity_and_content(self) -> None:
         raw_turn = "raw-turn-value-never-store"
         raw_session = "raw-session-key-never-store"
         raw_message = "raw-user-message-never-store"
-        self.add_event(raw_message, 999.0)
+        raw_key_id = "3EB0RAWKEYIDNEVERSTORE"
+        self.add_event_for(raw_key_id, raw_message, 999.0)
 
         result = self.correlator.register(
-            self.registration(raw_message, turn_id=raw_turn, session_key=raw_session)
+            self.registration_with(
+                raw_message,
+                [raw_key_id],
+                turn_id=raw_turn,
+                session_key=raw_session,
+            )
         )
 
         row = self.rows("whatsapp_turns")[0]
@@ -240,38 +166,22 @@ class TurnCorrelationTests(CorrelationHarness):
             session_key_hmac(self.runtime_secret, raw_session),
         )
         self.assertEqual(row["body_hmac"], self.ids.body_hmac(raw_message))
-        self.assertEqual(row["body_length"], len(raw_message))
         serialized = "\n".join(
-            str(tuple(row))
-            for row in self.rows("whatsapp_turns") + self.rows("turn_events")
+            str(tuple(stored))
+            for stored in self.rows("whatsapp_turns")
+            + self.rows("turn_events")
+            + self.rows("turn_candidate_events")
         )
-        for raw in (raw_turn, raw_session, raw_message, self.CONTACT_PHONE):
+        # The raw key.id is the identifier the amendment newly accepts, so it
+        # joins the values that must never reach durable storage.
+        for raw in (
+            raw_turn,
+            raw_session,
+            raw_message,
+            raw_key_id,
+            self.CONTACT_PHONE,
+        ):
             self.assertNotIn(raw, serialized)
-
-    def test_unicode_length_is_code_points_and_matches_node_array_from(self) -> None:
-        body = "A😀B"
-        self.assertEqual(len(body), 3)
-        self.assertEqual(len(body.encode("utf-16-le")) // 2, 4)
-        self.assertEqual(len(body.encode("utf-8")), 6)
-        self.add_event(body, 999.0, body_length=3)
-
-        result = self.correlator.register(self.registration(body))
-
-        self.assertEqual(result["correlation"], "correlated")
-
-    def test_many_candidates_use_deterministic_temporal_order_without_count_cap(
-        self,
-    ) -> None:
-        for index in range(400):
-            self.add_event(f"distractor-{index}", 986.0 + index / 100.0)
-        target = self.add_event("needle", 999.0)
-
-        result = self.correlator.register(self.registration("needle"))
-
-        self.assertEqual(result["correlation"], "correlated")
-        self.assertEqual(
-            [row["event_id"] for row in self.rows("turn_events")], [target]
-        )
 
     def test_session_hmac_is_keyed_and_domain_separated(self) -> None:
         value = session_key_hmac(self.runtime_secret, "wa:g")
@@ -282,6 +192,17 @@ class TurnCorrelationTests(CorrelationHarness):
         self.assertNotEqual(value, plain_sha)
         self.assertNotEqual(value, generic_hmac)
         self.assertEqual(value, session_key_hmac(self.runtime_secret, "wa:g"))
+
+    def test_unicode_length_is_code_points_and_matches_node_array_from(self) -> None:
+        body = "A\U0001f600B"
+        self.assertEqual(len(body), 3)
+        self.assertEqual(len(body.encode("utf-16-le")) // 2, 4)
+        self.assertEqual(len(body.encode("utf-8")), 6)
+        self.add_event_for("3EB0UNICODE", body, 999.0, body_length=3)
+
+        result = self.correlator.register(self.registration_with(body, ["3EB0UNICODE"]))
+
+        self.assertEqual(result["correlation"], "correlated")
 
 
 class ExactIdentifierCorrelationTests(CorrelationHarness):
@@ -314,6 +235,7 @@ class ExactIdentifierCorrelationTests(CorrelationHarness):
             self.runtime,
             self.ids,
             runtime_secret=self.runtime_secret,
+            observer_device_ids=(self.DEVICE,),
             grace_seconds=self.GRACE_SECONDS,
             clock=lambda: now,
         )

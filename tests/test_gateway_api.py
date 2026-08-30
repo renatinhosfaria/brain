@@ -212,6 +212,8 @@ class GatewayAPITests(unittest.TestCase):
             "turn_id": "opaque-turn-1",
             "user_message": "hello",
             "turn_timestamp": 1000.0,
+            # Matches the raw key.id seed_event() derives its event_id from.
+            "message_ids": ["event-hello-"],
         }
 
     def prepare_turn_identity(self) -> None:

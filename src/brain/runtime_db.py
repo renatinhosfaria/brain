@@ -81,7 +81,7 @@ _SCHEMA = (
         wa_turn_id TEXT NOT NULL,
         ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
         candidate_event_id TEXT NOT NULL,
-        PRIMARY KEY (wa_turn_id, ordinal),
+        PRIMARY KEY (wa_turn_id, ordinal, candidate_event_id),
         FOREIGN KEY (wa_turn_id) REFERENCES whatsapp_turns(wa_turn_id)
     )
     """,
