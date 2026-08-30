@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -15,6 +16,8 @@ from .errors import DatabaseUnavailable
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
 from .whatsapp_identity import verify_transport_identity
+
+logger = logging.getLogger("brain.transport")
 
 MAX_BODY_LENGTH = 10_000_000
 MAX_OPAQUE_LENGTH = 10_000_000
@@ -323,10 +326,14 @@ class TransportService:
         settings: BrainSettings,
         runtime: RuntimeDatabase,
         transport_ids: RuntimeIds | None,
+        on_contact_observed: Callable[[str], object] | None = None,
     ) -> None:
         self.settings = settings
         self.runtime = runtime
         self.transport_ids = transport_ids
+        # Set by BrainService to re-resolve this contact's pending turns. Kept
+        # as a callback so ingestion stays independent of correlation.
+        self.on_contact_observed = on_contact_observed
 
     def ingest(self, payload: object) -> dict[str, object]:
         envelope = TransportEnvelope.parse(payload)
@@ -350,7 +357,22 @@ class TransportService:
             raise
         except sqlite3.Error as exc:
             raise DatabaseUnavailable() from exc
+        self._settle_waiting_turns(envelope.contact_key)
         return {"status": "ok", "event_id": envelope.event_id, "duplicate": duplicate}
+
+    def _settle_waiting_turns(self, contact_key: str) -> None:
+        """Re-resolve pending turns now that one more event exists.
+
+        Deliberately best-effort and after the durable write: the observer's
+        acknowledgement must never depend on correlation succeeding, and
+        reconciliation repairs whatever this misses.
+        """
+        if self.on_contact_observed is None or not contact_key:
+            return
+        try:
+            self.on_contact_observed(contact_key)
+        except Exception:  # noqa: BLE001 - ingestion durability wins
+            logger.warning("turn re-evaluation failed after transport ingestion")
 
     def _persist(
         self,

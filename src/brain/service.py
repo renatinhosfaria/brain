@@ -120,6 +120,10 @@ class BrainService:
                 runtime_secret=settings.runtime_hmac_secret,
                 observer_device_ids=settings.observer_device_ids,
             )
+        if self.turn_correlation is not None:
+            self.transport_service.on_contact_observed = (
+                self.turn_correlation.reevaluate_contact
+            )
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
 

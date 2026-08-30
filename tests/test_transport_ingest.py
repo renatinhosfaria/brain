@@ -16,6 +16,7 @@ from brain.mcp_server import BrainMCPServer, _tools
 from brain.service import BrainService
 from brain.transport_api import TransportAPI
 from brain.transport_models import RuntimeIds
+from brain.turn_correlation import TurnRegistration
 
 
 class TransportIngestTests(unittest.TestCase):
@@ -39,6 +40,7 @@ class TransportIngestTests(unittest.TestCase):
             kanban_db=self.kanban_path,
             runtime_db=self.runtime_path,
             observer_session_dir=self.observer_dir,
+            observer_device_ids=("observer-a",),
             principals={
                 "default": PrincipalConfig(
                     "default",
@@ -452,6 +454,43 @@ class TransportIngestTests(unittest.TestCase):
     def test_endpoint_does_not_accept_get(self) -> None:
         response = self.post(self.envelope(), method="GET")
         self.assertEqual(response.status_code, 405)
+
+    def test_ingesting_a_late_event_settles_the_waiting_turn(self) -> None:
+        """End-to-end shape of the P6 fix, across the ingestion boundary."""
+        registration = TurnRegistration(
+            hermes_session_id="g-one",
+            session_key="wa:g",
+            contact_key=self.service.runtime_ids.contact_key(self.PHONE),
+            turn_id="opaque-turn-1",
+            user_message="hello",
+            turn_timestamp=1000.0,
+            message_ids=("message-1",),
+        )
+        self.assertEqual(
+            self.service.turn_correlation.register(registration)["correlation"],
+            "pending",
+        )
+
+        response = self.post(self.envelope(message_id="message-1", body="hello"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.rows("whatsapp_turns")[0]["correlation_status"], "correlated"
+        )
+        self.assertEqual(len(self.rows("turn_events")), 1)
+
+    def test_ingestion_stays_durable_when_re_evaluation_fails(self) -> None:
+        """Transport ACK must not depend on correlation succeeding (Task 3)."""
+
+        def explode(_contact_key: str) -> int:
+            raise RuntimeError("correlation is broken")
+
+        self.service.transport_service.on_contact_observed = explode
+
+        response = self.post(self.envelope())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.rows("transport_events")), 1)
 
     def test_route_is_private_and_not_model_visible(self) -> None:
         app = BrainMCPServer(self.service).app()
