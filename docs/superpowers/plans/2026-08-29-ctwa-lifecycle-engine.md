@@ -14,7 +14,8 @@
 
 - Never write Hermes `state.db` or `kanban.db`; all evidence reads use the read-only abstraction.
 - Add every newly queried Hermes table/column to compatibility schema guards first; missing schema disables lifecycle automation.
-- Lifecycle only for terminal Cadastro decision `LEAD_NOVO_CADASTRADO` with one exact `client_id`, one bound `wa_turn_id`, one verified contact, and one exact correlated transport event with `transport_kind == ctwa_candidate`.
+- Lifecycle only for terminal Cadastro decision `LEAD_NOVO_CADASTRADO` with one exact `client_id`, one bound **origin** `wa_turn_id` whose turn is `correlated`, one verified contact, and one exact correlated transport event with `transport_kind == ctwa_candidate`.
+- All three stage cards share the origin turn (spec 10.1.1). A Cadastro task carrying an internal re-invocation's turn creates no lifecycle and is never repaired by guessing another card's turn.
 - Lifecycle origin creation must not require a pre-existing `ctwa_first_contact` label. Binding `lead_lifecycles.origin_event_id` itself materializes/defines that event's lifecycle-relative `ctwa_first_contact` semantic.
 - Never select the first or earliest CTWA candidate for a contact. Origin proof requires exact `wa_turn_id`, contact, Cadastro task/run, and created-client evidence; a historical event may belong to another lifecycle/campaign.
 - `JA_E_CLIENTE`, `CORRETOR_ATIVO`, `INCONCLUSIVO`, failed Cadastro readback, ambiguity, or missing CTWA correlation creates no automated lifecycle.
@@ -71,10 +72,14 @@ git commit -m "feat: read lifecycle evidence from Hermes safely"
 - Create: `tests/test_lifecycle_binding.py`
 - Modify: `src/brain/service.py`
 
+> **Amended 2026-08-30 (spec Amendment 1).** The `wa_turn_id` in a stage card's idempotency key is now the shared **origin turn** of spec 10.1.1, not whichever turn was current when the card was created. Premise P7 recorded the production consequence of the original rule: Cadastro and Reno cards carried Kanban-notification turns, which have no transport event, so the binding below was unreachable.
+
 **Interfaces:**
-- `parse_whatsapp_idempotency_key(value) -> (wa_turn_id, stage) | None`, stages only `porteiro|cadastro|reno`.
+- `parse_whatsapp_idempotency_key(value) -> (wa_turn_id, stage) | None`, stages only `porteiro|cadastro|reno`. The returned `wa_turn_id` is the origin turn.
 - `LifecycleEngine.bind_completed_cadastro(task, run) -> BindResult`.
 - `lead_lifecycles`: lifecycle ID, origin event ID, wa_turn_id, contact_key, client_id, phase, last proven status, timestamps.
+
+**Binding requires a correlated origin turn.** The Cadastro Task's `wa_turn_id` must resolve to a `whatsapp_turns` row with `correlation_status == 'correlated'`, whose `turn_events` include the CTWA candidate that becomes `origin_event_id`. A turn that is `pending`, `uncorrelatable`, or absent creates **no** lifecycle; it is not an error to retry forever, since `uncorrelatable` is terminal by spec 8.4.
 
 - [ ] **Step 1: Write strict idempotency parser tests**
 
@@ -95,6 +100,16 @@ Seed one exact `wa_turn_id`-correlated event with `transport_kind == ctwa_candid
 ```
 
 Require one lifecycle whose `origin_event_id` binding establishes `inbound_kind == ctwa_first_contact` for that origin. The candidate must be selected from the exact correlated turn, never from contact-global CTWA chronology. Replay = no-op. Same origin→different client = hard binding conflict. `JA_E_CLIENTE`/`INCONCLUSIVO` = zero lifecycle.
+
+Seed the Porteiro, Cadastro, and Reno tasks with the **same** origin `wa_turn_id`, since that is what spec 10.1.1 now requires and what the Plan 1 Task 5 rewrite produces.
+
+- [ ] **Step 2b: Write origin-turn rejection tests (the P7 regression)**
+
+Reproduce the production shape that motivated the amendment: a Cadastro task whose `wa_turn_id` belongs to a turn with no correlated transport event. It must create no lifecycle and must not be retried indefinitely.
+
+Cover each failing turn state separately — `pending`, `uncorrelatable`, and a `wa_turn_id` with no `whatsapp_turns` row at all — because they arrive through different paths and only the first may become bindable later.
+
+Also cover the mixed case: Porteiro card on the correct origin turn while Cadastro carries a different turn. Binding must refuse rather than fall back to the Porteiro card's turn, which would guess a lineage the evidence does not prove.
 
 - [ ] **Step 3: Implement one exact structured metadata parser**
 
@@ -276,6 +291,8 @@ git commit -m "feat: complete Brain lifecycle shadow engine"
 
 ```text
 KANBAN_BINDING_EXACT=PASS
+KANBAN_STAGES_SHARE_ORIGIN_TURN=PASS
+UNCORRELATED_TURN_NO_LIFECYCLE=PASS
 CADASTRO_CLIENT_BINDING=PASS
 LIFECYCLE_CONTACT_PHONE_PROOF=PASS
 JA_E_CLIENTE_NO_LIFECYCLE=PASS
