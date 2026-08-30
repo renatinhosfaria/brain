@@ -113,10 +113,27 @@ These findings were produced on the live deployment after Plans 1 and 2 were imp
 
 Two limits of this verification are recorded deliberately:
 
-- **The P6 race was not exercised.** The transport event was ingested about four seconds before the turn registered, so correlation succeeded at registration and the repair path never ran. It is covered by tests but remains unproven in production until a lead arrives where the observer is behind.
+- **The P6 race was not exercised in that run.** The transport event was ingested about four seconds before the turn registered, so correlation succeeded at registration and the repair path never ran. Premise P9 later closed this.
 - **Pending turns for a silent contact are not swept.** Re-evaluation runs only for the contact of an arriving event, so a turn whose contact never messages again keeps its `pending` status past the grace period. The periodic sweep belongs to the lifecycle reconciler, which does not exist yet.
 
 `CONVERSATION_CONTEXT_E2E` remains open: it requires a real CTWA origin, and this verification used an ordinary DM.
+
+**P9 — The re-evaluation repair path works in production.** In a later controlled DM the turn registered at 20:23:01 and the observer captured its event at 20:23:10, nine seconds behind. The turn still ended `correlated` with its mapping persisted, which is only reachable through re-evaluation on ingestion. The race that was permanent under the superseded algorithm is now recoverable, in production and not only in tests.
+
+**P10 — The dispatch buffer key fails for a CTWA first contact.** A real Meta Ads click was captured correctly as `ctwa_candidate`, with `source_type=ad`, `source_app=instagram`, `www.instagram.com`, `sourceId` and `ctwaClid` present, `clickToWhatsappCall=true` and `containsAutoReply=false`, matching the section 3 signature. Correlation nevertheless failed: the `pre_gateway_dispatch` buffer was empty, both turns registered `uncorrelatable`, and the CEO never reached `conversation_context()`.
+
+Ruled out by evidence: ordering (the event was stored three seconds before the turn), an unknown contact (the same contact correlated both eight minutes later and an hour earlier), and a stale plugin (the deployed file carried the current code).
+
+The buffer is keyed on `(platform, chat_id)`, filled from `event.source.chat_id` in dispatch and drained by `HERMES_SESSION_CHAT_ID` at registration. The observer session shows `identity-key-<lid>_1.0.json` created nine seconds before the CTWA arrived, so that contact's LID identity was being established at that moment. The working hypothesis is that an ad-click first contact is addressed by phone JID at dispatch and by LID once the session resolves, so the two keys disagree. **This is not yet confirmed**; the fix must not be guessed.
+
+Two consequences follow for the design:
+
+- Keying the buffer on `chat_id` is fragile exactly where the project cannot afford it, at the first contact from an advertisement.
+- Treating an empty buffer as terminal `uncorrelatable` turned a recoverable miss into a permanent verdict. That conflation, introduced to keep Kanban-notification turns from accumulating pending rows, needs a discriminator that does not depend on the buffer being reliable.
+
+`RAW_CTWA_CAPTURE` is **PASS**. `CONVERSATION_CONTEXT_E2E` remains **FAIL** until this is fixed and a further controlled CTWA passes.
+
+Separately and unrelated to this amendment, the Cadastro worker's `conversation_phone` fallback was denied with `AUTH_ORIGIN_AMBIGUOUS` during the same lead, which is what produced its degraded reply. That is pre-existing worker-origin authorization behaviour, not correlation.
 
 ## 4. Architecture
 
