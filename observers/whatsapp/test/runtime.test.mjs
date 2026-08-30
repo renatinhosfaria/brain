@@ -3,7 +3,9 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
 import { HealthState } from '../src/health.mjs';
-import { loadObserverConfig, runObserver } from '../src/main.mjs';
+import * as observerRuntime from '../src/main.mjs';
+
+const { loadObserverConfig, runObserver } = observerRuntime;
 
 const RAW_BODY = 'raw-body-runtime-secret';
 const RAW_JID = '15551234567@s.whatsapp.net';
@@ -189,6 +191,115 @@ function dependencies(overrides = {}) {
     },
   };
 }
+
+test('valid latest WaWeb result resolves once to an independent version', async () => {
+  const sourceVersion = [2, 3000, 1046380673];
+  let calls = 0;
+  const version = await observerRuntime.resolveWaWebVersion(async () => {
+    calls += 1;
+    return { version: sourceVersion, isLatest: true };
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(version, [2, 3000, 1046380673]);
+  assert.notStrictEqual(version, sourceVersion);
+});
+
+test('WaWeb resolver exception fails closed', async () => {
+  await assert.rejects(
+    observerRuntime.resolveWaWebVersion(async () => {
+      throw new Error('external response must not escape');
+    }),
+    /latest WhatsApp Web version is unavailable/,
+  );
+});
+
+for (const [name, result] of [
+  ['null result', null],
+  ['missing version', { isLatest: true }],
+  ['non-array version', { version: '2.3000.1046380673', isLatest: true }],
+  ['wrong version length', { version: [2, 3000], isLatest: true }],
+  ['non-integer element', { version: [2, 3000, 1046380673.5], isLatest: true }],
+  ['non-positive element', { version: [2, 0, 1046380673], isLatest: true }],
+  ['isLatest not true', { version: [2, 3000, 1046380673], isLatest: false }],
+]) {
+  test(`WaWeb resolver rejects ${name}`, async () => {
+    await assert.rejects(
+      observerRuntime.resolveWaWebVersion(async () => result),
+      /latest WhatsApp Web version is unavailable/,
+    );
+  });
+}
+
+test('observer socket factory passes the exact validated version and receive-only flags', () => {
+  const calls = [];
+  const expectedSocket = { observerSocket: true };
+  const version = [2, 3000, 1046380673];
+  const makeSocket = observerRuntime.makeObserverSocketFactory((options) => {
+    calls.push(options);
+    return expectedSocket;
+  }, version);
+
+  const auth = { observerAuthOnly: true };
+  assert.strictEqual(makeSocket({ auth }), expectedSocket);
+  assert.deepEqual(calls, [
+    {
+      auth,
+      version: [2, 3000, 1046380673],
+      markOnlineOnConnect: false,
+      printQRInTerminal: false,
+      syncFullHistory: false,
+    },
+  ]);
+  assert.strictEqual(calls[0].version, version);
+});
+
+test('reconnect reuses one resolved WaWeb version without resolving again', async () => {
+  let resolverCalls = 0;
+  const version = await observerRuntime.resolveWaWebVersion(async () => {
+    resolverCalls += 1;
+    return { version: [2, 3000, 1046380673], isLatest: true };
+  });
+  const socketCalls = [];
+  const sockets = [];
+  const makeSocket = observerRuntime.makeObserverSocketFactory((options) => {
+    socketCalls.push(options);
+    const socket = { ev: new EventEmitter(), end() {} };
+    sockets.push(socket);
+    return socket;
+  }, version);
+  const fixture = dependencies();
+  fixture.options.makeSocket = makeSocket;
+
+  const runtime = await runObserver(fixture.options);
+  sockets[0].ev.emit('connection.update', {
+    connection: 'close',
+    lastDisconnect: { error: { output: { statusCode: 515 } } },
+  });
+  await runtime.idle();
+  await runtime.waitForBackground();
+
+  assert.equal(resolverCalls, 1);
+  assert.equal(socketCalls.length, 2);
+  assert.strictEqual(socketCalls[0].version, version);
+  assert.strictEqual(socketCalls[1].version, version);
+  await runtime.close();
+});
+
+test('invalid WaWeb result prevents socket creation', async () => {
+  let socketCalls = 0;
+  await assert.rejects(async () => {
+    const version = await observerRuntime.resolveWaWebVersion(async () => ({
+      version: [2, 3000],
+      isLatest: true,
+    }));
+    const makeSocket = observerRuntime.makeObserverSocketFactory(() => {
+      socketCalls += 1;
+    }, version);
+    makeSocket({ auth: { observerAuthOnly: true } });
+  }, /latest WhatsApp Web version is unavailable/);
+  assert.equal(socketCalls, 0);
+});
 
 test('connection open, QR, creds, and restart-required reconnect use observer auth only', async () => {
   const fixture = dependencies();

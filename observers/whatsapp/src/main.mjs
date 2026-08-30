@@ -108,6 +108,39 @@ export function loadObserverConfig(env = process.env) {
   };
 }
 
+export async function resolveWaWebVersion(fetchLatestWaWebVersion) {
+  let result;
+  try {
+    result = await fetchLatestWaWebVersion();
+  } catch {
+    throw new Error('latest WhatsApp Web version is unavailable');
+  }
+  if (
+    result === null ||
+    typeof result !== 'object' ||
+    result.isLatest !== true ||
+    !Array.isArray(result.version) ||
+    result.version.length !== 3 ||
+    !result.version.every(
+      (element) => Number.isSafeInteger(element) && element > 0,
+    )
+  ) {
+    throw new Error('latest WhatsApp Web version is unavailable');
+  }
+  return [...result.version];
+}
+
+export function makeObserverSocketFactory(makeWASocket, version) {
+  return ({ auth }) =>
+    makeWASocket({
+      auth,
+      version,
+      markOnlineOnConnect: false,
+      printQRInTerminal: false,
+      syncFullHistory: false,
+    });
+}
+
 function abortableDelay(milliseconds, signal) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, milliseconds);
@@ -599,6 +632,9 @@ export async function runObserver({
 export async function bootstrapObserver(env = process.env) {
   const config = loadObserverConfig(env);
   const baileys = await import('@whiskeysockets/baileys');
+  const waWebVersion = await resolveWaWebVersion(
+    baileys.fetchLatestWaWebVersion,
+  );
   const qrModule = await import('qrcode-terminal');
   const auth = await baileys.useMultiFileAuthState(config.sessionDir);
   const ids = new TransportIds(config.transportSecret);
@@ -623,13 +659,10 @@ export async function bootstrapObserver(env = process.env) {
     healthServer,
     healthState,
     ids,
-    makeSocket: ({ auth: observerAuth }) =>
-      baileys.makeWASocket({
-        auth: observerAuth,
-        markOnlineOnConnect: false,
-        printQRInTerminal: false,
-        syncFullHistory: false,
-      }),
+    makeSocket: makeObserverSocketFactory(
+      baileys.makeWASocket,
+      waWebVersion,
+    ),
     normalize: normalizeInboundMessage,
     now: () => Date.now() / 1000,
     observerDeviceId: config.deviceId,
