@@ -104,6 +104,20 @@ These findings were produced on the live deployment after Plans 1 and 2 were imp
 
 **P7 — Kanban cards for later stages carried distinct `wa_turn_id` values.** In one controlled lead, the Porteiro card carried the `wa_turn_id` of the real correlated WhatsApp turn, while the Cadastro and Reno cards carried `wa_turn_id` values belonging to Kanban-notification turns, which have no transport event and can never correlate. Section 10.3 binding is unreachable under the original rule.
 
+**P8 — The amended contract was verified in production the same day.** Brain and the plugin were deployed in that order and one controlled WhatsApp DM was sent.
+
+- The external turn correlated at registration, with its `turn_events` mapping persisted.
+- All three stage cards carried one identical origin turn (`waturn_4b330613…` for Porteiro, Cadastro, and Reno). The immediately preceding lead, under the superseded rule, had shown `waturn_324d03f5…` for Cadastro and `waturn_81bd56b2…` for Reno.
+- The two Kanban-completion re-invocations between those cards created **no** `whatsapp_turns` rows, where each previously produced a permanently pending one. This confirms `pre_gateway_dispatch` discriminates external turns from internal ones in production, not only in tests.
+- The eight rows left pending by the superseded algorithm settled to `uncorrelatable` on their own, through re-evaluation finding no candidates. No dedicated migration was needed.
+
+Two limits of this verification are recorded deliberately:
+
+- **The P6 race was not exercised.** The transport event was ingested about four seconds before the turn registered, so correlation succeeded at registration and the repair path never ran. It is covered by tests but remains unproven in production until a lead arrives where the observer is behind.
+- **Pending turns for a silent contact are not swept.** Re-evaluation runs only for the contact of an arriving event, so a turn whose contact never messages again keeps its `pending` status past the grace period. The periodic sweep belongs to the lifecycle reconciler, which does not exist yet.
+
+`CONVERSATION_CONTEXT_E2E` remains open: it requires a real CTWA origin, and this verification used an ordinary DM.
+
 ## 4. Architecture
 
 Production consists of three Brain-owned processes plus the unchanged Hermes runtime:
@@ -891,4 +905,4 @@ Downstream documents requiring updates before implementation:
 - Plan 1 (`2026-08-29-ctwa-brain-transport-context.md`), Task 4 and Task 5 — hook contract, registration payload, correlation algorithm, `uncorrelatable` state.
 - Plan 4 (`2026-08-29-ctwa-lifecycle-engine.md`), Task 2 — origin-turn resolution in `parse_whatsapp_idempotency_key` and `bind_completed_cadastro`.
 
-Implementation status at amendment time: Plan 1 and Plan 2 are implemented and deployed but predate this amendment; their correlation code still follows the original section 8. A disposable `ctwa-keyid-spike` plugin used to produce P1 and P2 remains installed in the operational Hermes and must be removed.
+Implementation status: the amendment was implemented and deployed on 2026-08-30, and premise P8 records the production verification. The disposable `ctwa-keyid-spike` plugin used to produce P1 and P2 has been removed. Plan 4 is unchanged in code and still describes the binding this amendment makes reachable.
