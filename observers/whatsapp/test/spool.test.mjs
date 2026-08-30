@@ -1,0 +1,392 @@
+import assert from 'node:assert/strict';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import path from 'node:path';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import { TransportIds } from '../src/hmac.mjs';
+import { normalizeInboundMessage } from '../src/normalize.mjs';
+import { SafeSpool } from '../src/spool.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const IDS = new TransportIds(Buffer.from('t'.repeat(32), 'utf8'));
+const CAPTURED_AT = 2_000_000_000;
+const RAW_PHONE = '15551234567';
+const RAW_JID = `${RAW_PHONE}@s.whatsapp.net`;
+const RAW_LID = '123456789012345@lid';
+const RAW_MESSAGE_ID = 'raw-observer-message-unique-001';
+const RAW_BODY = 'raw-body-unique-😀-secret';
+const RAW_SOURCE_ID = 'raw-source-id-unique-002';
+const RAW_CTWA_CLID = 'raw-ctwa-clid-unique-003';
+const RAW_SOURCE_URL =
+  'https://ads.example.test/private/raw-url-unique-004?secret=yes';
+const RAW_PUSH_NAME = 'Raw\nPush\u0000Name';
+
+function rawCtwa(overrides = {}) {
+  return {
+    key: {
+      id: RAW_MESSAGE_ID,
+      remoteJid: RAW_LID,
+      remoteJidAlt: RAW_JID,
+      fromMe: false,
+    },
+    messageTimestamp: CAPTURED_AT - 1,
+    pushName: RAW_PUSH_NAME,
+    message: {
+      extendedTextMessage: {
+        text: RAW_BODY,
+        contextInfo: {
+          externalAdReply: {
+            sourceType: 'ad',
+            sourceApp: 'instagram',
+            sourceId: RAW_SOURCE_ID,
+            sourceUrl: RAW_SOURCE_URL,
+            ctwaClid: RAW_CTWA_CLID,
+            showAdAttribution: true,
+            clickToWhatsappCall: true,
+            containsAutoReply: false,
+            thumbnail: Buffer.from('raw-thumbnail-unique'),
+          },
+          rawContext: 'raw-context-tree-unique',
+        },
+      },
+    },
+    ...overrides,
+  };
+}
+
+function safeEvent(messageId = RAW_MESSAGE_ID, capturedAt = CAPTURED_AT) {
+  const raw = rawCtwa({
+    key: {
+      id: messageId,
+      remoteJid: RAW_LID,
+      remoteJidAlt: RAW_JID,
+      fromMe: false,
+    },
+  });
+  return normalizeInboundMessage(raw, capturedAt, IDS, 'observer-spool-test');
+}
+
+async function withSpool(callback, initialNow = CAPTURED_AT + 10) {
+  const testRoot = await mkdtemp(path.join(HERE, '.spool-test-'));
+  const rootDir = path.join(testRoot, 'outbox');
+  let now = initialNow;
+  const spool = new SafeSpool(rootDir, { now: () => now });
+  try {
+    return await callback({
+      rootDir,
+      setNow(value) {
+        now = value;
+      },
+      spool,
+      testRoot,
+    });
+  } finally {
+    await rm(testRoot, { recursive: true, force: true });
+  }
+}
+
+test('root is 0700 and an event is atomically installed as event_id.json mode 0600', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent();
+    const result = await spool.put(event);
+    const entries = await readdir(rootDir);
+    const target = path.join(rootDir, `${event.event_id}.json`);
+
+    assert.deepEqual(result, { event_id: event.event_id, duplicate: false });
+    assert.equal((await lstat(rootDir)).mode & 0o777, 0o700);
+    assert.equal((await lstat(target)).mode & 0o777, 0o600);
+    assert.deepEqual(entries, [`${event.event_id}.json`]);
+    assert.equal(entries[0].includes(RAW_MESSAGE_ID), false);
+    assert.equal(entries.some((name) => name.endsWith('.tmp')), false);
+  });
+});
+
+test('privacy fixture leaves no raw transport value in any outbox byte', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent();
+    await spool.put(event);
+    const allBytes = [];
+    for (const entry of await readdir(rootDir)) {
+      const entryPath = path.join(rootDir, entry);
+      if ((await lstat(entryPath)).isFile()) {
+        allBytes.push(await readFile(entryPath));
+      }
+    }
+    const serialized = Buffer.concat(allBytes).toString('utf8');
+
+    for (const raw of [
+      RAW_BODY,
+      RAW_JID,
+      RAW_LID,
+      RAW_PHONE,
+      RAW_MESSAGE_ID,
+      RAW_SOURCE_ID,
+      RAW_CTWA_CLID,
+      RAW_SOURCE_URL,
+      RAW_PUSH_NAME,
+      'raw-thumbnail-unique',
+      'raw-context-tree-unique',
+    ]) {
+      assert.equal(serialized.includes(raw), false, raw);
+    }
+    assert.equal(serialized.includes('RawPushName'), true);
+  });
+});
+
+test('strict allowlist accepts the normalized event and rejects raw or unknown fields', async () => {
+  await withSpool(async ({ spool }) => {
+    const event = safeEvent();
+    await spool.put(event);
+
+    for (const field of [
+      'body',
+      'text',
+      'message',
+      'raw_message',
+      'remote_jid',
+      'jid',
+      'lid',
+      'phone',
+      'message_id',
+      'observer_message_id',
+      'payload',
+      'raw',
+      'thumbnail',
+      'joined_body',
+      'unknown',
+    ]) {
+      await assert.rejects(
+        spool.put({ ...event, event_id: IDS.eventId('observer-spool-test', field), [field]: 'raw-value' }),
+        /safe event/i,
+      );
+    }
+
+    for (const field of ['sourceId', 'ctwaClid', 'sourceUrl', 'contextInfo']) {
+      await assert.rejects(
+        spool.put({
+          ...event,
+          event_id: IDS.eventId('observer-spool-test', `nested-${field}`),
+          external_ad_reply: { ...event.external_ad_reply, [field]: 'raw-value' },
+        }),
+        /safe event/i,
+      );
+    }
+  });
+});
+
+test('strict allowlist mirrors Brain optional-null semantics', async () => {
+  await withSpool(async ({ spool }) => {
+    const event = safeEvent('brain-null-optionals');
+    const compatible = {
+      ...event,
+      message_timestamp: null,
+      contact_key: null,
+      display_name: null,
+      transport_kind: 'ordinary_inbound',
+      external_ad_reply: {
+        source_type: null,
+        source_app: null,
+        source_id_present: false,
+        source_id_length: null,
+        source_id_hmac: null,
+        source_url_hostname: null,
+        source_url_length: null,
+        source_url_hmac: null,
+        ctwa_clid_present: false,
+        ctwa_clid_length: null,
+        ctwa_clid_hmac: null,
+      },
+    };
+
+    await spool.put(compatible);
+    assert.deepEqual(await spool.read(compatible.event_id), compatible);
+  });
+});
+
+test('identical put is idempotent without renewing spool or display-name age', async () => {
+  await withSpool(async ({ rootDir, setNow, spool }) => {
+    const event = safeEvent();
+    await spool.put(event);
+    const target = path.join(rootDir, `${event.event_id}.json`);
+    const first = JSON.parse(await readFile(target, 'utf8'));
+
+    setNow(CAPTURED_AT + 20_000);
+    assert.deepEqual(await spool.put(event), {
+      event_id: event.event_id,
+      duplicate: true,
+    });
+    const replay = JSON.parse(await readFile(target, 'utf8'));
+
+    assert.equal(replay.spooled_at, first.spooled_at);
+    assert.equal(replay.display_name_expires_at, first.display_name_expires_at);
+    assert.deepEqual(replay, first);
+  });
+});
+
+test('same event_id with conflicting safe payload fails closed and preserves original', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent();
+    await spool.put(event);
+    const target = path.join(rootDir, `${event.event_id}.json`);
+    const before = await readFile(target, 'utf8');
+    const conflict = { ...event, body_hmac: 'f'.repeat(64) };
+
+    await assert.rejects(spool.put(conflict), /conflict/i);
+    assert.equal(await readFile(target, 'utf8'), before);
+  });
+});
+
+test('list is deterministic, ignores temp/arbitrary files, and never follows symlinks', async () => {
+  await withSpool(async ({ rootDir, spool, testRoot }) => {
+    const second = safeEvent('message-b');
+    const first = safeEvent('message-a');
+    await spool.put(second);
+    await spool.put(first);
+    await writeFile(path.join(rootDir, '.safe-spool-leftover.tmp'), 'ignored');
+    await writeFile(path.join(rootDir, 'arbitrary.json'), 'ignored');
+    const outside = path.join(testRoot, 'outside.json');
+    const linkedId = IDS.eventId('observer-spool-test', 'linked');
+    await writeFile(outside, JSON.stringify({ secret: 'outside' }));
+    await symlink(outside, path.join(rootDir, `${linkedId}.json`));
+
+    assert.deepEqual(await spool.list(), [first.event_id, second.event_id].sort());
+    await assert.rejects(spool.read(linkedId), /regular file|symlink/i);
+    assert.equal(await readFile(outside, 'utf8'), JSON.stringify({ secret: 'outside' }));
+  });
+});
+
+test('read validates the wrapper again and returns only the exact Brain event', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent();
+    await spool.put(event);
+    const returned = await spool.read(event.event_id);
+
+    assert.deepEqual(returned, event);
+    assert.equal('spool_version' in returned, false);
+    assert.equal('spooled_at' in returned, false);
+    assert.equal('display_name_expires_at' in returned, false);
+
+    const target = path.join(rootDir, `${event.event_id}.json`);
+    await writeFile(target, '{malformed', { mode: 0o600 });
+    await assert.rejects(spool.read(event.event_id), /record|JSON/i);
+  });
+});
+
+test('ack removes only the exact event and is idempotent', async () => {
+  await withSpool(async ({ spool }) => {
+    const first = safeEvent('ack-a');
+    const second = safeEvent('ack-b');
+    await spool.put(first);
+    await spool.put(second);
+
+    assert.equal(await spool.ack(first.event_id), true);
+    assert.deepEqual(await spool.list(), [second.event_id]);
+    assert.equal(await spool.ack(first.event_id), false);
+    assert.deepEqual(await spool.read(second.event_id), second);
+    await assert.rejects(spool.ack('../escape'), /event_id/i);
+  });
+});
+
+test('display name expires at received_at plus 24 hours and rewrite remains 0600', async () => {
+  await withSpool(async ({ rootDir, setNow, spool }) => {
+    const event = safeEvent();
+    await spool.put(event);
+    const target = path.join(rootDir, `${event.event_id}.json`);
+    const wrapper = JSON.parse(await readFile(target, 'utf8'));
+
+    assert.equal(wrapper.display_name_expires_at, event.received_at + 24 * 60 * 60);
+    setNow(wrapper.display_name_expires_at - 1);
+    assert.equal((await spool.read(event.event_id)).display_name, 'RawPushName');
+    assert.equal(await spool.expireDisplayNames(wrapper.display_name_expires_at - 1), 0);
+
+    setNow(wrapper.display_name_expires_at);
+    assert.deepEqual(await spool.put(event), {
+      event_id: event.event_id,
+      duplicate: true,
+    });
+    assert.equal(await spool.expireDisplayNames(wrapper.display_name_expires_at), 0);
+    assert.equal('display_name' in (await spool.read(event.event_id)), false);
+    assert.equal((await lstat(target)).mode & 0o777, 0o600);
+    assert.equal(await spool.expireDisplayNames(wrapper.display_name_expires_at + 1), 0);
+  });
+});
+
+test('read cannot return an expired display name even without an explicit expiry sweep', async () => {
+  await withSpool(async ({ setNow, spool }) => {
+    const event = safeEvent();
+    await spool.put(event);
+    setNow(event.received_at + 24 * 60 * 60);
+
+    const returned = await spool.read(event.event_id);
+    assert.equal('display_name' in returned, false);
+  });
+});
+
+test('purge uses immutable spooled_at cutoff and replay does not extend retention', async () => {
+  await withSpool(async ({ setNow, spool }) => {
+    const retention = 72 * 60 * 60;
+    setNow(CAPTURED_AT + 100);
+    const oldEvent = safeEvent('retention-old');
+    await spool.put(oldEvent);
+    setNow(CAPTURED_AT + retention + 200);
+    const newEvent = safeEvent('retention-new');
+    await spool.put(newEvent);
+    setNow(CAPTURED_AT + retention + 300);
+    await spool.put(oldEvent);
+
+    const cutoff = CAPTURED_AT + retention + 300 - retention;
+    assert.equal(await spool.purgeOlderThan(cutoff), 1);
+    assert.deepEqual(await spool.list(), [newEvent.event_id]);
+  });
+});
+
+test('purge ignores symlinks and non-regular files', async () => {
+  await withSpool(async ({ rootDir, spool, testRoot }) => {
+    await spool.list();
+    const outside = path.join(testRoot, 'outside-retention.json');
+    const linkedId = IDS.eventId('observer-spool-test', 'purge-link');
+    await writeFile(outside, 'outside-stays');
+    await symlink(outside, path.join(rootDir, `${linkedId}.json`));
+    await mkdir(path.join(rootDir, `${IDS.eventId('observer-spool-test', 'directory')}.json`));
+
+    assert.equal(await spool.purgeOlderThan(Number.MAX_SAFE_INTEGER), 0);
+    assert.equal(await readFile(outside, 'utf8'), 'outside-stays');
+  });
+});
+
+test('root symlink and non-directory roots are rejected', async () => {
+  const testRoot = await mkdtemp(path.join(HERE, '.spool-root-test-'));
+  try {
+    const actual = path.join(testRoot, 'actual');
+    const linked = path.join(testRoot, 'linked');
+    const fileRoot = path.join(testRoot, 'file-root');
+    await mkdir(actual, { mode: 0o700 });
+    await symlink(actual, linked);
+    await writeFile(fileRoot, 'not-directory');
+
+    await assert.rejects(new SafeSpool(linked).list(), /root|symlink/i);
+    await assert.rejects(new SafeSpool(fileRoot).list(), /root|directory/i);
+  } finally {
+    await rm(testRoot, { recursive: true, force: true });
+  }
+});
+
+test('tests use only local temporary roots, never real observer paths', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    await spool.list();
+    assert.equal(rootDir.startsWith(HERE), true);
+    assert.notEqual(rootDir, '/var/lib/brain/whatsapp-observer/outbox');
+    assert.notEqual(rootDir, '/var/lib/brain/whatsapp-observer/session');
+    assert.notEqual(rootDir, '/root/.hermes/platforms/whatsapp/session');
+  });
+});
