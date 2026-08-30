@@ -239,9 +239,20 @@ This is the production failure the amendment exists to fix; it must fail before 
 
 An identifier that never resolves stays `pending` inside the grace period and becomes `uncorrelatable` after it. An identifier resolving to an event bound to a different contact is immediately `uncorrelatable`. A turn with an empty `message_ids` list is an internal re-invocation and creates **no** `whatsapp_turns` row. `uncorrelatable` is never re-evaluated. No nearest-time or best-guess fallback exists anywhere.
 
-- [ ] **Step 4: Decide the grace period explicitly**
+- [x] **Step 4: Decide the grace period explicitly**
 
-**Open decision, do not invent a value.** The grace period separates "observer is late" from "will never arrive". Current evidence is two samples: one race lost with the event and registration in the same second, one won with two seconds of margin. Either measure observer ingestion latency under real volume first, or choose a deliberately conservative value and record the reasoning here. Whatever is chosen becomes a named setting, not a literal.
+**Decided 2026-08-30: 96 hours**, as the named setting `BRAIN_TURN_CORRELATION_GRACE_HOURS`, never a literal.
+
+Derived, not estimated. `observers/whatsapp/src/main.mjs` sets `RETENTION_SECONDS = 72 * 60 * 60`: the observer keeps an unacknowledged event in its safe spool for 72 hours, redraining on every reconnect and restart, then purges it. An event that has not reached Brain within 72 hours therefore never will. The remaining 24 hours cover clock skew and the fact that purge is evaluated on scan rather than at the exact deadline.
+
+Measuring typical ingestion latency was considered and rejected: it optimises an axis that costs nothing. The grace period delays no answer, because `conversation_context()` already reports `turn_not_correlated` for `pending`. It only decides when Brain stops re-evaluating.
+
+The costs are asymmetric. Too short marks `uncorrelatable` — terminal and never re-evaluated — on an event that was still going to arrive after a Brain outage or observer reconnect, silently and permanently disabling lifecycle automation for that lead. Too long leaves some `pending` rows to be re-evaluated, which is cheap and well inside the 90-day transport retention of spec 19.
+
+Two properties keep the generous value safe:
+
+- The evidence-based rejection in spec 8.4 is immediate and independent of this timer. An identifier resolving to an event bound to a different contact is proof of impossibility and fails closed at once. The timer only covers the case with no evidence at all, where patience is correct.
+- Detection of systemic breakage belongs to alerting, not to this timer. Spec 21 already requires an alert on unresolved correlation; a `pending` count and oldest-`pending` age surface a broken pipeline within minutes. Shortening the grace period to notice failures faster would trade real leads for an observability signal that already exists elsewhere. Never use a terminal state as a monitoring mechanism.
 
 - [ ] **Step 5: Implement correlation and re-evaluation**
 
