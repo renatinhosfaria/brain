@@ -29,8 +29,18 @@ _MAX_RESPONSE_BYTES = 16_384
 _HTTP_TIMEOUT_SECONDS = 5.0
 _TURN_TTL_SECONDS = 3_600.0
 _MAX_TURN_ENTRIES = 1_024
+_MAX_DISPATCH_IDS = 64
+_MAX_MESSAGE_ID = 128
 _TURN_LOCK = threading.Lock()
 _CURRENT_TURNS: dict[tuple[str, ...], tuple[str, str, float]] = {}
+# Origin turn per chat: the wa_turn_id of the external WhatsApp turn that
+# started the lead. Refreshed only on an external turn, so Cadastro and Reno
+# cards created during Kanban-notification turns keep the originating turn
+# (spec 10.1.1, premise P7).
+_ORIGIN_TURNS: dict[tuple[str, ...], tuple[str, float]] = {}
+# Raw key.id values seen by pre_gateway_dispatch, awaiting the turn that will
+# carry them to Brain. Bounded, TTL-expiring, and never written to disk.
+_DISPATCH_BUFFERS: dict[tuple[str, str], tuple[list[str], float]] = {}
 
 
 def _unavailable(reason: str = "context_unavailable") -> str:
@@ -207,6 +217,94 @@ def _context_result(payload: object, expected_turn: str) -> dict[str, Any] | Non
     return payload
 
 
+def _prune(store: dict, now: float, timestamp_index: int) -> None:
+    expired = [
+        key
+        for key, value in store.items()
+        if now - value[timestamp_index] > _TURN_TTL_SECONDS
+    ]
+    for key in expired:
+        store.pop(key, None)
+    if len(store) >= _MAX_TURN_ENTRIES:
+        oldest = min(store, key=lambda key: store[key][timestamp_index])
+        store.pop(oldest, None)
+
+
+def _remember_origin(context: dict[str, str], wa_turn_id: str) -> None:
+    now = time.monotonic()
+    with _TURN_LOCK:
+        _prune(_ORIGIN_TURNS, now, 1)
+        _ORIGIN_TURNS[_context_key(context)] = (wa_turn_id, now)
+
+
+def _current_origin(context: dict[str, str]) -> str | None:
+    now = time.monotonic()
+    with _TURN_LOCK:
+        value = _ORIGIN_TURNS.get(_context_key(context))
+        if value is None:
+            return None
+        if now - value[1] > _TURN_TTL_SECONDS:
+            _ORIGIN_TURNS.pop(_context_key(context), None)
+            return None
+        return value[0]
+
+
+def _valid_message_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= _MAX_MESSAGE_ID
+        and all(0x21 <= ord(char) <= 0x7E for char in value)
+    )
+
+
+def _drain_message_ids(context: dict[str, str]) -> list[str]:
+    """Take the identifiers buffered for this chat since the previous turn."""
+    key = (context["platform"], context["chat_id"])
+    now = time.monotonic()
+    with _TURN_LOCK:
+        _prune(_DISPATCH_BUFFERS, now, 1)
+        buffered = _DISPATCH_BUFFERS.pop(key, None)
+    return list(buffered[0]) if buffered else []
+
+
+def pre_gateway_dispatch(event: Any = None, **_kwargs: Any) -> None:
+    """Buffer this inbound message's key.id. Performs no I/O of any kind.
+
+    Upstream leaves this hook out of ``_HOOK_TIMEOUT_BOUNDED_HOOKS`` because
+    abandoning a policy gate is unsafe either way, so it runs unbounded and to
+    completion. Anything blocking here would wedge inbound dispatch for every
+    message and break the spec's requirement that Hermes keeps serving while
+    Brain is down. Keep this callback pure in-memory work.
+    """
+    try:
+        source = getattr(event, "source", None)
+        if source is None or getattr(event, "internal", False):
+            return
+        platform = getattr(getattr(source, "platform", None), "value", None)
+        profile = getattr(source, "profile", None) or "default"
+        chat_id = getattr(source, "chat_id", None)
+        message_id = getattr(event, "message_id", None)
+        if (
+            platform != "whatsapp"
+            or profile != "default"
+            or getattr(source, "chat_type", None) != "dm"
+            or not isinstance(chat_id, str)
+            or not chat_id
+            or not _valid_message_id(message_id)
+        ):
+            return
+        now = time.monotonic()
+        with _TURN_LOCK:
+            _prune(_DISPATCH_BUFFERS, now, 1)
+            buffered, _ = _DISPATCH_BUFFERS.get((platform, chat_id), ([], now))
+            if message_id not in buffered and len(buffered) < _MAX_DISPATCH_IDS:
+                buffered.append(message_id)
+            _DISPATCH_BUFFERS[(platform, chat_id)] = (buffered, now)
+    except Exception:  # noqa: BLE001 - dispatch must never be blocked by us
+        return
+    return
+
+
 def pre_llm_call(*, turn_id: str = "", user_message: str = "", **_kwargs: Any) -> None:
     """Register only the current default-profile WhatsApp DM turn."""
     context = _session_context()
@@ -221,6 +319,7 @@ def pre_llm_call(*, turn_id: str = "", user_message: str = "", **_kwargs: Any) -
         or len(user_message) > 12_000
     ):
         return
+    message_ids = _drain_message_ids(context)
     try:
         result = _registration_result(
             _post(
@@ -229,6 +328,7 @@ def pre_llm_call(*, turn_id: str = "", user_message: str = "", **_kwargs: Any) -
                     "turn_id": turn_id,
                     "user_message": user_message,
                     "turn_timestamp": float(time.time()),
+                    "message_ids": message_ids,
                 },
                 token,
                 TURN_REGISTER_ENDPOINT,
@@ -236,6 +336,9 @@ def pre_llm_call(*, turn_id: str = "", user_message: str = "", **_kwargs: Any) -
         )
         if result is not None:
             _remember_turn(context, turn_id, result[0])
+            # Only an external turn may become or replace the origin.
+            if message_ids:
+                _remember_origin(context, result[0])
     except Exception:  # noqa: BLE001 - best-effort hook boundary
         return
     return
@@ -244,22 +347,24 @@ def pre_llm_call(*, turn_id: str = "", user_message: str = "", **_kwargs: Any) -
 def pre_tool_call(
     *, tool_name: str = "", args: Any = None, turn_id: str = "", **_kwargs: Any
 ) -> dict[str, Any] | None:
-    """Force CEO Kanban idempotency from the Brain-registered current turn."""
+    """Force CEO Kanban idempotency from the retained origin turn."""
     context = _session_context()
-    current = _current_turn(context) if context is not None else None
+    origin = _current_origin(context) if context is not None else None
     if (
         context is None
-        or current is None
-        or current[0] != turn_id
+        or origin is None
         or tool_name != "kanban_create"
         or not isinstance(args, dict)
         or args.get("assignee") not in _APPROVED_ASSIGNEES
     ):
+        # With no retained origin the model-supplied key is left alone. A wrong
+        # binding is silent and permanent; an unrewritten key is still
+        # discoverable by the reconciler from kanban.db.
         return None
     assignee = str(args["assignee"])
     return {
         "action": "modify",
-        "args": {"idempotency_key": f"whatsapp:{current[1]}:{assignee}"},
+        "args": {"idempotency_key": f"whatsapp:{origin}:{assignee}"},
     }
 
 

@@ -5,6 +5,7 @@ author: Brain maintainers
 provides_tools:
   - conversation_context
 provides_hooks:
+  - pre_gateway_dispatch
   - pre_llm_call
   - pre_tool_call
 requires_env:

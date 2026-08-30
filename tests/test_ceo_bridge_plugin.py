@@ -145,6 +145,134 @@ class CEOBridgePluginTests(unittest.TestCase):
             }
         )
 
+    @staticmethod
+    def inbound_event(
+        message_id: str = "3EB0AAA",
+        *,
+        platform: str = "whatsapp",
+        chat_type: str = "dm",
+        chat_id: str = "123456789012345@lid",
+        profile: str | None = None,
+        internal: bool = False,
+    ) -> types.SimpleNamespace:
+        """Mirror the MessageEvent shape gateway/platforms/base.py defines."""
+        return types.SimpleNamespace(
+            message_id=message_id,
+            internal=internal,
+            text="oi",
+            source=types.SimpleNamespace(
+                platform=types.SimpleNamespace(value=platform),
+                chat_id=chat_id,
+                chat_type=chat_type,
+                profile=profile,
+            ),
+        )
+
+    def dispatch(self, *events) -> None:
+        for event in events:
+            self.assertIsNone(self.ctx.hooks["pre_gateway_dispatch"](event=event))
+
+    def register_turn(self, turn_id: str, requests: list) -> None:
+        def opener(request, timeout):
+            requests.append(json.loads(request.data))
+            return self.brain_response(request.full_url)
+
+        with patch.object(self.tools_module.urllib.request, "urlopen", opener):
+            self.ctx.hooks["pre_llm_call"](turn_id=turn_id, user_message="oi")
+
+    def test_dispatch_buffer_feeds_message_ids_into_registration(self) -> None:
+        requests: list[dict] = []
+        self.dispatch(self.inbound_event("3EB0AAA"), self.inbound_event("3EB0BBB"))
+
+        self.register_turn("opaque-turn", requests)
+
+        self.assertEqual(requests[0]["message_ids"], ["3EB0AAA", "3EB0BBB"])
+
+    def test_dispatch_buffer_drains_once_per_turn(self) -> None:
+        requests: list[dict] = []
+        self.dispatch(self.inbound_event("3EB0AAA"))
+
+        self.register_turn("turn-one", requests)
+        self.register_turn("turn-two", requests)
+
+        self.assertEqual(requests[0]["message_ids"], ["3EB0AAA"])
+        self.assertEqual(requests[1]["message_ids"], [])
+
+    def test_dispatch_ignores_internal_and_foreign_scopes(self) -> None:
+        requests: list[dict] = []
+        self.dispatch(
+            self.inbound_event("3EB0INTERNAL", internal=True),
+            self.inbound_event("3EB0TELEGRAM", platform="telegram"),
+            self.inbound_event("3EB0GROUP", chat_type="group"),
+            self.inbound_event("3EB0OTHERPROFILE", profile="reno"),
+            self.inbound_event("3EB0OTHERCHAT", chat_id="999@lid"),
+        )
+
+        self.register_turn("opaque-turn", requests)
+
+        self.assertEqual(requests[0]["message_ids"], [])
+
+    def test_stage_cards_share_the_origin_turn_across_notification_turns(self) -> None:
+        """The P7 regression, in the exact production sequence."""
+        requests: list[dict] = []
+        self.dispatch(self.inbound_event("3EB0AAA"))
+        self.register_turn("external-turn", requests)
+        porteiro = self.ctx.hooks["pre_tool_call"](
+            tool_name="kanban_create",
+            args={"assignee": "porteiro"},
+            turn_id="external-turn",
+        )
+
+        # Two Kanban-completion turns follow, each with an empty buffer.
+        self.register_turn("kanban-notification-1", requests)
+        cadastro = self.ctx.hooks["pre_tool_call"](
+            tool_name="kanban_create",
+            args={"assignee": "cadastro"},
+            turn_id="kanban-notification-1",
+        )
+        self.register_turn("kanban-notification-2", requests)
+        reno = self.ctx.hooks["pre_tool_call"](
+            tool_name="kanban_create",
+            args={"assignee": "reno"},
+            turn_id="kanban-notification-2",
+        )
+
+        self.assertEqual(
+            porteiro["args"]["idempotency_key"], "whatsapp:waturn_current:porteiro"
+        )
+        self.assertEqual(
+            cadastro["args"]["idempotency_key"], "whatsapp:waturn_current:cadastro"
+        )
+        self.assertEqual(
+            reno["args"]["idempotency_key"], "whatsapp:waturn_current:reno"
+        )
+
+    def test_pre_tool_leaves_key_untouched_without_a_retained_origin(self) -> None:
+        """A wrong binding is silent and permanent; an unrewritten key is not."""
+        result = self.ctx.hooks["pre_tool_call"](
+            tool_name="kanban_create",
+            args={"assignee": "cadastro", "idempotency_key": "model-supplied"},
+            turn_id="kanban-notification-1",
+        )
+        self.assertIsNone(result)
+
+    def test_dispatch_hook_performs_no_io(self) -> None:
+        """Premise P4: this hook runs unbounded upstream, so it must not block."""
+        source = (PLUGIN_DIR / "tools.py").read_text(encoding="utf-8")
+        start = source.index("def pre_gateway_dispatch(")
+        end = source.index("def pre_llm_call(")
+        body = source[start:end]
+        for forbidden in (
+            "urlopen",
+            "_post(",
+            "open(",
+            "sleep",
+            "subprocess",
+            "Request(",
+            "socket",
+        ):
+            self.assertNotIn(forbidden, body)
+
     def test_registers_one_zero_arg_context_tool_and_official_hooks(self) -> None:
         self.assertEqual(
             [tool["name"] for tool in self.ctx.tools], ["conversation_context"]
@@ -154,7 +282,10 @@ class CEOBridgePluginTests(unittest.TestCase):
             self.ctx.tools[0]["schema"]["parameters"],
             {"type": "object", "properties": {}, "additionalProperties": False},
         )
-        self.assertEqual(set(self.ctx.hooks), {"pre_llm_call", "pre_tool_call"})
+        self.assertEqual(
+            set(self.ctx.hooks),
+            {"pre_gateway_dispatch", "pre_llm_call", "pre_tool_call"},
+        )
         self.assertEqual(self.ctx.tools[0]["requires_env"], ["BRAIN_GATEWAY_TOKEN"])
 
         source = "\n".join(
@@ -241,6 +372,9 @@ class CEOBridgePluginTests(unittest.TestCase):
         opener.assert_not_called()
 
     def test_pre_tool_forces_turn_key_for_three_assignees(self) -> None:
+        # An origin turn exists only after an external message, so the turn
+        # must be preceded by its dispatch (spec 10.1.1).
+        self.dispatch(self.inbound_event("3EB0AAA"))
         with patch.object(
             self.tools_module.urllib.request,
             "urlopen",
@@ -293,6 +427,7 @@ class CEOBridgePluginTests(unittest.TestCase):
         )
 
     def test_hook_worker_thread_state_is_available_to_current_turn_tool(self) -> None:
+        self.dispatch(self.inbound_event("3EB0AAA"))
         copied = copy_context()
 
         def invoke_hook() -> None:
