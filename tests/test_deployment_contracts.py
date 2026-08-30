@@ -30,8 +30,26 @@ class DeploymentContractTests(unittest.TestCase):
             "observers/whatsapp/src/main.mjs",
         ):
             self.assertIn(required, source)
+        exec_start_lines = [
+            line for line in source.splitlines() if line.startswith("ExecStart=")
+        ]
+        self.assertEqual(
+            exec_start_lines,
+            [
+                (
+                    "ExecStart=/opt/brain/node/bin/node "
+                    "/root/brain/observers/whatsapp/src/main.mjs"
+                )
+            ],
+        )
+        for forbidden in (
+            "/usr/bin/node",
+            "/usr/local/bin/node",
+            "/root/.hermes/node",
+            "/usr/local/lib/hermes-agent",
+        ):
+            self.assertNotIn(forbidden, source)
         self.assertNotIn("/root/.hermes/platforms/whatsapp/session", source)
-        self.assertNotIn("/usr/local/lib/hermes-agent", source)
         self.assertNotIn("send", source.lower())
         read_write_lines = [
             line for line in source.splitlines() if line.startswith("ReadWritePaths=")

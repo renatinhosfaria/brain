@@ -169,6 +169,11 @@ and versioned systemd/env artifacts. Its future production state belongs under
 `/root/.hermes/platforms/whatsapp/session`, which must never be copied, shared,
 or disconnected by the observer.
 
+The observer uses its own Node runtime under `/opt/brain/node`; this installation
+is pinned to Node `v26.7.0`. It is independent from the Hermes-managed runtime at
+`/root/.hermes/node`, which must not be reused by the observer. Observer Node
+upgrades are explicit, separate maintenance operations.
+
 Live deployment is still pending. This implementation task did not install or
 start the observer unit, create real observer directories, provision real
 secrets, render a real QR, pair a linked device, prove coexistence, run a real
