@@ -221,7 +221,17 @@ git commit -m "feat: ingest privacy-safe WhatsApp transport events"
 - Output: `status`, `wa_turn_id`, `correlation=correlated|pending|uncorrelatable`.
 - `ambiguous` is no longer reachable from this route; exact-identifier correlation cannot produce it. The `conversation_context()` contract keeps the reason string (spec 8.4).
 
-**No schema migration is required.** `whatsapp_turns.correlation_status` has no `CHECK` constraint, so `uncorrelatable` is storable today, and `transport_events.event_id` is the primary key, so a derived identifier is a direct lookup with no new column or index.
+**Schema.** `whatsapp_turns.correlation_status` has no `CHECK` constraint, so `uncorrelatable` is storable today, and `transport_events.event_id` is the primary key, so a resolved identifier is a direct lookup needing no index.
+
+One addition **is** required, and an earlier revision of this task wrongly claimed none was. Re-evaluating a `pending` turn means remembering which identifiers it is waiting for, and Brain can recover that information no other way:
+
+- the raw `message_id` may not be persisted (spec 6.4 and this plan's Global Constraints);
+- it cannot be recomputed later, because `event_id = HMAC(transport_secret, observer_device_id || key.id)` needs the raw `key.id`, which exists only during registration;
+- it cannot be recovered from the arriving event either, because the observer sends Brain the already-derived `event_id` and never the raw message id.
+
+Add `turn_candidate_events(wa_turn_id, ordinal, candidate_event_id)`, holding only derived HMAC identifiers, with no foreign key to `transport_events` precisely because the event may not exist yet. Rows are deleted once the turn reaches a terminal state.
+
+**Observer identity must come from configuration.** Deriving a candidate requires the `observer_device_id`. Discovering it from existing `transport_events` fails for the first event on a fresh deployment, when none exist. Add `BRAIN_OBSERVER_DEVICE_IDS` to `BrainSettings` and derive candidates from the union of the configured identities and any device already seen, so a device rotation does not strand pending turns.
 
 - [ ] **Step 1: Write exact-join tests**
 

@@ -5,6 +5,7 @@ import hmac
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from brain.runtime_db import RuntimeDatabase
@@ -17,7 +18,7 @@ from brain.turn_correlation import (
 )
 
 
-class TurnCorrelationTests(unittest.TestCase):
+class CorrelationHarness(unittest.TestCase):
     CONTACT_PHONE = "5534999772714"
     OTHER_PHONE = "5534999000000"
 
@@ -104,6 +105,9 @@ class TurnCorrelationTests(unittest.TestCase):
         return self.runtime.read(
             lambda conn: conn.execute(f"SELECT * FROM {table}").fetchall()
         )
+
+class TurnCorrelationTests(CorrelationHarness):
+    """Superseded body-HMAC correlation. Replaced during GREEN."""
 
     def test_single_two_three_and_embedded_newline_batches_correlate(self) -> None:
         cases = [
@@ -277,6 +281,140 @@ class TurnCorrelationTests(unittest.TestCase):
         self.assertNotEqual(value, plain_sha)
         self.assertNotEqual(value, generic_hmac)
         self.assertEqual(value, session_key_hmac(self.runtime_secret, "wa:g"))
+
+
+class ExactIdentifierCorrelationTests(CorrelationHarness):
+    """Spec Amendment 1: correlate by exact message identifier, not body/window.
+
+    Every test here targets the amended section 8 contract. They fail against
+    the superseded body-HMAC implementation by design.
+    """
+
+    GRACE_SECONDS = 96 * 3600
+    DEVICE = "observer-a"
+
+    def add_event_for(self, key_id: str, body: str, timestamp: float, **kwargs) -> str:
+        """Store a transport event whose event_id derives from a known key.id."""
+        return self.add_event(
+            body,
+            timestamp,
+            event_id=self.ids.event_id(self.DEVICE, key_id),
+            **kwargs,
+        )
+
+    def registration_with(self, user_message: str, message_ids, **kwargs):
+        return replace(
+            self.registration(user_message, **kwargs),
+            message_ids=tuple(message_ids),
+        )
+
+    def correlator_at(self, now: float) -> TurnCorrelationService:
+        return TurnCorrelationService(
+            self.runtime,
+            self.ids,
+            runtime_secret=self.runtime_secret,
+            grace_seconds=self.GRACE_SECONDS,
+            clock=lambda: now,
+        )
+
+    def test_single_identifier_correlates_without_any_time_window(self) -> None:
+        self.add_event_for("3EB0A53FA395103AB5BA0C", "oi", 1000.0)
+        result = self.correlator_at(1000.0).register(
+            self.registration_with("oi", ["3EB0A53FA395103AB5BA0C"])
+        )
+        self.assertEqual(result["correlation"], "correlated")
+        self.assertEqual(len(self.rows("turn_events")), 1)
+
+    def test_event_ingested_after_registration_still_correlates(self) -> None:
+        """The P6 production regression: the race must no longer be terminal.
+
+        Observed 2026-08-30 17:38 in production. Hermes registered the turn in
+        the same second the observer ingested the event; the turn stayed
+        `pending` forever while the matching event sat in the database.
+        """
+        correlator = self.correlator_at(1000.0)
+        first = correlator.register(
+            self.registration_with("oi", ["3EB0A53FA395103AB5BA0C"])
+        )
+        self.assertEqual(first["correlation"], "pending")
+        self.assertEqual(self.rows("turn_events"), [])
+
+        self.add_event_for("3EB0A53FA395103AB5BA0C", "oi", 1000.0)
+        correlator.reevaluate_contact(self.contact_key)
+
+        stored = self.rows("whatsapp_turns")[0]
+        self.assertEqual(stored["correlation_status"], "correlated")
+        self.assertEqual(len(self.rows("turn_events")), 1)
+
+    def test_batched_identifiers_keep_dispatch_order(self) -> None:
+        self.add_event_for("3EB0BBB", "mundo", 1002.0)
+        self.add_event_for("3EB0AAA", "oi", 1001.0)
+        result = self.correlator_at(1002.0).register(
+            self.registration_with("oi\nmundo", ["3EB0AAA", "3EB0BBB"])
+        )
+        self.assertEqual(result["correlation"], "correlated")
+        ordered = [
+            (row["ordinal"], row["event_id"])
+            for row in sorted(self.rows("turn_events"), key=lambda r: r["ordinal"])
+        ]
+        self.assertEqual(
+            [event_id for _, event_id in ordered],
+            [
+                self.ids.event_id(self.DEVICE, "3EB0AAA"),
+                self.ids.event_id(self.DEVICE, "3EB0BBB"),
+            ],
+        )
+
+    def test_unresolved_identifier_becomes_uncorrelatable_after_grace(self) -> None:
+        correlator = self.correlator_at(1000.0)
+        correlator.register(self.registration_with("oi", ["3EB0NEVERARRIVES"]))
+        self.assertEqual(
+            self.rows("whatsapp_turns")[0]["correlation_status"], "pending"
+        )
+
+        self.correlator_at(1000.0 + self.GRACE_SECONDS + 1).reevaluate_contact(
+            self.contact_key
+        )
+        self.assertEqual(
+            self.rows("whatsapp_turns")[0]["correlation_status"], "uncorrelatable"
+        )
+
+    def test_identifier_owned_by_another_contact_fails_closed_immediately(
+        self,
+    ) -> None:
+        self.add_event_for(
+            "3EB0OTHER", "oi", 1000.0, contact_key=self.other_contact_key
+        )
+        result = self.correlator_at(1000.0).register(
+            self.registration_with("oi", ["3EB0OTHER"])
+        )
+        self.assertEqual(result["correlation"], "uncorrelatable")
+        self.assertEqual(self.rows("turn_events"), [])
+
+    def test_uncorrelatable_is_terminal_and_never_revisited(self) -> None:
+        correlator = self.correlator_at(1000.0)
+        correlator.register(self.registration_with("oi", ["3EB0LATE"]))
+        self.correlator_at(1000.0 + self.GRACE_SECONDS + 1).reevaluate_contact(
+            self.contact_key
+        )
+
+        # The event finally arrives, far too late. The verdict must not flip.
+        self.add_event_for("3EB0LATE", "oi", 1000.0)
+        self.correlator_at(1000.0 + self.GRACE_SECONDS + 2).reevaluate_contact(
+            self.contact_key
+        )
+        self.assertEqual(
+            self.rows("whatsapp_turns")[0]["correlation_status"], "uncorrelatable"
+        )
+        self.assertEqual(self.rows("turn_events"), [])
+
+    def test_internal_reinvocation_creates_no_turn_row(self) -> None:
+        """A Kanban-notification turn carries no identifiers (premise P2)."""
+        result = self.correlator_at(1000.0).register(
+            self.registration_with("[kanban] Task t_abc completed.", [])
+        )
+        self.assertEqual(result["correlation"], "uncorrelatable")
+        self.assertEqual(self.rows("whatsapp_turns"), [])
 
 
 if __name__ == "__main__":
