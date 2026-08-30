@@ -382,6 +382,17 @@ class GatewayAPITests(unittest.TestCase):
 
         self.assertIn("/internal/gateway/conversation-phone", paths)
 
+    def test_turn_register_accepts_a_payload_without_message_ids(self) -> None:
+        """Rollout safety: a Brain ahead of the plugin must not reject turns."""
+        self.prepare_turn_identity()
+        payload = self.valid_turn()
+        del payload["message_ids"]
+
+        response = self.post_turn(payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["correlation"], "uncorrelatable")
+
     def test_turn_register_route_correlates_and_is_not_model_visible(self) -> None:
         self.prepare_turn_identity()
         self.seed_event()

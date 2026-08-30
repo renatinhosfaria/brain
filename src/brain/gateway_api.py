@@ -22,6 +22,7 @@ _CONTEXT_FIELDS = frozenset(
 _TURN_FIELDS = _CONTEXT_FIELDS | frozenset(
     {"turn_id", "user_message", "turn_timestamp", "message_ids"}
 )
+_REQUIRED_TURN_FIELDS = _TURN_FIELDS - frozenset({"message_ids"})
 _MAX_MESSAGE_IDS = 64
 _MAX_MESSAGE_ID = 128
 _CONVERSATION_CONTEXT_FIELDS = _CONTEXT_FIELDS | frozenset({"wa_turn_id"})
@@ -70,7 +71,13 @@ class TurnPayload:
 
 
 def _parse_turn(payload: object) -> TurnPayload:
-    if not isinstance(payload, dict) or set(payload) != _TURN_FIELDS:
+    # message_ids is optional so a Brain deployed ahead of the plugin keeps
+    # accepting registrations instead of rejecting every turn during the
+    # rollout window. Absent means no identifiers, which is the same as an
+    # internal re-invocation: correlation simply does not happen.
+    if not isinstance(payload, dict) or not (
+        _REQUIRED_TURN_FIELDS <= set(payload) <= _TURN_FIELDS
+    ):
         raise _request_error()
     context = _parse_context({key: payload[key] for key in _CONTEXT_FIELDS})
     turn_id = payload["turn_id"]
@@ -96,7 +103,7 @@ def _parse_turn(payload: object) -> TurnPayload:
         turn_id,
         user_message,
         float(timestamp),
-        _parse_message_ids(payload["message_ids"]),
+        _parse_message_ids(payload.get("message_ids", [])),
     )
 
 
