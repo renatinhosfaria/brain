@@ -130,6 +130,30 @@ export async function resolveWaWebVersion(fetchLatestWaWebVersion) {
   return [...result.version];
 }
 
+/**
+ * Emit a bounded technical failure record on stderr.
+ *
+ * This module otherwise logs nothing, because transport data must never reach
+ * a log. The fatal flag is sticky until restart, so a silent catch leaves
+ * health stuck at `unavailable` with nothing to diagnose from. Only the error
+ * class and a truncated message are emitted, never the message payload,
+ * identity, or any part of the event.
+ */
+export function logFailure(reason, error) {
+  try {
+    process.stderr.write(
+      `${JSON.stringify({
+        component: 'brain-whatsapp-observer',
+        reason,
+        error_name: error?.name ?? 'Error',
+        error_message: String(error?.message ?? '').slice(0, 200),
+      })}\n`,
+    );
+  } catch {
+    // Never let diagnostics break message handling.
+  }
+}
+
 export function makeObserverSocketFactory(makeWASocket, version) {
   return ({ auth }) =>
     makeWASocket({
@@ -473,7 +497,11 @@ export async function runObserver({
     activeMessageCallbacks += 1;
     try {
       await processUpsert(update);
-    } catch {
+    } catch (error) {
+      // The fatal flag is sticky until restart, so losing the cause here
+      // leaves health stuck at unavailable with nothing to diagnose from.
+      // Log the error class and message only: never the message payload.
+      logFailure('upsert_processing_failed', error);
       healthState.setFatal(true);
     } finally {
       finishMessageCallback();

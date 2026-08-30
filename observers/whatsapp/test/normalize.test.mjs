@@ -297,3 +297,28 @@ test('production observer source contains no explicit forbidden mutation calls',
     assert.doesNotMatch(source, forbiddenCall, file);
   }
 });
+
+test('logFailure emits only bounded technical fields', async () => {
+  const { logFailure } = await import('../src/main.mjs');
+  const written = [];
+  const original = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    logFailure('upsert_processing_failed', new TypeError('boom 5534999772714'));
+  } finally {
+    process.stderr.write = original;
+  }
+  const record = JSON.parse(written.join(''));
+  assert.deepEqual(Object.keys(record).sort(), [
+    'component',
+    'error_message',
+    'error_name',
+    'reason',
+  ]);
+  assert.equal(record.error_name, 'TypeError');
+  assert.equal(record.reason, 'upsert_processing_failed');
+  assert.ok(record.error_message.length <= 200);
+});
