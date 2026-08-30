@@ -114,6 +114,57 @@ tools = ["conversation_phone"]
         self.assertEqual(settings.transport_retention_days, 90)
         self.assertEqual(settings.display_name_ttl_hours, 24)
 
+    def test_observer_device_ids_default_empty_and_normalize(self) -> None:
+        principals = {
+            "default": self._principal(
+                "default", "gateway", "gateway", "conversation_phone"
+            )
+        }
+        self.assertEqual(
+            BrainSettings(
+                principals=principals, cursor_secret=b"c" * 32
+            ).observer_device_ids,
+            (),
+        )
+
+        settings = BrainSettings(
+            principals=principals,
+            cursor_secret=b"c" * 32,
+            observer_device_ids=["obs-b", "obs-a", "obs-b"],
+        )
+        self.assertEqual(settings.observer_device_ids, ("obs-a", "obs-b"))
+
+    def test_rejects_malformed_observer_device_id(self) -> None:
+        principals = {
+            "default": self._principal(
+                "default", "gateway", "gateway", "conversation_phone"
+            )
+        }
+        for invalid in ("", "has space", "x" * 129, "tab\there"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                BrainSettings(
+                    principals=principals,
+                    cursor_secret=b"c" * 32,
+                    observer_device_ids=[invalid],
+                )
+
+    def test_from_env_reads_observer_device_ids(self) -> None:
+        config_path = self._write_production_config()
+        with patch.dict(
+            os.environ,
+            {
+                "BRAIN_RUNTIME_HMAC_SECRET": "r" * 32,
+                "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                "BRAIN_OBSERVER_DEVICE_IDS": " fama-observer-1 , fama-observer-2 ",
+            },
+            clear=True,
+        ):
+            settings = BrainSettings.from_env(config_path)
+
+        self.assertEqual(
+            settings.observer_device_ids, ("fama-observer-1", "fama-observer-2")
+        )
+
     def test_rejects_non_positive_retention_settings(self) -> None:
         principals = {
             "default": self._principal(

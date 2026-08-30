@@ -4,6 +4,11 @@ kanban_db = "/root/.hermes/kanban.db"
 whatsapp_session_dir = "/root/.hermes/platforms/whatsapp/session"
 runtime_db = "/var/lib/brain/runtime/brain-runtime.db"
 observer_session_dir = "/var/lib/brain/whatsapp-observer/session"
+# Expected observer identities. Correlation derives candidate event IDs
+# from these, so a fresh deployment resolves its first message before any
+# transport event exists to discover the device from. Must match the
+# observer's BRAIN_OBSERVER_DEVICE_ID.
+observer_device_ids = ["fama-whatsapp-observer-1"]
 transport_retention_days = 90
 display_name_ttl_hours = 24
 board = "default"

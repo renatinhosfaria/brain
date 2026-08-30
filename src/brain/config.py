@@ -44,6 +44,15 @@ def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _visible_token(value: str, maximum: int) -> bool:
+    """Match the observer identity shape the transport boundary already accepts."""
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= maximum
+        and all(0x21 <= ord(char) <= 0x7E for char in value)
+    )
+
+
 def _valid_digest(value: str) -> bool:
     if not isinstance(value, str) or len(value) != 64:
         return False
@@ -52,6 +61,17 @@ def _valid_digest(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _observer_device_ids(server: Mapping[str, object]) -> tuple[str, ...]:
+    """Read the expected observer identities from env or persisted config."""
+    raw = os.environ.get("BRAIN_OBSERVER_DEVICE_IDS")
+    if raw is not None:
+        return tuple(part.strip() for part in raw.split(",") if part.strip())
+    configured = server.get("observer_device_ids", ())
+    if isinstance(configured, str):
+        return tuple(part.strip() for part in configured.split(",") if part.strip())
+    return tuple(str(value).strip() for value in configured if str(value).strip())
 
 
 @dataclass(frozen=True)
@@ -83,6 +103,7 @@ class BrainSettings:
     whatsapp_session_dir: Path = DEFAULT_WHATSAPP_SESSION_DIR
     runtime_db: Path = DEFAULT_RUNTIME_DB
     observer_session_dir: Path = DEFAULT_OBSERVER_SESSION_DIR
+    observer_device_ids: tuple[str, ...] = ()
     board: str = "default"
     host: str = "127.0.0.1"
     port: int = 8765
@@ -116,6 +137,14 @@ class BrainSettings:
             raise ValueError("transport_retention_days must be positive")
         if self.display_name_ttl_hours <= 0:
             raise ValueError("display_name_ttl_hours must be positive")
+        # Correlation derives candidate event IDs from these identities, so a
+        # fresh deployment can resolve its first message before any transport
+        # event exists to discover the device from.
+        device_ids = tuple(sorted({str(value) for value in self.observer_device_ids}))
+        for device_id in device_ids:
+            if not _visible_token(device_id, 128):
+                raise ValueError("observer_device_ids contains an invalid identity")
+        object.__setattr__(self, "observer_device_ids", device_ids)
         if not self.principals:
             raise ValueError("at least one Brain principal is required")
         normalized: dict[str, PrincipalConfig] = {}
@@ -250,6 +279,7 @@ class BrainSettings:
                     server.get("observer_session_dir", DEFAULT_OBSERVER_SESSION_DIR),
                 )
             ),
+            observer_device_ids=_observer_device_ids(server),
             board=str(
                 os.environ.get("BRAIN_KANBAN_BOARD", server.get("board", "default"))
             ),
