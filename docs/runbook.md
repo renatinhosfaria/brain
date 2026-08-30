@@ -105,6 +105,38 @@ This proves the reader sees live WAL content rather than only the last
 checkpoint. Do not enable `ProtectSystem=strict` until this test passes with the
 gateway active.
 
+### Mandatory upstream integrity gate before Stage 3
+
+Before the first Stage 3 deployment or restart of any Brain observer/plugin
+component, capture the clean upstream Hermes baseline exactly once:
+
+```sh
+cd /root/brain
+PYTHONPATH=src .venv/bin/python scripts/hermes_integrity.py capture \
+  --repo /usr/local/lib/hermes-agent \
+  --output /var/lib/brain/runtime/hermes-integrity-baseline.json
+```
+
+Immediately verify that baseline before installing or starting the observer:
+
+```sh
+cd /root/brain
+PYTHONPATH=src .venv/bin/python scripts/hermes_integrity.py verify \
+  --repo /usr/local/lib/hermes-agent \
+  --baseline /var/lib/brain/runtime/hermes-integrity-baseline.json
+```
+
+Only a successful capture followed by a successful verify permits Stage 3 to
+proceed. After deployment, second-device pairing, and the controlled E2E, run
+the same verify command again. Any HEAD, worktree, manifest, file-type, or hash
+mismatch stops the rollout. Never overwrite the baseline, repair Hermes,
+normalize a dirty checkout, or change upstream automatically.
+
+This byte/state integrity gate is distinct from
+`scripts/hermes_integration_check.py`: integrity proves the original checkout
+is unchanged, while compatibility proves the supported public APIs, schemas,
+and runtime semantics.
+
 ## Hermes update gate
 
 After every `hermes update`, run `scripts/smoke_test.py`. It checks the real
