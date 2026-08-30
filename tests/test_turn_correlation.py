@@ -106,6 +106,7 @@ class CorrelationHarness(unittest.TestCase):
             lambda conn: conn.execute(f"SELECT * FROM {table}").fetchall()
         )
 
+
 class TurnCorrelationTests(CorrelationHarness):
     """Superseded body-HMAC correlation. Replaced during GREEN."""
 

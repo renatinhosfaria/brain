@@ -15,6 +15,7 @@ BUSINESS_TABLES = {
     "transport_events",
     "whatsapp_turns",
     "turn_events",
+    "turn_candidate_events",
     "kanban_bindings",
     "lead_lifecycles",
     "lifecycle_facts",
@@ -137,6 +138,46 @@ class RuntimeDatabaseTests(unittest.TestCase):
                 lambda conn: conn.execute(
                     "INSERT INTO turn_events (wa_turn_id, event_id, ordinal) "
                     "VALUES ('missing-turn', 'missing-event', 0)"
+                )
+            )
+
+    def test_candidate_event_may_precede_its_transport_event(self) -> None:
+        """The property that makes re-evaluation possible (spec 8.4).
+
+        A candidate is recorded while its event is still in flight, so this
+        table must not gain a foreign key to transport_events. It must still
+        require a real turn.
+        """
+        self.initialize()
+        self.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO whatsapp_turns (wa_turn_id, correlation_status, "
+                "created_at) VALUES ('waturn_x', 'pending', 1.0)"
+            )
+        )
+
+        self.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO turn_candidate_events "
+                "(wa_turn_id, ordinal, candidate_event_id) "
+                "VALUES ('waturn_x', 0, 'waevt_not_yet_ingested')"
+            )
+        )
+        self.assertEqual(
+            self.runtime.read(
+                lambda conn: conn.execute(
+                    "SELECT candidate_event_id FROM turn_candidate_events"
+                ).fetchone()[0]
+            ),
+            "waevt_not_yet_ingested",
+        )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.runtime.write(
+                lambda conn: conn.execute(
+                    "INSERT INTO turn_candidate_events "
+                    "(wa_turn_id, ordinal, candidate_event_id) "
+                    "VALUES ('missing-turn', 0, 'waevt_orphan')"
                 )
             )
 

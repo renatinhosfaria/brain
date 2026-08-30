@@ -71,6 +71,20 @@ _SCHEMA = (
         FOREIGN KEY (event_id) REFERENCES transport_events(event_id)
     )
     """,
+    # Identifiers a pending turn is still waiting for. Deliberately has no
+    # foreign key to transport_events: the whole purpose is to record a
+    # candidate whose event has not been ingested yet. Values are derived
+    # HMACs, never a raw observer message id. Rows are deleted once the turn
+    # reaches a terminal state.
+    """
+    CREATE TABLE IF NOT EXISTS turn_candidate_events (
+        wa_turn_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        candidate_event_id TEXT NOT NULL,
+        PRIMARY KEY (wa_turn_id, ordinal),
+        FOREIGN KEY (wa_turn_id) REFERENCES whatsapp_turns(wa_turn_id)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS kanban_bindings (
         task_id TEXT PRIMARY KEY,
