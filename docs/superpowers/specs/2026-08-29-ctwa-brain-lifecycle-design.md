@@ -1,7 +1,8 @@
 # CTWA Brain Lifecycle Architecture
 
 **Date:** 2026-08-29  
-**Status:** Approved design; implementation not started  
+**Amended:** 2026-08-30 (Amendment 1 — sections 3, 8, 10.1, 10.2, 10.3; see section 26)  
+**Status:** Approved design, amended by production evidence; Plans 1 and 2 implemented  
 **Primary repository:** `renatinhosfaria/brain`  
 **Operational profile repository:** `renatinhosfaria/hermes`
 
@@ -84,6 +85,24 @@ The proven CTWA historical signature for the tested Meta Ads path is:
 `containsAutoReply` must not be used to decide whether T0 is human. The tested CTWA T0 had `containsAutoReply=false`.
 
 The newer conversion-family CTWA fields were absent in the tested event. V1 therefore treats the historical `externalAdReply` family as the proven semantic detector. New conversion-family fields may be captured as bounded observability metadata, but they must not create a production `ctwa_first_contact` classification until a controlled test proves their semantics.
+
+### 3.1 Production evidence from 2026-08-30
+
+These findings were produced on the live deployment after Plans 1 and 2 were implemented, the observer was paired as a second linked device, and the `brain-ceo-bridge` plugin was loaded. They amend sections 8 and 10; see section 26.
+
+**P1 — Hermes and the observer see the same WhatsApp `key.id`.** `scripts/whatsapp-bridge/bridge.js` emits `messageId: msg.key.id`; the WhatsApp adapter copies it to `MessageEvent.message_id`; the observer derives its `event_id` from the same `msg.key.id`. Recomputing the observer's formula, `waevt_ + HMAC(transport_secret, observer_device_id || key.id)`, from the Hermes-side `message_id` produced event IDs **already present** in `transport_events` for 2 of 2 controlled messages. Both sides derive the same identifier independently, so exact-join correlation is available.
+
+**P2 — `pre_gateway_dispatch` fires once per non-internal inbound message and skips internal events.** In one controlled run, three Kanban-completion notifications each registered a turn through `pre_llm_call` and produced **zero** `pre_gateway_dispatch` fires, while the single real inbound message fired it exactly once. This makes the hook a reliable discriminator between external WhatsApp turns and internal re-invocations.
+
+**P3 — `pre_llm_call` receives `turn_id` in the installed version.** `agent/turn_context.py:1317-1329` passes `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id`. The public documentation omits `turn_id`; the installed source is authoritative for this deployment.
+
+**P4 — Hook timeout coverage is an allowlist, and `pre_gateway_dispatch` is deliberately outside it.** `hermes_cli/plugins.py` places `pre_llm_call` in `_HOOK_TIMEOUT_BOUNDED_HOOKS`, where a timeout is fail-open ("abandon/skip, agent continues"), and excludes `pre_gateway_dispatch` because "abandoning is unsafe either way... prefer finish-or-exception fallthrough". A `pre_gateway_dispatch` callback therefore runs unbounded. **No network or blocking I/O may be performed in `pre_gateway_dispatch`**, or a slow Brain would wedge inbound message dispatch and violate section 20.
+
+**P5 — Gateway and agent turn share one process.** `hermes-gateway.service` runs as a single process whose only child is the Node WhatsApp bridge; no agent subprocess is spawned. In-process state is therefore shared between `pre_gateway_dispatch`, `pre_llm_call`, and `pre_tool_call`.
+
+**P6 — Body-HMAC plus time-window correlation is non-deterministic in production.** The same code path lost the race once (observer event and turn registration in the same second, result `pending`, no mapping) and won it once (event two seconds ahead, result `correlated`). Correlation computed only at registration time is never re-evaluated, so a lost race is permanent even when the matching event is already stored.
+
+**P7 — Kanban cards for later stages carried distinct `wa_turn_id` values.** In one controlled lead, the Porteiro card carried the `wa_turn_id` of the real correlated WhatsApp turn, while the Cadastro and Reno cards carried `wa_turn_id` values belonging to Kanban-notification turns, which have no transport event and can never correlate. Section 10.3 binding is unreachable under the original rule.
 
 ## 4. Architecture
 
@@ -281,18 +300,52 @@ If future evidence shows that WhatsApp repeats the full CTWA signature on a manu
 
 Hermes may debounce multiple WhatsApp messages into one turn, so correlation is between one `wa_turn_id` and one or more `event_id` values.
 
-Brain receives the Hermes turn registration from the plugin and correlates it against observer events using only trusted facts:
+Correlation is by **exact message identifier**, not by content or timing. Premise P1 in section 3.1 proves that Hermes' `MessageEvent.message_id` and the observer's `msg.key.id` are the same value, so both sides derive the same `event_id` independently.
+
+### 8.1 Collecting external message identifiers
+
+The plugin registers `pre_gateway_dispatch`, which fires once per non-internal inbound message (premise P2) and carries `event.message_id`.
+
+That callback **must perform no network call, no disk I/O, and no blocking work of any kind**. Premise P4 establishes that the hook runs unbounded: a slow dependency there would wedge inbound dispatch for every message and break section 20's requirement that Hermes keep serving when Brain is down. The callback appends the raw `message_id` to a bounded, TTL-expiring in-process buffer keyed by the current chat, and returns `None` so dispatch always proceeds.
+
+Premise P5 establishes that this buffer is visible to `pre_llm_call` in the same process.
+
+### 8.2 Registering the turn
+
+`pre_llm_call` drains the buffer for the current chat and sends the accumulated `message_id` values together with the Hermes `turn_id` in one call to Brain's private registration route. All network I/O stays in this hook, which premise P4 shows is bounded and fail-open.
+
+Raw `message_id` values cross the authenticated localhost boundary but are never persisted: Brain immediately derives `HMAC(transport_secret, ...)` and discards the raw values, exactly as it already treats the raw turn message body.
+
+### 8.3 Proving the mapping
+
+Brain correlates using only trusted facts:
 
 1. authorize the current Hermes WhatsApp DM/session;
 2. resolve the Hermes chat identity to one verified phone using the Hermes Baileys mapping directory;
 3. independently resolve observer chat identity using the observer session mapping directory;
 4. require both sides to resolve to the same canonical phone/contact key;
-5. use the Hermes turn message content only transiently to calculate body HMAC/length; do not persist raw text;
-6. select observer events in the bounded debounce/time window;
-7. compose candidate event bodies using the exact batching/join semantics proven for the supported Hermes version and require a unique body HMAC/length match to the Hermes turn;
-8. persist the `turn_events` mapping only after unique proof.
+5. for each supplied `message_id`, derive the expected `event_id` using the observer's own formula and look it up directly;
+6. require every derived `event_id` to resolve to a stored transport event for that same contact;
+7. use the Hermes turn message content only transiently to recompute body HMAC/length as a **secondary consistency check** on the joined set; do not persist raw text;
+8. persist the `turn_events` mapping, ordered by dispatch order, only after every identifier resolves.
 
-If zero or multiple candidate combinations remain, return `turn_not_correlated` or `ambiguous_transport_events`. Do not select the nearest or most likely candidate.
+An external turn whose buffer is empty, or any identifier that does not resolve to a stored event, is `turn_not_correlated`. Brain must not fall back to nearest-time or best-guess matching.
+
+### 8.4 Re-evaluation and terminal states
+
+Correlation must be re-evaluated rather than computed once. Premise P6 shows a registration-time-only computation is a coin flip: the observer's ingestion and Hermes' turn registration are independent pipelines with no ordering guarantee, and a lost race is otherwise permanent even when the matching event is already stored.
+
+A turn therefore carries one of:
+
+- `correlated` — every identifier resolved and the mapping is persisted; terminal;
+- `pending` — at least one identifier has not yet been ingested; re-evaluated on later transport ingestion for that contact and on `conversation_context()`;
+- `uncorrelatable` — terminal failure. A turn becomes `uncorrelatable` once its identifiers have not resolved within a bounded grace period well beyond normal observer ingestion latency, or when an identifier resolves to an event bound to a different contact.
+
+`pending` must never be treated as a durable answer, and `uncorrelatable` must never be re-evaluated. `conversation_context()` reports `turn_not_correlated` for both.
+
+Because internal events do not fire `pre_gateway_dispatch` (premise P2), a turn with an empty buffer is an internal re-invocation, not an external WhatsApp turn. Brain does not create a `whatsapp_turns` row for it; such turns produced permanent `pending` rows under the original rule.
+
+The `ambiguous_transport_events` state remains defined for the `conversation_context()` contract, but exact-identifier correlation cannot produce it. It is retained for compatibility and for any future correlation path that reintroduces candidate selection.
 
 Brain maintains an explicit Hermes-compatibility check for the state/Kanban schemas, required hook payloads, delivery-ledger semantics, and WhatsApp batching assumptions used by correlation. A Hermes upgrade may be installed normally, but lifecycle automation remains shadow/disabled until compatibility tests pass for the new version. Normal Hermes service must continue even when Brain declares the integration incompatible.
 
@@ -352,17 +405,31 @@ If `conversation_context()` is unavailable, the lead must not be silenced. The C
 
 ### 10.1 Idempotency format
 
-Kanban cards for the WhatsApp turn use:
+All three Kanban cards for one lead use the **origin turn**, defined in 10.1.1:
 
-- `whatsapp:<wa_turn_id>:porteiro`;
-- `whatsapp:<wa_turn_id>:cadastro`;
-- `whatsapp:<wa_turn_id>:reno`.
+- `whatsapp:<origin_wa_turn_id>:porteiro`;
+- `whatsapp:<origin_wa_turn_id>:cadastro`;
+- `whatsapp:<origin_wa_turn_id>:reno`.
 
 `correlation_id` remains a separate UUID and never contains PII.
 
+#### 10.1.1 Origin turn
+
+The **origin turn** is the `wa_turn_id` of the external WhatsApp turn that started the lead — the turn whose `pre_gateway_dispatch` buffer carried the inbound message identifiers.
+
+Porteiro, Cadastro, and Reno cards are created across several CEO invocations: the first from the customer's message, the later ones from Kanban-completion notifications. Premise P7 records that under the original rule each card took the `wa_turn_id` of whichever turn happened to be current, so the Cadastro card carried a notification turn that has no transport event and can never correlate. That made the section 10.3 binding unreachable in production.
+
+All three stages must therefore share the **same** origin turn. An internal re-invocation never becomes an origin turn, and never replaces the current one.
+
 ### 10.2 Deterministic enforcement
 
-Our Brain/Hermes extension registers a public `pre_tool_call` plugin hook. When the default CEO creates an approved Porteiro/Cadastro/Reno Kanban Task for a WhatsApp DM, the hook validates and, when necessary, replaces the model-supplied idempotency key with the correct value derived from the current Hermes `turn_id`/registered `wa_turn_id`.
+Our Brain/Hermes extension registers a public `pre_tool_call` plugin hook. When the default CEO creates an approved Porteiro/Cadastro/Reno Kanban Task for a WhatsApp DM, the hook validates and, when necessary, replaces the model-supplied idempotency key with the correct value derived from the current **origin** `wa_turn_id`.
+
+The plugin retains the origin turn per chat and refreshes it only on an external turn, identified by a non-empty `pre_gateway_dispatch` buffer (premise P2). A Kanban-notification turn leaves the retained origin untouched, so a Cadastro or Reno card created during such a turn still carries the originating WhatsApp turn.
+
+The retained origin is bounded and TTL-expiring. When no origin turn is retained, the hook must leave the model-supplied key unchanged rather than substitute the current internal turn; a wrong binding is worse than an unrewritten key, which the reconciler can still discover.
+
+The rewrite applies only to the approved assignees `porteiro`, `cadastro`, and `reno`. A card created under any other assignee label is left unchanged and does not participate in lifecycle binding.
 
 The hook does not modify Hermes code. It uses the official plugin interface.
 
@@ -378,7 +445,9 @@ Only a terminal Cadastro result with structured decision `LEAD_NOVO_CADASTRADO` 
 
 Brain ties:
 
-`origin CTWA event -> wa_turn_id -> Cadastro Task -> exact client_id`.
+`origin CTWA event -> origin_wa_turn_id -> Cadastro Task -> exact client_id`.
+
+The `wa_turn_id` in the Cadastro Task's idempotency key is the origin turn of section 10.1.1, which is the same turn the CTWA origin event correlates to. Binding must resolve the Cadastro Task through that origin turn and must never accept a Cadastro Task whose turn is an internal re-invocation with no correlated transport event.
 
 A later attempt to bind the same origin to a different client is a hard conflict.
 
@@ -798,3 +867,28 @@ raw observer event
 ```
 
 while the original Hermes Agent installation remains unchanged and every ambiguous or unproven correlation fails closed.
+
+## 26. Amendment log
+
+### Amendment 1 — 2026-08-30
+
+Cause: production evidence gathered after Plans 1 and 2 were deployed and the observer was paired. Recorded as premises P1 through P7 in section 3.1.
+
+| Section | Change |
+| --- | --- |
+| 3.1 | New. Records premises P1–P7. |
+| 8 | Correlation is by exact `message_id` join instead of body-HMAC plus debounce window. Adds 8.1 (identifier collection, no I/O in `pre_gateway_dispatch`), 8.2 (registration), 8.3 (proof), 8.4 (re-evaluation and the new terminal `uncorrelatable` state). |
+| 10.1 | All three stage cards must use the shared **origin turn**, newly defined in 10.1.1. |
+| 10.2 | `pre_tool_call` derives the key from the retained origin turn, refreshed only on external turns; leaves keys unchanged when no origin is retained or the assignee is outside the approved set. |
+| 10.3 | Binding resolves the Cadastro Task through the origin turn and rejects internal re-invocations. |
+
+What did **not** change: the fail-closed principle, the privacy model, the CTWA detector of 7.1, the `conversation_context()` response contract of section 9, the lifecycle state machine of section 14, and every constraint in section 2.
+
+Two defects motivated the amendment. Correlation computed only at registration time was a race whose outcome varied run to run (P6), and the stage cards carried unrelated `wa_turn_id` values that made the section 10.3 binding unreachable (P7). Both are fixed by one mechanism: `pre_gateway_dispatch` fires only for external messages, so its buffer both supplies exact identifiers and distinguishes an external turn from an internal re-invocation.
+
+Downstream documents requiring updates before implementation:
+
+- Plan 1 (`2026-08-29-ctwa-brain-transport-context.md`), Task 4 and Task 5 — hook contract, registration payload, correlation algorithm, `uncorrelatable` state.
+- Plan 4 (`2026-08-29-ctwa-lifecycle-engine.md`), Task 2 — origin-turn resolution in `parse_whatsapp_idempotency_key` and `bind_completed_cadastro`.
+
+Implementation status at amendment time: Plan 1 and Plan 2 are implemented and deployed but predate this amendment; their correlation code still follows the original section 8. A disposable `ctwa-keyid-spike` plugin used to produce P1 and P2 remains installed in the operational Hermes and must be removed.
