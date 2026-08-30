@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   lstat,
   mkdir,
@@ -9,6 +10,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -92,6 +94,64 @@ async function withSpool(callback, initialNow = CAPTURED_AT + 10) {
     });
   } finally {
     await rm(testRoot, { recursive: true, force: true });
+  }
+}
+
+async function withSynchronizedPublications(count, callback) {
+  const originalLink = fs.promises.link;
+  const originalRename = fs.promises.rename;
+  const pending = [];
+  const milestones = Array.from({ length: count }, () => {
+    const milestone = {};
+    milestone.promise = new Promise((resolve, reject) => {
+      milestone.resolve = resolve;
+      milestone.reject = reject;
+    });
+    return milestone;
+  });
+
+  function intercept(original) {
+    return async (source, target) => {
+      if (path.basename(source).endsWith('.tmp') && target.endsWith('.json')) {
+        return new Promise((resolve, reject) => {
+          pending.push({ original, reject, resolve, source, target });
+          milestones[pending.length - 1]?.resolve();
+        });
+      }
+      return original(source, target);
+    };
+  }
+
+  fs.promises.link = intercept(originalLink);
+  fs.promises.rename = intercept(originalRename);
+  syncBuiltinESMExports();
+  try {
+    await callback({
+      async release() {
+        await milestones[count - 1].promise;
+        for (const operation of pending) {
+          try {
+            await operation.original(operation.source, operation.target);
+            operation.resolve();
+          } catch (error) {
+            operation.reject(error);
+          }
+        }
+      },
+      waitForPublications(number) {
+        return milestones[number - 1].promise;
+      },
+    });
+  } finally {
+    for (const milestone of milestones) {
+      milestone.reject(new Error('publication synchronization ended'));
+    }
+    for (const operation of pending) {
+      operation.reject(new Error('publication synchronization ended'));
+    }
+    fs.promises.link = originalLink;
+    fs.promises.rename = originalRename;
+    syncBuiltinESMExports();
   }
 }
 
@@ -243,6 +303,139 @@ test('same event_id with conflicting safe payload fails closed and preserves ori
 
     await assert.rejects(spool.put(conflict), /conflict/i);
     assert.equal(await readFile(target, 'utf8'), before);
+  });
+});
+
+test('concurrent identical puts install once without renewing winner metadata', async () => {
+  await withSpool(async ({ rootDir, setNow, spool }) => {
+    const event = safeEvent('concurrent-identical');
+    const target = path.join(rootDir, `${event.event_id}.json`);
+    const firstNow = CAPTURED_AT + 10;
+    const secondNow = CAPTURED_AT + 20_000;
+
+    await withSynchronizedPublications(2, async ({ release, waitForPublications }) => {
+      const first = spool.put(event);
+      await waitForPublications(1);
+      setNow(secondNow);
+      const second = spool.put(event);
+      await waitForPublications(2);
+      await release();
+      const results = await Promise.all([first, second]);
+
+      assert.deepEqual(
+        results.map((result) => result.duplicate).sort(),
+        [false, true],
+      );
+    });
+
+    const wrapper = JSON.parse(await readFile(target, 'utf8'));
+    assert.equal(wrapper.spooled_at, firstNow);
+    assert.equal(
+      wrapper.display_name_expires_at,
+      event.received_at + 24 * 60 * 60,
+    );
+    assert.deepEqual(wrapper.event, event);
+    assert.deepEqual(await readdir(rootDir), [`${event.event_id}.json`]);
+  });
+});
+
+test('concurrent conflicting puts produce one winner and one conflict without overwrite', async () => {
+  await withSpool(async ({ rootDir, setNow, spool }) => {
+    const original = safeEvent('concurrent-conflict');
+    const conflicting = { ...original, body_hmac: 'f'.repeat(64) };
+    const target = path.join(rootDir, `${original.event_id}.json`);
+    const firstNow = CAPTURED_AT + 10;
+    const secondNow = CAPTURED_AT + 20_000;
+
+    let results;
+    await withSynchronizedPublications(2, async ({ release, waitForPublications }) => {
+      const first = spool.put(original);
+      await waitForPublications(1);
+      setNow(secondNow);
+      const second = spool.put(conflicting);
+      await waitForPublications(2);
+      await release();
+      results = await Promise.allSettled([first, second]);
+    });
+
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+    assert.match(
+      results.find((result) => result.status === 'rejected').reason.message,
+      /conflict/i,
+    );
+
+    const wrapper = JSON.parse(await readFile(target, 'utf8'));
+    const winnerIndex = results.findIndex((result) => result.status === 'fulfilled');
+    const expectedEvent = [original, conflicting][winnerIndex];
+    const expectedSpooledAt = [firstNow, secondNow][winnerIndex];
+    assert.deepEqual(wrapper.event, expectedEvent);
+    assert.equal(wrapper.spooled_at, expectedSpooledAt);
+    assert.equal(
+      wrapper.display_name_expires_at,
+      expectedEvent.received_at + 24 * 60 * 60,
+    );
+    assert.deepEqual(await readdir(rootDir), [`${original.event_id}.json`]);
+  });
+});
+
+test('concurrent symlink target is never replaced or followed', async () => {
+  await withSpool(async ({ rootDir, spool, testRoot }) => {
+    const event = safeEvent('concurrent-symlink');
+    const target = path.join(rootDir, `${event.event_id}.json`);
+    const outside = path.join(testRoot, 'outside-concurrent.json');
+    await writeFile(outside, 'outside-stays');
+
+    await withSynchronizedPublications(1, async ({ release, waitForPublications }) => {
+      const publication = spool.put(event);
+      await waitForPublications(1);
+      await symlink(outside, target);
+      await release();
+      await assert.rejects(publication, /conflict|regular file|symlink/i);
+    });
+
+    assert.equal((await lstat(target)).isSymbolicLink(), true);
+    assert.equal(await readFile(outside, 'utf8'), 'outside-stays');
+    assert.deepEqual(
+      (await readdir(rootDir)).filter((entry) => entry.endsWith('.tmp')),
+      [],
+    );
+  });
+});
+
+test('stress: many identical concurrent puts install exactly once', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent('stress-identical');
+    const results = await Promise.all(
+      Array.from({ length: 16 }, () => spool.put(event)),
+    );
+
+    assert.equal(results.filter((result) => result.duplicate === false).length, 1);
+    assert.equal(results.filter((result) => result.duplicate === true).length, 15);
+    assert.deepEqual(await spool.read(event.event_id), event);
+    assert.deepEqual(await readdir(rootDir), [`${event.event_id}.json`]);
+  });
+});
+
+test('stress: many conflicting concurrent puts never overwrite the winner', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const base = safeEvent('stress-conflicts');
+    const candidates = Array.from({ length: 16 }, (_, index) => ({
+      ...base,
+      body_hmac: index.toString(16).padStart(64, '0'),
+    }));
+    const results = await Promise.allSettled(
+      candidates.map((event) => spool.put(event)),
+    );
+
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.equal(results.filter((result) => result.status === 'rejected').length, 15);
+    for (const result of results.filter((entry) => entry.status === 'rejected')) {
+      assert.match(result.reason.message, /conflict/i);
+    }
+    const winnerIndex = results.findIndex((result) => result.status === 'fulfilled');
+    assert.deepEqual(await spool.read(base.event_id), candidates[winnerIndex]);
+    assert.deepEqual(await readdir(rootDir), [`${base.event_id}.json`]);
   });
 });
 

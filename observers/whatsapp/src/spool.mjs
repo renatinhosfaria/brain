@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -355,6 +356,7 @@ export class SafeSpool {
       `.${eventId}.${randomBytes(12).toString('hex')}.tmp`,
     );
     let handle;
+    let syncNeeded = false;
     try {
       handle = await open(temp, 'wx', 0o600);
       await handle.writeFile(JSON.stringify(wrapper), { encoding: 'utf8' });
@@ -365,28 +367,35 @@ export class SafeSpool {
 
       if (!replaceExisting) {
         try {
-          await lstat(target);
-          throw new Error('event_id conflicts with an existing spool record');
+          await link(temp, target);
         } catch (error) {
-          if (error?.code !== 'ENOENT') {
+          if (error?.code !== 'EEXIST') {
             throw error;
           }
+          return false;
         }
       } else {
         const metadata = await lstat(target);
         if (metadata.isSymbolicLink() || !metadata.isFile()) {
           throw new Error('spool record is not a regular file');
         }
+        await rename(temp, target);
       }
-      await rename(temp, target);
-      await syncDirectory(this.#rootDir);
+      syncNeeded = true;
+      return true;
     } finally {
       await handle?.close().catch(() => {});
-      await unlink(temp).catch((error) => {
+      try {
+        await unlink(temp);
+        syncNeeded = true;
+      } catch (error) {
         if (error?.code !== 'ENOENT') {
           throw error;
         }
-      });
+      }
+      if (syncNeeded) {
+        await syncDirectory(this.#rootDir);
+      }
     }
   }
 
@@ -481,8 +490,18 @@ export class SafeSpool {
       display_name_expires_at: displayExpiry,
       event: storedEvent,
     };
-    await this.#atomicWrite(event.event_id, wrapper, false);
-    return { event_id: event.event_id, duplicate: false };
+    if (await this.#atomicWrite(event.event_id, wrapper, false)) {
+      return { event_id: event.event_id, duplicate: false };
+    }
+
+    const existing = await this.#readRecord(event.event_id);
+    const sameAfterExpiry =
+      existing.display_name_expires_at === null &&
+      isDeepStrictEqual(existing.event, withoutDisplayName(event));
+    if (!isDeepStrictEqual(existing.event, event) && !sameAfterExpiry) {
+      throw new Error('event_id conflicts with an existing spool record');
+    }
+    return { event_id: event.event_id, duplicate: true };
   }
 
   async list() {
