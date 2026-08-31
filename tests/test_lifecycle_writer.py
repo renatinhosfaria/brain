@@ -249,6 +249,149 @@ class WriterTests(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertIsNone(reason)
 
+    # ------------------------------------------------------------------
+    # With all three agreements, the proven strategy and its readback
+
+    def enabled_writer(self, **kwargs):
+        self.write_proof()
+        return self.writer(claim=self.claim(mode="write"), write_enabled=True, **kwargs)
+
+    def test_the_mutation_sends_exactly_the_proven_envelope(self) -> None:
+        """The call shape must match the proof, not a variation of it."""
+        sent: list[tuple[str, dict]] = []
+
+        def transport(tool, arguments):
+            sent.append((tool, arguments))
+            if tool == "fc_patch_clientes_by_id":
+                return {"status": 200, "body": {}}
+            body = dict(self.body)
+            if len(sent) > 2:
+                body["status"] = "Não Respondeu"
+            return {"status": 200, "body": body}
+
+        self.transport = transport
+        outcome = self.enabled_writer().run_once()
+
+        self.assertEqual(outcome.outcome, "applied")
+        patch = next(call for call in sent if call[0] == "fc_patch_clientes_by_id")
+        self.assertEqual(
+            patch[1],
+            {
+                "id": 12800,
+                "body": {
+                    "status": "Não Respondeu",
+                    "expectedStatus": "Sem Atendimento",
+                },
+            },
+        )
+
+    def test_a_server_refusal_is_a_conflict_not_a_failure(self) -> None:
+        """409 means a human moved the record. The protection worked."""
+
+        def transport(tool, arguments):
+            if tool == "fc_patch_clientes_by_id":
+                return {
+                    "status": 409,
+                    "body": {"error": "Conflito", "currentStatus": "Em Atendimento"},
+                }
+            return {"status": 200, "body": self.body}
+
+        self.transport = transport
+        outcome = self.enabled_writer().run_once()
+
+        self.assertEqual(outcome.outcome, "conflict")
+        self.assertEqual(outcome.reason, "server_refused_stale_state")
+        self.assertEqual(self.claims.reported[0][2], "conflict")
+
+    def test_readback_disagreeing_with_a_200_is_not_trusted(self) -> None:
+        """A 200 is the server's claim; the record is the evidence."""
+
+        def transport(tool, arguments):
+            if tool == "fc_patch_clientes_by_id":
+                return {"status": 200, "body": {}}
+            return {"status": 200, "body": self.body}  # never changes
+
+        self.transport = transport
+        outcome = self.enabled_writer().run_once()
+
+        self.assertEqual(outcome.outcome, "retryable")
+        self.assertEqual(outcome.reason, "readback_unchanged")
+
+    def test_an_ambiguous_write_reads_before_deciding(self) -> None:
+        """A timeout is not a failure: the change may already have landed."""
+        calls: list[str] = []
+
+        def transport(tool, arguments):
+            calls.append(tool)
+            if tool == "fc_patch_clientes_by_id":
+                raise TimeoutError("connection reset")
+            body = dict(self.body)
+            if len(calls) > 1:
+                body["status"] = "Não Respondeu"
+            return {"status": 200, "body": body}
+
+        self.transport = transport
+        outcome = self.enabled_writer().run_once()
+
+        self.assertEqual(outcome.outcome, "already_applied")
+        self.assertEqual(calls[-1], "fc_get_clientes_by_id")
+
+    def test_an_ambiguous_write_that_did_not_land_is_retryable(self) -> None:
+        def transport(tool, arguments):
+            if tool == "fc_patch_clientes_by_id":
+                raise TimeoutError("connection reset")
+            return {"status": 200, "body": self.body}
+
+        self.transport = transport
+        outcome = self.enabled_writer().run_once()
+
+        self.assertEqual(outcome.outcome, "retryable")
+        self.assertEqual(outcome.reason, "readback_unchanged")
+
+    def test_an_ambiguous_write_with_an_unreadable_record_stays_retryable(self) -> None:
+        """Validation read succeeds, the write is ambiguous, the readback fails."""
+        reads = []
+
+        def transport(tool, arguments):
+            if tool == "fc_patch_clientes_by_id":
+                raise TimeoutError("connection reset")
+            reads.append(tool)
+            if len(reads) == 1:
+                return {"status": 200, "body": self.body}
+            return {"status": 503, "body": {}}
+
+        self.transport = transport
+        outcome = self.enabled_writer().run_once()
+
+        self.assertEqual(outcome.outcome, "retryable")
+        self.assertEqual(outcome.reason, "outcome_unknown")
+
+    def test_there_is_no_unconditional_write_path(self) -> None:
+        """Spec 17: never substitute a plain PATCH when the predicate is absent."""
+        source = (
+            Path(__file__).resolve().parents[1] / "src/brain/famachat_client.py"
+        ).read_text(encoding="utf-8")
+        patch_calls = source.count("PATCH_CLIENT_TOOL,")
+
+        self.assertEqual(patch_calls, 1)
+        self.assertIn("CONDITIONAL_FIELD: expected_status", source)
+
+    def test_the_frozen_strategy_matches_the_implementation(self) -> None:
+        fixture = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "tests/fixtures/famachat-conditional-write-proof.json"
+            ).read_text(encoding="utf-8")
+        )
+        from brain import famachat_client as fc
+
+        self.assertEqual(fixture["verdict"], "PASS")
+        self.assertEqual(fixture["field"], fc.CONDITIONAL_FIELD)
+        self.assertEqual(fixture["refusal_http_status"], fc.CONFLICT_STATUS)
+        self.assertEqual(fixture["tools"]["patch"], fc.PATCH_CLIENT_TOOL)
+        self.assertEqual(fixture["tools"]["get"], fc.GET_CLIENT_TOOL)
+        self.assertEqual(fixture["schema_fingerprint"], FINGERPRINT)
+
     def test_the_writer_imports_no_model_or_provider(self) -> None:
         """Spec 13: the writer is deterministic code, never a model.
 

@@ -16,6 +16,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 GET_CLIENT_TOOL = "fc_get_clientes_by_id"
+PATCH_CLIENT_TOOL = "fc_patch_clientes_by_id"
+# The one strategy proven on 2026-08-31, and the only one implemented. There is
+# deliberately no fallback: an unconditional PATCH is exactly what spec 17
+# forbids substituting when the conditional path does not work.
+CONDITIONAL_FIELD = "expectedStatus"
+CONFLICT_STATUS = 409
 
 _DIGITS = re.compile(r"\D+")
 _COUNTRY = "55"
@@ -23,6 +29,22 @@ _COUNTRY = "55"
 
 class FamaChatUnavailable(Exception):
     """FamaChat could not answer in a shape the writer is allowed to act on."""
+
+
+class FamaChatAmbiguous(Exception):
+    """The mutation may or may not have landed. Read before deciding anything.
+
+    A timeout or a transport failure during a write leaves the record in an
+    unknown state. Retrying blindly could apply a change twice; giving up could
+    report a failure that actually succeeded. Only a fresh read settles it.
+    """
+
+
+@dataclass(frozen=True)
+class ConditionalPatchResult:
+    applied: bool
+    conflict: bool
+    current_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +136,49 @@ class FamaChatClient:
             status=record_status,
             source=source if isinstance(source, str) else None,
         )
+
+    def patch_status_conditional(
+        self, client_id: int, *, expected_status: str, target_status: str
+    ) -> ConditionalPatchResult:
+        """Change status only if the record still holds ``expected_status``.
+
+        The predicate is evaluated server-side inside the same statement as the
+        write, which is what makes this safe against a human moving the record
+        between the read and the write. A 409 means exactly that happened.
+        """
+        try:
+            response = self.transport(
+                PATCH_CLIENT_TOOL,
+                {
+                    "id": client_id,
+                    "body": {
+                        "status": target_status,
+                        CONDITIONAL_FIELD: expected_status,
+                    },
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed write is not a known state
+            raise FamaChatAmbiguous(f"transport failed: {type(exc).__name__}") from None
+
+        if not isinstance(response, dict):
+            raise FamaChatAmbiguous("response envelope is not an object")
+        status = response.get("status")
+        body = response.get("body") if isinstance(response.get("body"), dict) else {}
+
+        if status == CONFLICT_STATUS:
+            current = body.get("currentStatus")
+            return ConditionalPatchResult(
+                applied=False,
+                conflict=True,
+                current_status=current if isinstance(current, str) else None,
+            )
+        if status == 200:
+            return ConditionalPatchResult(applied=True, conflict=False)
+        if status == 404:
+            raise FamaChatUnavailable("client disappeared during the write")
+        # Anything else leaves the outcome unknown, which is not the same as
+        # failed: the record must be read before deciding.
+        raise FamaChatAmbiguous(f"unexpected status {status}")
 
     def _call(self, tool: str, arguments: dict) -> dict:
         try:

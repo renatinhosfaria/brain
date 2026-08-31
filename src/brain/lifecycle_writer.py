@@ -19,7 +19,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .famachat_client import FamaChatClient, FamaChatUnavailable, same_phone
+from .famachat_client import (
+    FamaChatAmbiguous,
+    FamaChatClient,
+    FamaChatUnavailable,
+    same_phone,
+)
 from .lifecycle_api import (
     EFFECT_ALREADY_APPLIED,
     EFFECT_CONFLICT,
@@ -155,8 +160,60 @@ class LifecycleWriter:
         return self._apply(claim)
 
     def _apply(self, claim: ClaimedEffect) -> WriteOutcome:
-        raise NotImplementedError(
-            "the conditional mutation is implemented once its strategy is proven"
+        """Apply the one proven strategy, then read back before believing it."""
+        try:
+            result = self.famachat.patch_status_conditional(
+                claim.client_id,
+                expected_status=claim.expected_status,
+                target_status=claim.target_status,
+            )
+        except FamaChatAmbiguous:
+            # The write may have landed. Deciding without reading could report
+            # a failure that succeeded, or retry a change already applied.
+            return self._resolve_unknown(claim)
+
+        if result.conflict:
+            # The server refused because the record moved. That is the
+            # protection working, not an error.
+            return WriteOutcome(
+                OUTCOME_CONFLICT, claim.effect_id, reason="server_refused_stale_state"
+            )
+        if not result.applied:
+            return WriteOutcome(
+                OUTCOME_RETRYABLE, claim.effect_id, reason="write_not_applied"
+            )
+        return self._confirm(claim, applied=True)
+
+    def _resolve_unknown(self, claim: ClaimedEffect) -> WriteOutcome:
+        """Read the record to find out what an ambiguous write actually did."""
+        try:
+            return self._confirm(claim, applied=False)
+        except FamaChatUnavailable:
+            # Still unknown. Leaving it retryable is safe: the next attempt
+            # re-reads first, and the conditional predicate protects it anyway.
+            return WriteOutcome(
+                OUTCOME_RETRYABLE, claim.effect_id, reason="outcome_unknown"
+            )
+
+    def _confirm(self, claim: ClaimedEffect, *, applied: bool) -> WriteOutcome:
+        """Readback is mandatory: a 200 is a claim, the record is the evidence."""
+        record = self.famachat.get_client(claim.client_id)
+        if record is None:
+            return WriteOutcome(
+                OUTCOME_CONFLICT, claim.effect_id, reason="client_not_found"
+            )
+        if record.status == claim.target_status:
+            return WriteOutcome(
+                OUTCOME_APPLIED if applied else OUTCOME_ALREADY_APPLIED,
+                claim.effect_id,
+            )
+        if record.status == claim.expected_status:
+            # The write did not land. Nothing was lost, so it can be retried.
+            return WriteOutcome(
+                OUTCOME_RETRYABLE, claim.effect_id, reason="readback_unchanged"
+            )
+        return WriteOutcome(
+            OUTCOME_CONFLICT, claim.effect_id, reason="readback_unexpected_status"
         )
 
     def _load_proof(self) -> dict | None:

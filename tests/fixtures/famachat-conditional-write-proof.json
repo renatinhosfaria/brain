@@ -1,0 +1,11 @@
+{
+  "field": "expectedStatus",
+  "refusal_http_status": 409,
+  "schema_fingerprint": "4da4e773feb862db22b273d159fc9ba456549df0052e52d2d90d00a17f34fd11",
+  "strategy": "expected_status_in_body",
+  "tools": {
+    "get": "fc_get_clientes_by_id",
+    "patch": "fc_patch_clientes_by_id"
+  },
+  "verdict": "PASS"
+}
