@@ -246,7 +246,12 @@ class TurnCorrelationService:
         if not self._content_is_consistent(
             lengths, digests, user_message, expected_body_length
         ):
-            return _Resolution(UNCORRELATABLE)
+            # The identifiers resolved, but the joined set cannot have produced
+            # this turn's message, so the set is wrong rather than the turn.
+            # Recoverable, not terminal: a terminal verdict here turned a stale
+            # buffered identifier into a permanent failure in production on
+            # 2026-08-30. The grace period still closes it eventually.
+            return _Resolution(PENDING)
         return _Resolution(CORRELATED, tuple(resolved))
 
     @staticmethod

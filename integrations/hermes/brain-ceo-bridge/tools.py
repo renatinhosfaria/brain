@@ -29,6 +29,12 @@ _MAX_RESPONSE_BYTES = 16_384
 _HTTP_TIMEOUT_SECONDS = 5.0
 _TURN_TTL_SECONDS = 3_600.0
 _MAX_TURN_ENTRIES = 1_024
+# Identifiers live only long enough to reach the turn they belong to, which
+# is seconds away including Hermes' debounce. The turn map's hour-long TTL is
+# wrong here: on 2026-08-30 an identifier from a message that produced no turn
+# survived 57 minutes and was drained by an unrelated CTWA turn, joining to a
+# length that turn's message could not have produced.
+DISPATCH_TTL_SECONDS = 60.0
 _MAX_DISPATCH_IDS = 64
 _MAX_MESSAGE_ID = 128
 _TURN_LOCK = threading.Lock()
@@ -217,11 +223,16 @@ def _context_result(payload: object, expected_turn: str) -> dict[str, Any] | Non
     return payload
 
 
-def _prune(store: dict, now: float, timestamp_index: int) -> None:
+def _prune(
+    store: dict,
+    now: float,
+    timestamp_index: int,
+    ttl_seconds: float = _TURN_TTL_SECONDS,
+) -> None:
     expired = [
         key
         for key, value in store.items()
-        if now - value[timestamp_index] > _TURN_TTL_SECONDS
+        if now - value[timestamp_index] > ttl_seconds
     ]
     for key in expired:
         store.pop(key, None)
@@ -262,7 +273,7 @@ def _drain_message_ids(context: dict[str, str]) -> list[str]:
     key = (context["platform"], context["chat_id"])
     now = time.monotonic()
     with _TURN_LOCK:
-        _prune(_DISPATCH_BUFFERS, now, 1)
+        _prune(_DISPATCH_BUFFERS, now, 1, DISPATCH_TTL_SECONDS)
         buffered = _DISPATCH_BUFFERS.pop(key, None)
     return list(buffered[0]) if buffered else []
 
@@ -308,7 +319,7 @@ def pre_gateway_dispatch(event: Any = None, **_kwargs: Any) -> None:
             return
         now = time.monotonic()
         with _TURN_LOCK:
-            _prune(_DISPATCH_BUFFERS, now, 1)
+            _prune(_DISPATCH_BUFFERS, now, 1, DISPATCH_TTL_SECONDS)
             buffered, _ = _DISPATCH_BUFFERS.get((platform, chat_id), ([], now))
             if message_id not in buffered and len(buffered) < _MAX_DISPATCH_IDS:
                 buffered.append(message_id)

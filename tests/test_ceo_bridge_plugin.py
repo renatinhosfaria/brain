@@ -268,6 +268,31 @@ class CEOBridgePluginTests(unittest.TestCase):
 
         self.assertEqual(requests[0]["message_ids"], ["3EB0PLAIN"])
 
+    def test_stale_identifier_is_not_carried_into_a_later_turn(self) -> None:
+        """The 2026-08-30 CTWA failure: an orphan id polluted the next turn.
+
+        A message dispatched at 19:18 produced no turn, so its identifier sat
+        in the buffer and was drained 57 minutes later by the CTWA turn. Two
+        identifiers then joined to a length the turn's message could not have.
+        """
+        requests: list[dict] = []
+        clock = [1000.0]
+        with patch.object(self.tools_module.time, "monotonic", lambda: clock[0]):
+            self.dispatch(self.inbound_event("3EB0ORPHAN"))
+            clock[0] += self.tools_module.DISPATCH_TTL_SECONDS + 1
+            self.dispatch(self.inbound_event("3EB0REAL"))
+            self.register_turn("opaque-turn", requests)
+
+        self.assertEqual(requests[0]["message_ids"], ["3EB0REAL"])
+
+    def test_buffer_is_empty_after_a_drain(self) -> None:
+        requests: list[dict] = []
+        self.dispatch(self.inbound_event("3EB0AAA"))
+        self.register_turn("turn-one", requests)
+        self.register_turn("turn-two", requests)
+
+        self.assertEqual(requests[1]["message_ids"], [])
+
     def test_dispatch_hook_performs_no_io(self) -> None:
         """Premise P4: this hook runs unbounded upstream, so it must not block."""
         source = (PLUGIN_DIR / "tools.py").read_text(encoding="utf-8")

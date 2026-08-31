@@ -331,6 +331,27 @@ class ExactIdentifierCorrelationTests(CorrelationHarness):
         )
         self.assertEqual(self.rows("turn_events"), [])
 
+    def test_inconsistent_joined_set_is_recoverable_not_terminal(self) -> None:
+        """A wrong identifier set must not become a permanent verdict.
+
+        This is the shape that failed in production on 2026-08-30: a stale
+        identifier joined the real one, so the set's length could not have
+        produced the turn's message. Marking that terminal removed every
+        chance of repair.
+        """
+        self.add_event_for("3EB0STALE", "oi", 999.0)
+        self.add_event_for("3EB0REAL", "bom dia", 1000.0)
+
+        result = self.correlator_at(1000.0).register(
+            self.registration_with("bom dia", ["3EB0STALE", "3EB0REAL"])
+        )
+
+        self.assertEqual(result["correlation"], "pending")
+        self.assertEqual(self.rows("turn_events"), [])
+        self.assertEqual(
+            self.rows("whatsapp_turns")[0]["correlation_status"], "pending"
+        )
+
     def test_internal_reinvocation_creates_no_turn_row(self) -> None:
         """A Kanban-notification turn carries no identifiers (premise P2)."""
         result = self.correlator_at(1000.0).register(
