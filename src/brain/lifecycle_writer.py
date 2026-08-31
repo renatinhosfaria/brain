@@ -46,6 +46,9 @@ OUTCOME_CONFLICT = EFFECT_CONFLICT
 OUTCOME_RETRYABLE = EFFECT_RETRYABLE
 OUTCOME_IDLE = "idle"
 
+IDLE_POLL_SECONDS = 2.0
+MAX_BACKOFF_SECONDS = 60.0
+
 
 @dataclass(frozen=True)
 class WriteOutcome:
@@ -73,6 +76,9 @@ class LifecycleWriter:
         self.proof_path = proof_path
         self.schema_fingerprint = schema_fingerprint
         self.clock = clock
+        # Health-visible counters. Outcome names carry no lead information.
+        self.last_outcome: str | None = None
+        self.consecutive_failures = 0
 
     # ------------------------------------------------------------------
 
@@ -109,6 +115,18 @@ class LifecycleWriter:
 
         if outcome.outcome != OUTCOME_WOULD_APPLY:
             self.claims.report(claim.effect_id, claim.lease_token, outcome.outcome)
+
+        self.last_outcome = outcome.outcome
+        if outcome.outcome == OUTCOME_RETRYABLE:
+            self.consecutive_failures += 1
+        else:
+            self.consecutive_failures = 0
+        # Reasons are bounded codes, never a record or a message.
+        logger.info(
+            "writer settled effect: outcome=%s reason=%s",
+            outcome.outcome,
+            outcome.reason,
+        )
         return outcome
 
     # ------------------------------------------------------------------
@@ -216,6 +234,33 @@ class LifecycleWriter:
             OUTCOME_CONFLICT, claim.effect_id, reason="readback_unexpected_status"
         )
 
+    def next_delay(self, outcome: WriteOutcome, consecutive_failures: int) -> float:
+        """How long to wait before the next attempt.
+
+        A settled effect is followed immediately, since more may be waiting.
+        Repeated failure backs off so an unavailable FamaChat is not hammered,
+        capped low enough that recovery is still noticed within a minute.
+        """
+        if outcome.outcome == OUTCOME_RETRYABLE and consecutive_failures > 0:
+            return min(IDLE_POLL_SECONDS * 2**consecutive_failures, MAX_BACKOFF_SECONDS)
+        if outcome.outcome == OUTCOME_IDLE:
+            return IDLE_POLL_SECONDS
+        return 0.0
+
+    def health(self) -> dict[str, object]:
+        """Operational state only: no lead, phone, client id or status value."""
+        proof = self._load_proof()
+        return {
+            "status": "ok",
+            "mode": MODE_WRITE if self.write_enabled else "dry_run",
+            "conditional_write_proof": (
+                "pass" if proof and proof.get("verdict") == "PASS" else "absent"
+            ),
+            "schema_fingerprint_known": self.schema_fingerprint is not None,
+            "last_outcome": self.last_outcome,
+            "consecutive_failures": self.consecutive_failures,
+        }
+
     def _load_proof(self) -> dict | None:
         if self.proof_path is None:
             return None
@@ -223,3 +268,41 @@ class LifecycleWriter:
             return json.loads(self.proof_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+
+
+def main() -> int:
+    """Entrypoint for brain-lifecycle-writer.service.
+
+    Deliberately refuses to start rather than running unconfigured: a writer
+    that silently does nothing looks identical to one that is working, and the
+    difference only shows up as leads whose status never moves.
+    """
+    import os
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+
+    missing = [
+        name
+        for name in ("BRAIN_WRITER_TOKEN", "BRAIN_URL", "FAMACHAT_MCP_URL")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        logger.error("writer is not configured: missing %s", ", ".join(missing))
+        return 1
+
+    write_enabled = os.environ.get("BRAIN_LIFECYCLE_WRITE_ENABLED") == "true"
+    logger.info(
+        "lifecycle writer starting in %s mode",
+        MODE_WRITE if write_enabled else "dry_run",
+    )
+    logger.error(
+        "runtime wiring is not implemented yet; the writer refuses to run "
+        "rather than appear healthy while doing nothing"
+    )
+    return 1
+
+
+if __name__ == "__main__":  # pragma: no cover - process entrypoint
+    raise SystemExit(main())

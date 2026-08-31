@@ -392,6 +392,120 @@ class WriterTests(unittest.TestCase):
         self.assertEqual(fixture["tools"]["get"], fc.GET_CLIENT_TOOL)
         self.assertEqual(fixture["schema_fingerprint"], FINGERPRINT)
 
+    # ------------------------------------------------------------------
+    # Crash after the write, before the result was reported
+
+    def test_a_crash_after_writing_does_not_write_twice(self) -> None:
+        """The dangerous window: FamaChat changed, Brain never heard about it.
+
+        A real lease is used here rather than a fake, because what makes this
+        safe is the lease expiring and the next writer re-reading, not anything
+        the crashed process could have done.
+        """
+        import tempfile as _tempfile
+
+        from brain.lifecycle_api import LifecycleClaimService
+        from brain.runtime_db import RuntimeDatabase
+        from brain.transport_models import RuntimeIds
+
+        with _tempfile.TemporaryDirectory() as directory:
+            runtime = RuntimeDatabase(Path(directory) / "r.db", timeout_seconds=1.0)
+            runtime.initialize()
+            ids = RuntimeIds(b"r" * 32, b"t" * 32)
+            contact = ids.contact_key(BRAIN_PHONE)
+            origin = ids.event_id("observer-a", "3EB0CTWA")
+            turn = "waturn_" + "a" * 64
+            runtime.write(
+                lambda c: c.execute(
+                    "INSERT INTO transport_events (event_id, observer_device_id, "
+                    "contact_key, direction, received_at, message_timestamp, "
+                    "body_hmac, body_length, native_type, transport_kind, created_at) "
+                    "VALUES (?, 'o', ?, 'inbound', 1.1, 1.0, 'h', 2, 'x', "
+                    "'ctwa_candidate', 1.0)",
+                    (origin, contact),
+                )
+            )
+            runtime.write(
+                lambda c: c.execute(
+                    "INSERT INTO whatsapp_turns (wa_turn_id, hermes_session_id, "
+                    "session_key_hmac, contact_key, body_hmac, body_length, "
+                    "turn_timestamp, correlation_status, created_at) "
+                    "VALUES (?, 'g', 'k', ?, 'y', 2, 1.0, 'correlated', 1.0)",
+                    (turn, contact),
+                )
+            )
+            runtime.write(
+                lambda c: c.execute(
+                    "INSERT INTO lead_lifecycles (lifecycle_id, origin_event_id, "
+                    "wa_turn_id, contact_key, client_id, phase, last_proven_status, "
+                    "created_at, updated_at) VALUES ('fx', ?, ?, ?, 12800, 'active', "
+                    "'Sem Atendimento', 1.0, 1.0)",
+                    (origin, turn, contact),
+                )
+            )
+            runtime.write(
+                lambda c: c.execute(
+                    "INSERT INTO lifecycle_effects (effect_id, lifecycle_id, "
+                    "expected_status, target_status, cause, state, created_at, "
+                    "updated_at) VALUES ('fx_e', 'fx', 'Sem Atendimento', "
+                    "'Não Respondeu', 'first_t1_send_success', 'pending', 1.0, 1.0)"
+                )
+            )
+
+            now = [1000.0]
+            claims = LifecycleClaimService(
+                runtime,
+                ids,
+                resolve_phone=lambda key: BRAIN_PHONE,
+                mode="write",
+                lease_seconds=60.0,
+                clock=lambda: now[0],
+            )
+
+            patches: list[dict] = []
+            record = dict(CLIENT_BODY)
+
+            def transport(tool, arguments):
+                if tool == "fc_patch_clientes_by_id":
+                    patches.append(arguments)
+                    record["status"] = arguments["body"]["status"]
+                    return {"status": 200, "body": {}}
+                return {"status": 200, "body": dict(record)}
+
+            self.write_proof()
+            self.transport = transport
+
+            def build():
+                return LifecycleWriter(
+                    claims,
+                    FamaChatClient(transport),
+                    write_enabled=True,
+                    proof_path=self.proof_path,
+                    schema_fingerprint=FINGERPRINT,
+                )
+
+            # The write lands, then the process dies before reporting.
+            crashed = build()
+            claim = claims.claim()
+            crashed._apply(claim)
+            self.assertEqual(len(patches), 1)
+            self.assertEqual(record["status"], "Não Respondeu")
+
+            # Nothing can be claimed until the lease expires.
+            self.assertIsNone(claims.claim())
+            now[0] += 61.0
+
+            outcome = build().run_once()
+
+            self.assertEqual(outcome.outcome, "already_applied")
+            self.assertEqual(len(patches), 1, "the record must not be written twice")
+            proven = runtime.read(
+                lambda c: c.execute(
+                    "SELECT last_proven_status FROM lead_lifecycles"
+                ).fetchone()[0]
+            )
+            self.assertEqual(proven, "Não Respondeu")
+
     def test_the_writer_imports_no_model_or_provider(self) -> None:
         """Spec 13: the writer is deterministic code, never a model.
 
