@@ -51,3 +51,18 @@ class LifecycleRecord:
     client_id: int
     phase: str
     last_proven_status: str | None
+
+
+@dataclass(frozen=True)
+class DeliveryMatch:
+    """Outcome of looking for the one delivered obligation that proves T1.
+
+    ``not_proven`` and ``ambiguous`` are both refusals: spec section 15 allows
+    no guess between indistinguishable ledger rows, because the consequence is
+    a CRM status the lead never earned.
+    """
+
+    status: str
+    obligation_id: str | None = None
+    delivered_at: float | None = None
+    reason: str | None = None

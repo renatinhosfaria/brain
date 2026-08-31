@@ -123,7 +123,11 @@ class BrainService:
             )
         self.lifecycle: LifecycleEngine | None = None
         if self.runtime_ids is not None:
-            self.lifecycle = LifecycleEngine(self.runtime, self.runtime_ids)
+            self.lifecycle = LifecycleEngine(
+                self.runtime,
+                self.runtime_ids,
+                runtime_secret=settings.runtime_hmac_secret,
+            )
         if self.turn_correlation is not None:
             self.transport_service.on_contact_observed = (
                 self.turn_correlation.reevaluate_contact

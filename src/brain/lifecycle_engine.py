@@ -11,11 +11,12 @@ writer is a separate service holding the only credential that can apply it.
 
 from __future__ import annotations
 
+import hmac
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
-from .hermes_evidence import BoundTask, TerminalRun
+from .hermes_evidence import BoundTask, DeliveredObligation, TerminalRun
 from .lifecycle_models import (
     BIND_CONFLICT,
     BIND_CREATED,
@@ -24,15 +25,22 @@ from .lifecycle_models import (
     CREATING_DECISION,
     FACT_CLIENT_CREATED,
     FACT_FIRST_HUMAN_INBOUND,
+    FACT_FIRST_T1_SEND_SUCCESS,
     PHASE_ACTIVE,
     TRANSPORT_CTWA,
     TRANSPORT_ORDINARY,
     BindResult,
+    DeliveryMatch,
 )
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
+from .turn_correlation import session_key_hmac
 
 CORRELATED = "correlated"
+DELIVERED_STATE = "delivered"
+PROVEN = "proven"
+NOT_PROVEN = "not_proven"
+AMBIGUOUS = "ambiguous"
 KANBAN_WATERMARK = "kanban_run_watermark"
 STATUS_SEM_ATENDIMENTO = "Sem Atendimento"
 
@@ -54,10 +62,12 @@ class LifecycleEngine:
         runtime: RuntimeDatabase,
         runtime_ids: RuntimeIds,
         *,
+        runtime_secret: bytes = b"",
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.runtime = runtime
         self.runtime_ids = runtime_ids
+        self.runtime_secret = bytes(runtime_secret)
         self.clock = clock
 
     # ------------------------------------------------------------------
@@ -256,6 +266,124 @@ class LifecycleEngine:
             return repaired
 
         return self.runtime.write(write)
+
+    def prove_first_t1_send(
+        self,
+        lifecycle_id: str,
+        reno_run: TerminalRun,
+        obligations: Sequence[DeliveredObligation],
+    ) -> DeliveryMatch:
+        """Prove the first outbound of this lifecycle actually left Hermes.
+
+        Spec section 15. The proof is one delivered obligation whose content is
+        identical to the Reno run's response_ready, on the same authorised
+        session, no earlier than the run that produced it. Zero matches or
+        several indistinguishable ones are NOT_PROVEN and must not move the CRM.
+
+        Content is compared through the body HMAC and only in memory. Neither
+        the reply nor the ledger row is copied into Brain's database or logs.
+        """
+        now = self.clock()
+        response_ready = reno_run.response_ready
+        if not isinstance(response_ready, str) or not response_ready.strip():
+            return DeliveryMatch(NOT_PROVEN, reason="no_response_ready")
+        if not self.runtime_secret:
+            return DeliveryMatch(NOT_PROVEN, reason="no_runtime_secret")
+
+        expected_body = self.runtime_ids.body_hmac(response_ready)
+        earliest = reno_run.started_at or reno_run.ended_at
+
+        def write(conn: sqlite3.Connection) -> DeliveryMatch:
+            row = conn.execute(
+                "SELECT turn.session_key_hmac AS commitment "
+                "FROM lead_lifecycles AS lifecycle "
+                "JOIN whatsapp_turns AS turn "
+                "ON turn.wa_turn_id = lifecycle.wa_turn_id "
+                "WHERE lifecycle.lifecycle_id = ?",
+                (lifecycle_id,),
+            ).fetchone()
+            if row is None or not row["commitment"]:
+                return DeliveryMatch(NOT_PROVEN, reason="no_session_commitment")
+            commitment = str(row["commitment"])
+
+            matches = [
+                obligation
+                for obligation in obligations
+                if self._delivery_matches(
+                    obligation, commitment, expected_body, earliest
+                )
+            ]
+            if not matches:
+                return DeliveryMatch(NOT_PROVEN, reason="no_match")
+            if len(matches) > 1:
+                return DeliveryMatch(AMBIGUOUS, reason="multiple_matches")
+
+            matched = matches[0]
+            self._record_fact(
+                conn,
+                lifecycle_id,
+                FACT_FIRST_T1_SEND_SUCCESS,
+                evidence_ref=matched.obligation_id,
+                observed_at=matched.updated_at or now,
+                now=now,
+            )
+            return DeliveryMatch(
+                PROVEN,
+                obligation_id=matched.obligation_id,
+                delivered_at=matched.updated_at,
+            )
+
+        return self.runtime.write(write)
+
+    def _delivery_matches(
+        self,
+        obligation: DeliveredObligation,
+        commitment: str,
+        expected_body: str,
+        earliest: float | None,
+    ) -> bool:
+        if obligation.state != DELIVERED_STATE or not obligation.session_key:
+            return False
+        if not hmac.compare_digest(
+            session_key_hmac(self.runtime_secret, obligation.session_key), commitment
+        ):
+            return False
+        if earliest is not None and (
+            obligation.updated_at is None or obligation.updated_at < earliest
+        ):
+            # An outbound predating the run cannot be what the run produced.
+            return False
+        return hmac.compare_digest(
+            self.runtime_ids.body_hmac(obligation.content), expected_body
+        )
+
+    def lifecycles_with_delivery_proof_at_risk(
+        self, *, now: float | None = None, retention_seconds: float = 7 * 86400
+    ) -> list[str]:
+        """Active lifecycles whose delivery evidence is about to expire upstream.
+
+        Hermes keeps delivery obligations for a bounded period. Once the row is
+        gone the send can never be proven, and spec 15 forbids inferring it, so
+        the only correct action is to alert while the evidence still exists.
+        """
+        moment = self.clock() if now is None else now
+        cutoff = moment - retention_seconds * 0.8
+
+        def read(conn: sqlite3.Connection) -> list[str]:
+            return [
+                str(row["lifecycle_id"])
+                for row in conn.execute(
+                    "SELECT lifecycle_id FROM lead_lifecycles "
+                    "WHERE phase = ? AND created_at <= ? AND NOT EXISTS ("
+                    "  SELECT 1 FROM lifecycle_facts AS fact "
+                    "  WHERE fact.lifecycle_id = lead_lifecycles.lifecycle_id "
+                    "  AND fact.fact_type = ?) "
+                    "ORDER BY created_at, lifecycle_id",
+                    (PHASE_ACTIVE, cutoff, FACT_FIRST_T1_SEND_SUCCESS),
+                )
+            ]
+
+        return self.runtime.read(read)
 
     def _claim_human_fact(
         self,
