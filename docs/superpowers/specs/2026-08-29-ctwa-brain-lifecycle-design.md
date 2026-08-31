@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-29  
 **Amended:** 2026-08-30 (Amendment 1 — sections 3, 8, 10.1, 10.2, 10.3; see section 26)  
-**Status:** Approved design, amended by production evidence; Plans 1 and 2 implemented  
+**Status:** Approved design, amended by production evidence; Plans 1, 2 and the lifecycle engine implemented  
 **Primary repository:** `renatinhosfaria/brain`  
 **Operational profile repository:** `renatinhosfaria/hermes`
 
@@ -158,6 +158,23 @@ Two properties of the stored attribution follow from the same evidence, and matt
 
 - **Grouping by advertisement works without the raw identifier.** All four events share one `source_id_hmac`, because the digest is deterministic: the same advertisement always yields the same value. Leads can be grouped, counted, and compared per creative.
 - **Naming the advertisement does not.** Only the digest is stored, so nothing joins a lead to a campaign in Meta Ads Manager. That is a direct consequence of section 6.4, not an oversight. If campaign attribution is wanted, the way to get it without weakening the privacy model is a lookup built by digesting known advertisement IDs, never by persisting the raw value.
+
+### 3.2 Production evidence from 2026-08-31
+
+**P13 — FamaChat had no conditional status write, and then gained one.** The captured `fc_patch_clientes_by_id` schema accepted only `id`, a free-form `body` and `query`. None of the 277 tools declared a version, ETag, If-Match or expected-state field, and none declared body properties at all: the MCP mirrors the REST API generically. The inspection verdict was `NO_ATOMIC_PRECONDITION`, which under section 17 makes indefinite dry-run the correct terminal state.
+
+The operator owns the FamaChat and MCP source and implemented a compare-and-set instead. `PATCH /api/clientes/:id` now accepts an optional `expectedStatus`, applied through a single `UPDATE ... WHERE id = ? AND status = ?`, answering 409 with the current status when the predicate no longer holds.
+
+**P14 — The conditional write is proven through the path the writer will use.** With the disposable client the operator designated, at broker 35 and starting at `Sem Atendimento`:
+
+- a conditional change to `Não Respondeu` with a true predicate applied, and read back;
+- replaying the now-false predicate `Sem Atendimento` to reach `Em Atendimento` was **refused with 409**, and the record stayed at `Não Respondeu`.
+
+Strategy `expected_status_in_body`, field `expectedStatus`, refusal status 409, schema fingerprint `4da4e773feb862db…`. `FAMACHAT_CONDITIONAL_WRITE` is **PASS**, and section 17 no longer blocks write mode. The recorded fingerprint is what the write gate compares before starting: a later schema change invalidates the proof, because it would no longer describe the server in front of the writer.
+
+**P15 — Behavioural proof caught two deploy faults that no test suite could.** Both the MCP and the API passed their own checks, lint, build and unit tests, including a real PostgreSQL concurrency test showing exactly one 200 and one 409. Both nevertheless ran compiled artefacts older than the source, so the field was declared and the predicate ignored in production. The first attempt at this proof returned 200 to an impossible predicate and applied it.
+
+This is the reason section 17 refuses a schema declaration as evidence and requires the stale-predicate experiment across the real transport. A server that accepts the field and ignores it is indistinguishable from a correct one until something replays a predicate that must fail.
 
 ## 4. Architecture
 
