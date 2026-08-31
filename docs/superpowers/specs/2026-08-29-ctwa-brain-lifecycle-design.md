@@ -131,9 +131,26 @@ Two consequences follow for the design:
 - Keying the buffer on `chat_id` is fragile exactly where the project cannot afford it, at the first contact from an advertisement.
 - Treating an empty buffer as terminal `uncorrelatable` turned a recoverable miss into a permanent verdict. That conflation, introduced to keep Kanban-notification turns from accumulating pending rows, needs a discriminator that does not depend on the buffer being reliable.
 
-`RAW_CTWA_CAPTURE` is **PASS**. `CONVERSATION_CONTEXT_E2E` remains **FAIL** until this is fixed and a further controlled CTWA passes.
+`RAW_CTWA_CAPTURE` is **PASS**. `CONVERSATION_CONTEXT_E2E` was **FAIL** here; premise P11 records it passing after the fix.
 
 Separately and unrelated to this amendment, the Cadastro worker's `conversation_phone` fallback was denied with `AUTH_ORIGIN_AMBIGUOUS` during the same lead, which is what produced its degraded reply. That is pre-existing worker-origin authorization behaviour, not correlation.
+
+**P11 — The cause of P10 was a stale buffered identifier, and the fixed path closes the Stage 3 gate.**
+
+Root cause, reconstructed from stored evidence rather than instrumentation. A message at 19:18 was dispatched but produced no agent turn, so its identifier stayed in the buffer, which had inherited the turn map's one-hour TTL. Fifty-seven minutes later the CTWA turn drained both that orphan and its own identifier. Both resolved, both belonged to the right contact, but their joined length could not have produced the turn's message, so the turn was marked `uncorrelatable` — a terminal state. Every competing hypothesis was refuted by data first: ordering, an unknown contact, a stale plugin, and a `chat_id` addressing mismatch, the last by confirming both events belonged to the same contact and that the adapter passes `remoteJid` through unchanged.
+
+Two defects, fixed independently. The buffer now expires on its own timescale (60 seconds, covering Hermes' debounce and far below an orphan's lifetime), and an inconsistent joined set resolves to `pending` rather than terminal, since the set is wrong rather than the turn.
+
+A second controlled Meta Ads click then produced, end to end:
+
+- `ctwa_candidate` captured with `source_app=instagram`;
+- the turn `correlated`, with its `turn_events` mapping persisted to the CTWA event;
+- `conversation_context()` reaching Brain and returning `allow`;
+- Porteiro, Cadastro, and Reno cards all carrying one identical origin turn, with Porteiro and Cadastro reaching `done`.
+
+**Stage 3 gates: `OBSERVER_COEXISTENCE`, `RAW_CTWA_CAPTURE`, `TURN_CORRELATION_CASES`, `KANBAN_IDEMPOTENCY`, and `CONVERSATION_CONTEXT_E2E` are all PASS**, on a lead originating from a real advertisement.
+
+One unexplained observation is recorded rather than dismissed. An earlier CTWA turn registered `body_length=125` for a 62-character transport event, meaning Hermes saw 63 characters more than the observer. It suggests the platform prefixes ad context onto the message text in some cases. It did not occur in the passing run, but if it recurs the content consistency check will reject the joined set and the turn will sit `pending`. It needs its own controlled observation before section 8.3 can rely on that check.
 
 ## 4. Architecture
 
