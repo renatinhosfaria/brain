@@ -334,6 +334,8 @@ class TransportService:
         # Set by BrainService to re-resolve this contact's pending turns. Kept
         # as a callback so ingestion stays independent of correlation.
         self.on_contact_observed = on_contact_observed
+        # Set by BrainService to derive lifecycle facts from the new event.
+        self.on_event_ingested: Callable[[str], object] | None = None
 
     def ingest(self, payload: object) -> dict[str, object]:
         envelope = TransportEnvelope.parse(payload)
@@ -358,7 +360,22 @@ class TransportService:
         except sqlite3.Error as exc:
             raise DatabaseUnavailable() from exc
         self._settle_waiting_turns(envelope.contact_key)
+        self._observe_lifecycle(envelope.event_id)
         return {"status": "ok", "event_id": envelope.event_id, "duplicate": duplicate}
+
+    def _observe_lifecycle(self, event_id: str) -> None:
+        """Derive lifecycle facts, best-effort and after the durable write.
+
+        Same contract as turn re-evaluation: the observer's acknowledgement
+        must never depend on lifecycle work succeeding. Reconciliation repairs
+        whatever this misses.
+        """
+        if self.on_event_ingested is None:
+            return
+        try:
+            self.on_event_ingested(event_id)
+        except Exception:  # noqa: BLE001 - ingestion durability wins
+            logger.warning("lifecycle observation failed after transport ingestion")
 
     def _settle_waiting_turns(self, contact_key: str) -> None:
         """Re-resolve pending turns now that one more event exists.

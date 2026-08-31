@@ -176,6 +176,133 @@ class LifecycleEngine:
 
     # ------------------------------------------------------------------
 
+    def observe_transport_event(self, event_id: str) -> bool:
+        """Turn one newly ingested event into a human-inbound fact, at most once.
+
+        Called after transport ingestion has already committed. Spec section 14
+        wants the fact derived from evidence, so this only reads what is stored
+        and never trusts the caller about what the event is.
+        """
+        now = self.clock()
+
+        def write(conn: sqlite3.Connection) -> bool:
+            event = conn.execute(
+                "SELECT contact_key, transport_kind, "
+                "COALESCE(message_timestamp, received_at) AS at "
+                "FROM transport_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if event is None or str(event["transport_kind"]) != TRANSPORT_ORDINARY:
+                # A second ad-attributed message is attribution evidence, never
+                # a reply (spec 7.3).
+                return False
+            return self._claim_human_fact(
+                conn,
+                contact_key=str(event["contact_key"] or ""),
+                event_id=event_id,
+                observed_at=event["at"],
+                now=now,
+            )
+
+        return self.runtime.write(write)
+
+    def repair_human_inbound_facts(self) -> int:
+        """Create human facts that ingestion missed. Returns how many were added.
+
+        Ingestion deliberately does not block on lifecycle work: an event is
+        acknowledged even when the callback raises. Reconciliation is what makes
+        that safe rather than lossy.
+        """
+        now = self.clock()
+
+        def write(conn: sqlite3.Connection) -> int:
+            pending = conn.execute(
+                "SELECT lifecycle.lifecycle_id, lifecycle.contact_key, "
+                "COALESCE(origin.message_timestamp, origin.received_at) AS origin_at "
+                "FROM lead_lifecycles AS lifecycle "
+                "JOIN transport_events AS origin "
+                "ON origin.event_id = lifecycle.origin_event_id "
+                "WHERE lifecycle.phase = ? AND NOT EXISTS ("
+                "  SELECT 1 FROM lifecycle_facts AS fact "
+                "  WHERE fact.lifecycle_id = lifecycle.lifecycle_id "
+                "  AND fact.fact_type = ?)",
+                (PHASE_ACTIVE, FACT_FIRST_HUMAN_INBOUND),
+            ).fetchall()
+            repaired = 0
+            for lifecycle in pending:
+                row = conn.execute(
+                    "SELECT event_id, COALESCE(message_timestamp, received_at) AS at "
+                    "FROM transport_events "
+                    "WHERE contact_key = ? AND transport_kind = ? "
+                    "AND COALESCE(message_timestamp, received_at) > ? "
+                    "ORDER BY at, event_id LIMIT 1",
+                    (
+                        lifecycle["contact_key"],
+                        TRANSPORT_ORDINARY,
+                        lifecycle["origin_at"],
+                    ),
+                ).fetchone()
+                if row is None:
+                    continue
+                self._record_fact(
+                    conn,
+                    str(lifecycle["lifecycle_id"]),
+                    FACT_FIRST_HUMAN_INBOUND,
+                    evidence_ref=str(row["event_id"]),
+                    observed_at=float(row["at"]),
+                    now=now,
+                )
+                repaired += 1
+            return repaired
+
+        return self.runtime.write(write)
+
+    def _claim_human_fact(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        contact_key: str,
+        event_id: str,
+        observed_at: object,
+        now: float,
+    ) -> bool:
+        """Attach the event to this contact's newest active lifecycle it postdates.
+
+        Newest rather than any: a contact may have had an earlier campaign, and
+        an event proves a reply to the lifecycle it actually followed.
+        """
+        if not contact_key or observed_at is None:
+            return False
+        lifecycle = conn.execute(
+            "SELECT lifecycle.lifecycle_id "
+            "FROM lead_lifecycles AS lifecycle "
+            "JOIN transport_events AS origin "
+            "ON origin.event_id = lifecycle.origin_event_id "
+            "WHERE lifecycle.contact_key = ? AND lifecycle.phase = ? "
+            "AND COALESCE(origin.message_timestamp, origin.received_at) < ? "
+            "ORDER BY COALESCE(origin.message_timestamp, origin.received_at) DESC "
+            "LIMIT 1",
+            (contact_key, PHASE_ACTIVE, observed_at),
+        ).fetchone()
+        if lifecycle is None:
+            return False
+        lifecycle_id = str(lifecycle["lifecycle_id"])
+        already = conn.execute(
+            "SELECT 1 FROM lifecycle_facts WHERE lifecycle_id = ? AND fact_type = ?",
+            (lifecycle_id, FACT_FIRST_HUMAN_INBOUND),
+        ).fetchone()
+        if already is not None:
+            return False
+        self._record_fact(
+            conn,
+            lifecycle_id,
+            FACT_FIRST_HUMAN_INBOUND,
+            evidence_ref=event_id,
+            observed_at=float(observed_at),
+            now=now,
+        )
+        return True
+
     def _materialise_arrived_human(
         self,
         conn: sqlite3.Connection,

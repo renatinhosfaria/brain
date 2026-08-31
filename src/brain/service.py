@@ -24,6 +24,7 @@ from .authorization import (
 from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
+from .lifecycle_engine import LifecycleEngine
 from .projection import ProjectedMessage, project_rows
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
@@ -120,9 +121,16 @@ class BrainService:
                 runtime_secret=settings.runtime_hmac_secret,
                 observer_device_ids=settings.observer_device_ids,
             )
+        self.lifecycle: LifecycleEngine | None = None
+        if self.runtime_ids is not None:
+            self.lifecycle = LifecycleEngine(self.runtime, self.runtime_ids)
         if self.turn_correlation is not None:
             self.transport_service.on_contact_observed = (
                 self.turn_correlation.reevaluate_contact
+            )
+        if self.lifecycle is not None:
+            self.transport_service.on_event_ingested = (
+                self.lifecycle.observe_transport_event
             )
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
