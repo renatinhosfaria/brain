@@ -74,9 +74,9 @@ The proven CTWA historical signature for the tested Meta Ads path is:
 
 - `externalAdReply` present;
 - `sourceType = ad`;
-- `sourceApp = instagram` in the tested case;
+- `sourceApp = instagram` in the tested case, extended to `facebook` by premise P12;
 - `sourceId` present;
-- `sourceUrl` present and Instagram-hosted in the tested case;
+- `sourceUrl` present and Instagram-hosted in the tested case, also Facebook-hosted per premise P12;
 - `ctwaClid` present;
 - `showAdAttribution = true`;
 - `clickToWhatsappCall = true`;
@@ -151,6 +151,13 @@ A second controlled Meta Ads click then produced, end to end:
 **Stage 3 gates: `OBSERVER_COEXISTENCE`, `RAW_CTWA_CAPTURE`, `TURN_CORRELATION_CASES`, `KANBAN_IDEMPOTENCY`, and `CONVERSATION_CONTEXT_E2E` are all PASS**, on a lead originating from a real advertisement.
 
 One unexplained observation is recorded rather than dismissed. An earlier CTWA turn registered `body_length=125` for a 62-character transport event, meaning Hermes saw 63 characters more than the observer. It suggests the platform prefixes ad context onto the message text in some cases. It did not occur in the passing run, but if it recurs the content consistency check will reject the joined set and the turn will sit `pending`. It needs its own controlled observation before section 8.3 can rely on that check.
+
+**P12 — The detector holds for `sourceApp = facebook`, not only `instagram`.** Four CTWA events were captured across 2026-08-30. Two carried `source_app=instagram` with `source_url_hostname=www.instagram.com` and a 40-character URL; two carried `source_app=facebook` with `source_url_hostname=fb.me` and a 23-character URL. Every one produced the identical remaining signature: `source_type=ad`, `source_id` present at 14 characters, `ctwa_clid` present at 132 characters, `show_ad_attribution=true`, `click_to_whatsapp_call=true`, `contains_auto_reply=false`. Section 7.1's detector classified all four as `ctwa_candidate` without change, so `sourceApp` is attribution metadata and never part of the semantic test.
+
+Two properties of the stored attribution follow from the same evidence, and matter for how it can be used:
+
+- **Grouping by advertisement works without the raw identifier.** All four events share one `source_id_hmac`, because the digest is deterministic: the same advertisement always yields the same value. Leads can be grouped, counted, and compared per creative.
+- **Naming the advertisement does not.** Only the digest is stored, so nothing joins a lead to a campaign in Meta Ads Manager. That is a direct consequence of section 6.4, not an oversight. If campaign attribution is wanted, the way to get it without weakening the privacy model is a lookup built by digesting known advertisement IDs, never by persisting the raw value.
 
 ## 4. Architecture
 
