@@ -1,8 +1,8 @@
 # CTWA Brain Lifecycle Architecture
 
 **Date:** 2026-08-29  
-**Amended:** 2026-08-30 (Amendment 1 — sections 3, 8, 10.1, 10.2, 10.3; see section 26)  
-**Status:** Approved design, amended by production evidence; Plans 1, 2 and the lifecycle engine implemented  
+**Amended:** 2026-08-30 (Amendment 1 — sections 3, 8, 10.1, 10.2, 10.3); 2026-08-31 (Amendment 2 — section 2.5 and write descope; see section 26)  
+**Status:** Approved design, amended by production evidence. Automated lifecycle writing is descoped by Amendment 2; capture and context remain in scope  
 **Primary repository:** `renatinhosfaria/brain`  
 **Operational profile repository:** `renatinhosfaria/hermes`
 
@@ -54,9 +54,22 @@ Brain may inspect Hermes `state.db` and `kanban.db` only through read-only conne
 
 Brain may decide what lifecycle state is desired, but it must never assume that its cached state is newer than FamaChat. Any automated write must validate the live FamaChat record and must never downgrade a status changed by a human or another process.
 
-### 2.5 LLMs do not own lifecycle transitions
+### 2.5 Lifecycle transitions have a named owner
 
-CEO, Porteiro, Cadastro, and Reno may produce judgments and commercial content inside their scoped duties, but `Sem Atendimento -> Não Respondeu -> Em Atendimento` is a deterministic code path. No model is trusted to remember or execute those transitions directly.
+CEO, Porteiro, Cadastro, and Reno may produce judgments and commercial content inside their scoped duties. Lifecycle transitions are a separate concern, and this section names who owns them.
+
+**Superseded rule (Amendment 1 and earlier):** `Sem Atendimento -> Não Respondeu -> Em Atendimento` is a deterministic code path, and no model is trusted to remember or execute those transitions directly.
+
+**Current rule (Amendment 2):** Reno owns the transitions and executes them through the FamaChat MCP.
+
+The original rule was written for an architecture in which Brain owned the transitions deterministically. Amendment 2 descopes that engine. Once it is gone, the alternative to a model is not a deterministic path — it is a human who may also forget, and who is not present in the conversation at the moment the reply arrives. The question therefore changes from *whether* a model may write to *how the damage is bounded when it writes wrongly*, which is what the constraints below exist to answer.
+
+Two constraints bound that damage, and neither may depend on the model remembering them:
+
+1. **Every status write carries `expectedStatus`.** FamaChat refuses a write whose predicate no longer matches, so a human's concurrent change can never be silently overwritten. This makes section 2.4 an enforced server-side property rather than a prompt instruction. The mechanism is already proven in production (premise P14).
+2. **Only forward transitions are valid.** The permitted set stays exactly `Sem Atendimento -> Não Respondeu`, `Sem Atendimento -> Em Atendimento`, and `Não Respondeu -> Em Atendimento`. `expectedStatus` alone does not enforce this: a predicate-matching backward write is accepted by the server today. Until the enforcement point is decided (FamaChat-side validation in `PATCH /api/clientes/:id`, or the Reno prompt alone), this constraint is guarded only by the prompt, and that gap is recorded here deliberately rather than left implicit.
+
+This is an accepted-risk decision made by the operator with the superseded rule in view.
 
 ## 3. Proven premises
 
@@ -964,3 +977,24 @@ Downstream documents requiring updates before implementation:
 - Plan 4 (`2026-08-29-ctwa-lifecycle-engine.md`), Task 2 — origin-turn resolution in `parse_whatsapp_idempotency_key` and `bind_completed_cadastro`.
 
 Implementation status: the amendment was implemented and deployed on 2026-08-30, and premise P8 records the production verification. The disposable `ctwa-keyid-spike` plugin used to produce P1 and P2 has been removed. Plan 4 is unchanged in code and still describes the binding this amendment makes reachable.
+
+
+### Amendment 2 — 2026-08-31
+
+Cause: an operator decision to descope automated lifecycle writing, taken after a controlled CTWA on 2026-08-31 exposed three defects on the correlation spine and one structural weakness in how the plan verifies itself.
+
+**What the evidence showed.** A single Brain response of 10.153 ms against the plugin's 5 s timeout destroyed an entire turn silently: `pre_llm_call` clears the retained turn before re-registering it, so a timeout leaves the CEO with no turn and no origin, and every downstream symptom — `conversation_context` unavailable, three Kanban cards without a shared key, no lifecycle — follows from that one cause. Two independent defects were found alongside it: the `uncorrelatable` early return in section 8's registration precedes the existing-turn lookup, and `list_bound_tasks` filtered on `COALESCE(current_run_id, 0) > ?`, which excludes every completed task and therefore all 21 of the bound tasks in production. The lifecycle engine had never created a single lifecycle.
+
+**Why descope rather than repair.** The expensive half of this architecture exists to make an *automated write* safe. Reading a client's status was never the hard part and never needed it: Reno already holds `fc_get_clientes_by_id` and reads the status directly. Removing the automated write removes the requirement for cryptographically exact turn correlation, and with it the entire fragile spine.
+
+| Area | Change |
+| --- | --- |
+| 2.5 | Rewritten. Reno owns lifecycle transitions, bounded by mandatory `expectedStatus` and a forward-only transition set. Supersedes the rule that no model may execute a transition. |
+| Scope | Automated lifecycle writing is out of scope. The lifecycle engine, the turn-correlation spine, the Kanban reconciler, and the writer service are removed. |
+| Master plan | Stages 5 and 7 are dropped. Stages 0, 2, 3, 4 and 6 stand. |
+
+**What did not change:** the privacy model of section 6, the CTWA detector of 7.1, the immutability of the upstream Hermes installation, the observer, the integrity checker, and section 2.4 — which Amendment 2 in fact strengthens, since `expectedStatus` moves it from a Brain-side intention to a server-enforced property.
+
+**What is deliberately kept from the removed work.** The FamaChat conditional write proven under Stage 6 (premise P14) is not discarded: it becomes the mechanism that makes Reno's writes safe. The proof, its schema fingerprint, and the integrity checker all remain in use.
+
+**Known gap, accepted:** `expectedStatus` prevents overwriting a concurrent change but does not prevent a predicate-matching backward transition. Section 2.5 records this and names the two possible enforcement points; the choice is open at the time of this amendment.
