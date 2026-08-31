@@ -18,11 +18,15 @@ from collections.abc import Callable, Sequence
 
 from .hermes_evidence import BoundTask, DeliveredObligation, TerminalRun
 from .lifecycle_models import (
+    ALLOWED_TRANSITIONS,
     BIND_CONFLICT,
     BIND_CREATED,
     BIND_NOOP,
     BIND_SKIPPED,
     CREATING_DECISION,
+    EFFECT_BRAIN_OWNED,
+    EFFECT_PENDING,
+    EFFECT_SUPERSEDED,
     FACT_CLIENT_CREATED,
     FACT_FIRST_HUMAN_INBOUND,
     FACT_FIRST_T1_SEND_SUCCESS,
@@ -31,6 +35,7 @@ from .lifecycle_models import (
     TRANSPORT_ORDINARY,
     BindResult,
     DeliveryMatch,
+    desired_status,
 )
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
@@ -384,6 +389,97 @@ class LifecycleEngine:
             ]
 
         return self.runtime.read(read)
+
+    def recompute_effects(self, lifecycle_id: str) -> str | None:
+        """Bring this lifecycle's pending effect in line with its current facts.
+
+        Spec section 16. An effect exists only when the desired status differs
+        from the last status actually proven in FamaChat, and only for the three
+        authorised transitions. A newer fact supersedes an effect the writer has
+        not taken yet; one it already acted on is left alone, because only the
+        writer knows what happened to it.
+        """
+        now = self.clock()
+
+        def write(conn: sqlite3.Connection) -> str | None:
+            lifecycle = conn.execute(
+                "SELECT phase, last_proven_status FROM lead_lifecycles "
+                "WHERE lifecycle_id = ?",
+                (lifecycle_id,),
+            ).fetchone()
+            if lifecycle is None or str(lifecycle["phase"]) != PHASE_ACTIVE:
+                return None
+
+            current = str(lifecycle["last_proven_status"] or "")
+            facts = {
+                str(row["fact_type"])
+                for row in conn.execute(
+                    "SELECT fact_type FROM lifecycle_facts WHERE lifecycle_id = ?",
+                    (lifecycle_id,),
+                )
+            }
+            target = desired_status(facts)
+            transition = (current, target)
+
+            if current == target or transition not in ALLOWED_TRANSITIONS:
+                # Already there, a downgrade, or a status outside the managed
+                # set: all three mean automation has nothing to propose.
+                self._supersede_stale(conn, lifecycle_id, keep=None, now=now)
+                return None
+
+            cause = (
+                FACT_FIRST_HUMAN_INBOUND
+                if target == desired_status({FACT_FIRST_HUMAN_INBOUND})
+                else FACT_FIRST_T1_SEND_SUCCESS
+            )
+            effect_id = self.runtime_ids.effect_id(lifecycle_id, current, target, cause)
+            self._supersede_stale(conn, lifecycle_id, keep=effect_id, now=now)
+            conn.execute(
+                "INSERT INTO lifecycle_effects (effect_id, lifecycle_id, "
+                "expected_status, target_status, cause, state, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(effect_id) DO NOTHING",
+                (
+                    effect_id,
+                    lifecycle_id,
+                    current,
+                    target,
+                    cause,
+                    EFFECT_PENDING,
+                    now,
+                    now,
+                ),
+            )
+            return effect_id
+
+        return self.runtime.write(write)
+
+    @staticmethod
+    def _supersede_stale(
+        conn: sqlite3.Connection,
+        lifecycle_id: str,
+        *,
+        keep: str | None,
+        now: float,
+    ) -> None:
+        """Retire effects Brain still owns that the current facts have overtaken.
+
+        Only ``pending`` moves. An effect the writer has claimed or applied is
+        outside Brain's authority to rewrite: the writer is the one who knows
+        whether FamaChat already changed.
+        """
+        placeholders = ",".join("?" for _ in EFFECT_BRAIN_OWNED)
+        parameters: list[object] = [EFFECT_SUPERSEDED, now, lifecycle_id]
+        parameters.extend(sorted(EFFECT_BRAIN_OWNED))
+        clause = ""
+        if keep is not None:
+            clause = " AND effect_id != ?"
+            parameters.append(keep)
+        conn.execute(
+            "UPDATE lifecycle_effects SET state = ?, updated_at = ? "
+            f"WHERE lifecycle_id = ? AND state IN ({placeholders})" + clause,
+            tuple(parameters),
+        )
 
     def _claim_human_fact(
         self,

@@ -18,6 +18,26 @@ FACT_CLIENT_CREATED = "client_created_sem_atendimento"
 FACT_FIRST_T1_SEND_SUCCESS = "first_t1_send_success"
 FACT_FIRST_HUMAN_INBOUND = "first_human_inbound"
 
+SEM_ATENDIMENTO = "Sem Atendimento"
+NAO_RESPONDEU = "Não Respondeu"
+EM_ATENDIMENTO = "Em Atendimento"
+
+# Spec section 16. No other status transition is authorised, in either
+# direction: a status a human moved is never walked back by automation.
+ALLOWED_TRANSITIONS = frozenset(
+    {
+        (SEM_ATENDIMENTO, NAO_RESPONDEU),
+        (SEM_ATENDIMENTO, EM_ATENDIMENTO),
+        (NAO_RESPONDEU, EM_ATENDIMENTO),
+    }
+)
+
+EFFECT_PENDING = "pending"
+EFFECT_SUPERSEDED = "superseded"
+# States Brain owns and may still change on its own; anything else is either
+# a writer's business or already final.
+EFFECT_BRAIN_OWNED = frozenset({EFFECT_PENDING})
+
 TRANSPORT_CTWA = "ctwa_candidate"
 TRANSPORT_ORDINARY = "ordinary_inbound"
 
@@ -66,3 +86,17 @@ class DeliveryMatch:
     obligation_id: str | None = None
     delivered_at: float | None = None
     reason: str | None = None
+
+
+def desired_status(facts: set[str] | frozenset[str]) -> str:
+    """The status the evidence implies, as a pure function of the fact set.
+
+    Spec section 14. Deriving from a set rather than from a sequence is what
+    makes out-of-order evidence safe: a human reply that Brain learns about
+    before the T1 proof yields the same answer as the other order.
+    """
+    if FACT_FIRST_HUMAN_INBOUND in facts:
+        return EM_ATENDIMENTO
+    if FACT_FIRST_T1_SEND_SUCCESS in facts:
+        return NAO_RESPONDEU
+    return SEM_ATENDIMENTO
