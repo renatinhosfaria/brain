@@ -6,5 +6,4 @@ build/
 dist/
 .coverage
 htmlcov/
-.worktrees/
 observers/whatsapp/node_modules/
