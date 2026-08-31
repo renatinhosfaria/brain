@@ -10,12 +10,18 @@ _CANONICAL_PHONE_RE = re.compile(r"^[1-9][0-9]{6,14}$")
 
 
 class RuntimeIds:
-    """Derive stable IDs without exposing or conflating secret domains."""
+    """Derive stable IDs from the transport secret.
 
-    __slots__ = ("_runtime_secret", "_transport_secret")
+    Amendment 2 removed the runtime domain along with the identifiers that
+    used it: `wa_turn_id` and `effect_id` belonged to turn correlation and
+    lifecycle effects, and nothing derives from that secret any more. Keeping
+    an unused key in the deployment would advertise a separation that no
+    longer exists.
+    """
 
-    def __init__(self, runtime_secret: bytes, transport_secret: bytes) -> None:
-        self._runtime_secret = self._validated_secret(runtime_secret, "runtime_secret")
+    __slots__ = ("_transport_secret",)
+
+    def __init__(self, transport_secret: bytes) -> None:
         self._transport_secret = self._validated_secret(
             transport_secret, "transport_secret"
         )
@@ -41,21 +47,6 @@ class RuntimeIds:
             framed.extend(len(encoded).to_bytes(8, "big"))
             framed.extend(encoded)
         return hmac.new(secret, bytes(framed), hashlib.sha256).hexdigest()
-
-    def wa_turn_id(self, hermes_turn_id: str) -> str:
-        value = self._text(hermes_turn_id, "hermes_turn_id")
-        return "waturn_" + self._digest(
-            self._runtime_secret, "brain.runtime.wa_turn.v1", value
-        )
-
-    def effect_id(self, *parts: str) -> str:
-        if not parts:
-            raise ValueError("effect_id requires at least one part")
-        for index, part in enumerate(parts):
-            self._text(part, f"effect_part_{index}")
-        return "fx_" + self._digest(
-            self._runtime_secret, "brain.runtime.effect.v1", *parts
-        )
 
     def contact_key(self, canonical_phone: str) -> str:
         value = self._text(canonical_phone, "canonical_phone")

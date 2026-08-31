@@ -72,27 +72,17 @@ tools = ["conversation_phone"]
                     "gateway",
                     "gateway",
                     "conversation_context",
-                    "turn_register",
+                    
                 ),
                 "observer": self._principal(
                     "observer", "service", "observer", "transport_ingest"
-                ),
-                "writer": self._principal(
-                    "writer",
-                    "service",
-                    "writer",
-                    "lifecycle_claim",
-                    "lifecycle_result",
                 ),
             },
             cursor_secret=b"c" * 32,
         )
 
         self.assertEqual(settings.principals["observer"].mode, "service")
-        self.assertEqual(
-            settings.principals["writer"].tools,
-            frozenset({"lifecycle_claim", "lifecycle_result"}),
-        )
+        self.assertNotIn("writer", settings.principals)
 
     def test_runtime_settings_have_exact_defaults(self) -> None:
         settings = BrainSettings(
@@ -153,7 +143,6 @@ tools = ["conversation_phone"]
         with patch.dict(
             os.environ,
             {
-                "BRAIN_RUNTIME_HMAC_SECRET": "r" * 32,
                 "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
                 "BRAIN_OBSERVER_DEVICE_IDS": " fama-observer-1 , fama-observer-2 ",
             },
@@ -261,7 +250,6 @@ tools = ["conversation_phone"]
         with patch.dict(
             os.environ,
             {
-                "BRAIN_RUNTIME_HMAC_SECRET": "r" * 32,
                 "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
             },
             clear=True,
@@ -271,39 +259,12 @@ tools = ["conversation_phone"]
         self.assertEqual(set(settings.principals), {"default", "porteiro"})
         self.assertEqual(settings.whatsapp_session_dir, self.root / "session")
 
-    def test_from_env_rejects_missing_runtime_hmac_secret(self) -> None:
-        config_path = self._write_production_config()
-
-        with (
-            patch.dict(
-                os.environ, {"BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32}, clear=True
-            ),
-            self.assertRaisesRegex(ValueError, "BRAIN_RUNTIME_HMAC_SECRET"),
-        ):
-            BrainSettings.from_env(config_path)
-
     def test_from_env_rejects_missing_transport_hmac_secret(self) -> None:
         config_path = self._write_production_config()
 
         with (
-            patch.dict(os.environ, {"BRAIN_RUNTIME_HMAC_SECRET": "r" * 32}, clear=True),
+            patch.dict(os.environ, {}, clear=True),
             self.assertRaisesRegex(ValueError, "BRAIN_TRANSPORT_HMAC_SECRET"),
-        ):
-            BrainSettings.from_env(config_path)
-
-    def test_from_env_rejects_short_runtime_hmac_secret(self) -> None:
-        config_path = self._write_production_config()
-
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "BRAIN_RUNTIME_HMAC_SECRET": "short",
-                    "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
-                },
-                clear=True,
-            ),
-            self.assertRaisesRegex(ValueError, "BRAIN_RUNTIME_HMAC_SECRET"),
         ):
             BrainSettings.from_env(config_path)
 
@@ -314,8 +275,7 @@ tools = ["conversation_phone"]
             patch.dict(
                 os.environ,
                 {
-                    "BRAIN_RUNTIME_HMAC_SECRET": "r" * 32,
-                    "BRAIN_TRANSPORT_HMAC_SECRET": "short",
+                        "BRAIN_TRANSPORT_HMAC_SECRET": "short",
                 },
                 clear=True,
             ),
@@ -323,7 +283,7 @@ tools = ["conversation_phone"]
         ):
             BrainSettings.from_env(config_path)
 
-    def test_from_env_accepts_distinct_raw_hmac_secrets(self) -> None:
+    def test_from_env_accepts_a_raw_hmac_secret(self) -> None:
         config_path = self._write_production_config()
 
         with patch.dict(
@@ -336,9 +296,6 @@ tools = ["conversation_phone"]
         ):
             settings = BrainSettings.from_env(config_path)
 
-        self.assertEqual(
-            settings.runtime_hmac_secret, b"runtime-secret-domain-value-1234"
-        )
         self.assertEqual(
             settings.transport_hmac_secret, b"transport-secret-domain-value-12"
         )
@@ -356,7 +313,6 @@ tools = ["conversation_phone"]
         ):
             settings = BrainSettings.from_env(config_path)
 
-        self.assertEqual(settings.runtime_hmac_secret, bytes.fromhex("ab" * 32))
         self.assertEqual(settings.transport_hmac_secret, bytes.fromhex("cd" * 32))
 
 

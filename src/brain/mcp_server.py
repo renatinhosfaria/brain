@@ -135,11 +135,6 @@ class BrainMCPServer:
                     methods=["POST"],
                 ),
                 Route(
-                    "/internal/gateway/turn-register",
-                    self.gateway_api.turn_register,
-                    methods=["POST"],
-                ),
-                Route(
                     "/internal/gateway/conversation-context",
                     self.gateway_api.conversation_context,
                     methods=["POST"],

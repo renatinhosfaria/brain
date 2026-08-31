@@ -364,7 +364,7 @@ def main() -> int:
     gateway_tools = set(gateway_principal.get("tools") or [])
     supported_gateway_tools = {
         frozenset({"conversation_phone"}),
-        frozenset({"conversation_context", "turn_register"}),
+        frozenset({"conversation_context"}),
     }
     if (
         gateway_principal.get("mode") != expected_modes["default"]

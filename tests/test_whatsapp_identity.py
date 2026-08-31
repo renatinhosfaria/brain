@@ -19,7 +19,7 @@ class WhatsAppIdentityTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.mapping_dir = Path(self.temp_dir.name) / "session"
         self.mapping_dir.mkdir()
-        self.transport_ids = RuntimeIds(b"r" * 32, b"t" * 32)
+        self.transport_ids = RuntimeIds(b"t" * 32)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -245,7 +245,7 @@ class PhoneForContactKeyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.mapping_dir = Path(self.temp_dir.name)
-        self.ids = RuntimeIds(b"r" * 32, b"t" * 32)
+        self.ids = RuntimeIds(b"t" * 32)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()

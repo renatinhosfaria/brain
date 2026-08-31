@@ -17,25 +17,27 @@ The MCP surface has exactly three tools:
 The CEO does not receive the worker MCP server. The external
 `integrations/hermes/brain-ceo-bridge/` plugin reads the current gateway
 `ContextVar` session and uses official `pre_llm_call`/`pre_tool_call` hooks. It
-registers each Hermes `turn_id`, obtains bounded `conversation_context`, and
-derives deterministic Kanban idempotency. This keeps identity authority in
-Brain while allowing `hermes update` without a core fork.
+obtains bounded `conversation_context` for the contact on the other side of
+the current WhatsApp DM. This keeps identity authority in Brain while allowing
+`hermes update` without a core fork.
 
-## Plan 1 status
+## Scope
 
 Implemented: the Brain runtime DB, distinct runtime/transport HMAC domains,
-safe transport ingestion with fail-closed identity proof, Hermes turn
-registration, deterministic single/batched correlation, `conversation_context`,
-official public hooks, deterministic Kanban idempotency, and a read-only Hermes
-compatibility checker. The runtime DB stores technical metadata and HMACs, not
-raw message bodies.
+safe transport ingestion with fail-closed identity proof, contact-scoped
+`conversation_context`, and a read-only Hermes compatibility checker. The
+runtime DB stores technical metadata and HMACs, not raw message bodies.
 
-Not implemented: the production observer service, lifecycle engine, lifecycle
-writer, FamaChat CRM status automation, and production lifecycle write
-enablement. The observer session path is reserved as
+Out of scope since Amendment 2 (2026-08-31): automated CRM lifecycle writing.
+Brain no longer correlates Hermes turns, reconstructs Kanban bindings, derives
+lifecycle state, or holds any FamaChat credential. Reno owns the lifecycle
+transitions and executes them through its own MCP surface, guarded by a
+mandatory `expectedStatus` predicate that FamaChat enforces server-side. See
+section 2.5 and Amendment 2 of the design spec.
+
+The observer session path is reserved as
 `/var/lib/brain/whatsapp-observer/session`; it must never share Hermes' session
-at `/root/.hermes/platforms/whatsapp/session`. Plan 1 is a transport/context
-foundation, not a production-ready CTWA lifecycle system.
+at `/root/.hermes/platforms/whatsapp/session`.
 
 ## Run locally
 
@@ -87,8 +89,8 @@ Install the CEO bridge only after reviewing it and
 [`deploy/hermes-ceo-brain.example.yaml`](deploy/hermes-ceo-brain.example.yaml).
 Copy the versioned source to `/root/.hermes/plugins/brain-ceo-bridge`, enable
 `brain-ceo-bridge` in the CEO `plugins.enabled` list, and expose its
-`brain-context` toolset on WhatsApp only. Its public tool is
-`conversation_context`; its hooks call `turn_register` privately. Do not add `brain-context` to CLI or
+`brain-context` toolset on WhatsApp only. Its only tool is
+`conversation_context`. Do not add `brain-context` to CLI or
 Telegram, and do not configure the worker Brain MCP server in the CEO. The
 installer and runbook configure `BRAIN_GATEWAY_TOKEN` for that plugin. This
 production copy is intentionally outside this repository; development here

@@ -258,7 +258,7 @@ def phone_for_contact_key(
 ) -> str | None:
     """Recover the canonical phone behind a contact key, transiently.
 
-    The writer must compare Brain's expectation against the live FamaChat
+    A caller must compare its expectation against the live FamaChat
     record, and a HMAC cannot be compared to a phone number. So the phone is
     resolved at claim time from mapping evidence Brain already trusts, handed
     over for that one comparison, and never stored by either service

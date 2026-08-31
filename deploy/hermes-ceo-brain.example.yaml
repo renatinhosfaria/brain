@@ -6,7 +6,8 @@ plugins:
 
 # brain-ceo-bridge uses the official pre_llm_call and pre_tool_call hooks.
 # It calls only the private Brain gateway capabilities conversation_context
-# and turn_register; lifecycle_claim/lifecycle_result are intentionally absent.
+# Amendment 2: conversation_context is the plugin's only tool, and the CEO
+# registers no hooks.
 
 # Mark the plugin as known on every platform so a saved platform allowlist
 # cannot silently enable it outside WhatsApp.

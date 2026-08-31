@@ -48,114 +48,12 @@ _SCHEMA = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS whatsapp_turns (
-        wa_turn_id TEXT PRIMARY KEY,
-        hermes_session_id TEXT,
-        session_key_hmac TEXT,
-        contact_key TEXT,
-        body_hmac TEXT,
-        body_length INTEGER CHECK (body_length IS NULL OR body_length >= 0),
-        turn_timestamp REAL,
-        correlation_status TEXT NOT NULL,
-        created_at REAL NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS turn_events (
-        wa_turn_id TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-        PRIMARY KEY (wa_turn_id, event_id),
-        UNIQUE (wa_turn_id, ordinal),
-        FOREIGN KEY (wa_turn_id) REFERENCES whatsapp_turns(wa_turn_id),
-        FOREIGN KEY (event_id) REFERENCES transport_events(event_id)
-    )
-    """,
-    # Identifiers a pending turn is still waiting for. Deliberately has no
-    # foreign key to transport_events: the whole purpose is to record a
-    # candidate whose event has not been ingested yet. Values are derived
-    # HMACs, never a raw observer message id. Rows are deleted once the turn
-    # reaches a terminal state.
-    """
-    CREATE TABLE IF NOT EXISTS turn_candidate_events (
-        wa_turn_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-        candidate_event_id TEXT NOT NULL,
-        PRIMARY KEY (wa_turn_id, ordinal, candidate_event_id),
-        FOREIGN KEY (wa_turn_id) REFERENCES whatsapp_turns(wa_turn_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS kanban_bindings (
-        task_id TEXT PRIMARY KEY,
-        wa_turn_id TEXT NOT NULL,
-        stage TEXT NOT NULL CHECK (stage IN ('porteiro', 'cadastro', 'reno')),
-        created_at REAL NOT NULL,
-        FOREIGN KEY (wa_turn_id) REFERENCES whatsapp_turns(wa_turn_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS lead_lifecycles (
-        lifecycle_id TEXT PRIMARY KEY,
-        origin_event_id TEXT NOT NULL UNIQUE,
-        wa_turn_id TEXT NOT NULL,
-        contact_key TEXT NOT NULL,
-        client_id INTEGER NOT NULL UNIQUE CHECK (client_id > 0),
-        phase TEXT NOT NULL,
-        last_proven_status TEXT,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL,
-        terminal_at REAL,
-        FOREIGN KEY (origin_event_id) REFERENCES transport_events(event_id),
-        FOREIGN KEY (wa_turn_id) REFERENCES whatsapp_turns(wa_turn_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS lifecycle_facts (
-        lifecycle_id TEXT NOT NULL,
-        fact_type TEXT NOT NULL,
-        evidence_ref TEXT,
-        observed_at REAL NOT NULL,
-        created_at REAL NOT NULL,
-        PRIMARY KEY (lifecycle_id, fact_type),
-        FOREIGN KEY (lifecycle_id) REFERENCES lead_lifecycles(lifecycle_id)
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS lifecycle_effects (
-        effect_id TEXT PRIMARY KEY,
-        lifecycle_id TEXT NOT NULL,
-        expected_status TEXT NOT NULL,
-        target_status TEXT NOT NULL,
-        cause TEXT NOT NULL,
-        state TEXT NOT NULL CHECK (
-            state IN (
-                'pending', 'claimed', 'applied', 'already_applied',
-                'superseded', 'conflict', 'retryable', 'permanent_failure'
-            )
-        ),
-        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-        lease_token_hmac TEXT,
-        lease_expires_at REAL,
-        created_at REAL NOT NULL,
-        updated_at REAL NOT NULL,
-        FOREIGN KEY (lifecycle_id) REFERENCES lead_lifecycles(lifecycle_id)
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS contact_ephemera (
         contact_key TEXT PRIMARY KEY,
         display_name TEXT,
         display_name_hmac TEXT,
         expires_at REAL NOT NULL,
         created_at REAL NOT NULL,
-        updated_at REAL NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS reconcile_state (
-        name TEXT PRIMARY KEY,
-        value TEXT,
         updated_at REAL NOT NULL
     )
     """,

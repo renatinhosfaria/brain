@@ -45,7 +45,7 @@ class BrainFixture(unittest.TestCase):
                     "default",
                     "gateway",
                     token_digest("gateway-secret"),
-                    frozenset({"conversation_context", "turn_register"}),
+                    frozenset({"conversation_context"}),
                 ),
                 "porteiro": PrincipalConfig(
                     "porteiro",
@@ -76,7 +76,6 @@ class BrainFixture(unittest.TestCase):
             history_budget_chars=1_000,
             message_max_chars=120,
             runtime_db=self.runtime_path,
-            runtime_hmac_secret=b"r" * 32,
             transport_hmac_secret=b"t" * 32,
         )
         self.service = BrainService(self.settings)
@@ -453,11 +452,13 @@ class BrainFixture(unittest.TestCase):
         self,
     ) -> None:
         principals = dict(self.settings.principals)
+        # The gateway principal without conversation_context is no longer a
+        # bridge, so compatibility must fail closed rather than degrade.
         principals["default"] = PrincipalConfig(
             "default",
             "gateway",
             token_digest("gateway-secret"),
-            frozenset({"conversation_context"}),
+            frozenset({"conversation_phone"}),
         )
         settings = BrainSettings(
             state_db=self.state_path,
@@ -466,7 +467,6 @@ class BrainFixture(unittest.TestCase):
             principals=principals,
             cursor_secret=b"i" * 32,
             runtime_db=Path(self.temp_dir.name) / "incompatible-runtime.db",
-            runtime_hmac_secret=b"r" * 32,
             transport_hmac_secret=b"t" * 32,
         )
 

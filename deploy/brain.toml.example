@@ -4,7 +4,7 @@ kanban_db = "/root/.hermes/kanban.db"
 whatsapp_session_dir = "/root/.hermes/platforms/whatsapp/session"
 runtime_db = "/var/lib/brain/runtime/brain-runtime.db"
 observer_session_dir = "/var/lib/brain/whatsapp-observer/session"
-# Expected observer identities. Correlation derives candidate event IDs
+# Expected observer identities. Transport ingestion derives event IDs
 # from these, so a fresh deployment resolves its first message before any
 # transport event exists to discover the device from. Must match the
 # observer's BRAIN_OBSERVER_DEVICE_ID.
@@ -22,7 +22,6 @@ busy_timeout_seconds = 1.0
 # Generate with: openssl rand -hex 32
 # cursor_secret = "replace-with-64-hex-characters"
 # Required production secrets are supplied only through these environment vars:
-# BRAIN_RUNTIME_HMAC_SECRET (Brain-only, 32+ bytes)
 # BRAIN_TRANSPORT_HMAC_SECRET (Brain/observer transport domain, 32+ bytes)
 
 # Store only distinct digests in this file. Generate a digest with:
@@ -30,17 +29,12 @@ busy_timeout_seconds = 1.0
 [principals.default]
 mode = "gateway"
 token_sha256 = "replace-with-gateway-64-hex-digest"
-tools = ["conversation_context", "turn_register"]
+tools = ["conversation_context"]
 
 [principals.observer]
 mode = "service"
 token_sha256 = "replace-with-observer-64-hex-digest"
 tools = ["transport_ingest"]
-
-[principals.writer]
-mode = "service"
-token_sha256 = "replace-with-writer-64-hex-digest"
-tools = ["lifecycle_claim", "lifecycle_result"]
 
 [principals.porteiro]
 mode = "worker"

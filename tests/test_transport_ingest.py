@@ -16,7 +16,6 @@ from brain.mcp_server import BrainMCPServer, _tools
 from brain.service import BrainService
 from brain.transport_api import TransportAPI
 from brain.transport_models import RuntimeIds
-from brain.turn_correlation import TurnRegistration
 
 
 class TransportIngestTests(unittest.TestCase):
@@ -34,7 +33,7 @@ class TransportIngestTests(unittest.TestCase):
         (self.observer_dir / f"lid-mapping-{self.PHONE}.json").write_text(
             json.dumps(self.LID), encoding="utf-8"
         )
-        self.runtime_ids = RuntimeIds(b"r" * 32, b"t" * 32)
+        self.runtime_ids = RuntimeIds(b"t" * 32)
         self.settings = BrainSettings(
             state_db=self.state_path,
             kanban_db=self.kanban_path,
@@ -46,19 +45,13 @@ class TransportIngestTests(unittest.TestCase):
                     "default",
                     "gateway",
                     token_digest("gateway-secret"),
-                    frozenset({"conversation_context", "turn_register"}),
+                    frozenset({"conversation_context"}),
                 ),
                 "observer": PrincipalConfig(
                     "observer",
                     "service",
                     token_digest("observer-secret"),
                     frozenset({"transport_ingest"}),
-                ),
-                "writer": PrincipalConfig(
-                    "writer",
-                    "service",
-                    token_digest("writer-secret"),
-                    frozenset({"lifecycle_claim", "lifecycle_result"}),
                 ),
                 "reno": PrincipalConfig(
                     "reno",
@@ -68,7 +61,6 @@ class TransportIngestTests(unittest.TestCase):
                 ),
             },
             cursor_secret=b"c" * 32,
-            runtime_hmac_secret=b"r" * 32,
             transport_hmac_secret=b"t" * 32,
         )
         self.service = BrainService(self.settings)
@@ -333,10 +325,10 @@ class TransportIngestTests(unittest.TestCase):
     def test_non_dict_json_is_rejected(self) -> None:
         self.assertEqual(self.post(["not", "an", "object"]).status_code, 400)
 
-    def test_service_auth_rejects_worker_gateway_writer_and_invalid_tokens(
+    def test_service_auth_rejects_worker_gateway_and_invalid_tokens(
         self,
     ) -> None:
-        for token in ("reno-secret", "gateway-secret", "writer-secret", "invalid"):
+        for token in ("reno-secret", "gateway-secret", "invalid"):
             with self.subTest(token=token):
                 response = self.post(self.envelope(), token=token)
                 self.assertEqual(response.status_code, 403)
@@ -454,30 +446,6 @@ class TransportIngestTests(unittest.TestCase):
     def test_endpoint_does_not_accept_get(self) -> None:
         response = self.post(self.envelope(), method="GET")
         self.assertEqual(response.status_code, 405)
-
-    def test_ingesting_a_late_event_settles_the_waiting_turn(self) -> None:
-        """End-to-end shape of the P6 fix, across the ingestion boundary."""
-        registration = TurnRegistration(
-            hermes_session_id="g-one",
-            session_key="wa:g",
-            contact_key=self.service.runtime_ids.contact_key(self.PHONE),
-            turn_id="opaque-turn-1",
-            user_message="hello",
-            turn_timestamp=1000.0,
-            message_ids=("message-1",),
-        )
-        self.assertEqual(
-            self.service.turn_correlation.register(registration)["correlation"],
-            "pending",
-        )
-
-        response = self.post(self.envelope(message_id="message-1", body="hello"))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            self.rows("whatsapp_turns")[0]["correlation_status"], "correlated"
-        )
-        self.assertEqual(len(self.rows("turn_events")), 1)
 
     def test_ingestion_stays_durable_when_re_evaluation_fails(self) -> None:
         """Transport ACK must not depend on correlation succeeding (Task 3)."""

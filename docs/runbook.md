@@ -25,7 +25,8 @@
    mode `0600`, and the Reno/FamaAgent `.env` files remain mode `0600`. Create
    `/var/lib/brain/runtime` with mode `0700`; keep
    `/var/lib/brain/runtime/brain-runtime.db` mode `0600`. Configure distinct
-   values for `BRAIN_RUNTIME_HMAC_SECRET` and `BRAIN_TRANSPORT_HMAC_SECRET`.
+   a value for `BRAIN_TRANSPORT_HMAC_SECRET`. `BRAIN_RUNTIME_HMAC_SECRET` is
+   ignored since Amendment 2 and may be deleted from an installed file.
 5. Merge `deploy/hermes-brain.example.yaml` into Porteiro and Cadastro, and
    preserve `famachat` in their CLI toolsets. Merge
    `deploy/hermes-brain-memory.example.yaml` into Reno, preserving `famachat`,
@@ -148,40 +149,40 @@ If any security check fails, stop the rollout and disable Brain until the
 compatibility issue is corrected. Do not use `hermes tools list --platform` as
 proof of MCP containment; only the resolver check is authoritative.
 
-The checker is read-only: it inspects public plugin/hook APIs, `turn_id` and
-argument-modification contracts, session ContextVars, state/Kanban schemas,
+The checker is read-only: it inspects the public plugin API, session ContextVars, state/Kanban schemas,
 WhatsApp bridge batching (`"\n"` join and timer reset), adapter identity, and
 delivery-ledger states. It never repairs Hermes or writes its databases.
 
-## Plan 2 observer implementation boundary
+## Implementation boundary
 
 Implemented: Brain-owned runtime persistence, separate HMAC domains, safe
-transport ingestion, fail-closed identity proof, turn registration,
-deterministic batch correlation, `conversation_context`, public Hermes hooks,
-Kanban idempotency, and compatibility checks. There is no upstream Hermes
+transport ingestion, fail-closed identity proof, contact-scoped
+`conversation_context`, and compatibility checks. There is no upstream Hermes
 modification.
 
 The receive-only observer runtime is implemented with its own pinned Baileys,
 its own session path, raw-data-free safe spool, bounded retry, loopback health,
-and versioned systemd/env artifacts. Its future production state belongs under
+and versioned systemd/env artifacts. Its production state belongs under
 `/var/lib/brain/whatsapp-observer`, with its session at
 `/var/lib/brain/whatsapp-observer/session`; it must remain separate from
 `/root/.hermes/platforms/whatsapp/session`, which must never be copied, shared,
 or disconnected by the observer.
 
-The observer uses its own Node runtime under `/opt/brain/node`; this installation
-is pinned to Node `v26.7.0`. It is independent from the Hermes-managed runtime at
+The observer uses its own Node runtime under `/opt/brain/node`, pinned to Node
+`v26.7.0`. It is independent from the Hermes-managed runtime at
 `/root/.hermes/node`, which must not be reused by the observer. Observer Node
 upgrades are explicit, separate maintenance operations.
 
-Live deployment is still pending. This implementation task did not install or
-start the observer unit, create real observer directories, provision real
-secrets, render a real QR, pair a linked device, prove coexistence, run a real
-CTWA test, or prove `conversation_context` correlation end to end. The
-lifecycle engine, lifecycle writer, FamaChat CRM automation, and production
-write enablement are also not implemented.
+Not implemented, and out of scope since Amendment 2 (2026-08-31): automated
+FamaChat lifecycle writing. Brain no longer correlates Hermes turns,
+reconstructs Kanban bindings, derives lifecycle state, or holds any FamaChat
+credential, and there is no writer service to deploy. Reno owns the lifecycle
+transitions through its own MCP surface, guarded by a mandatory
+`expectedStatus` predicate enforced by FamaChat. The turn-correlation spine,
+the lifecycle engine and the writer were removed rather than left dormant; see
+section 2.5 and Amendment 2 of the design spec for why.
 
-### Stage 3 live observer gate (not executed by Task 4)
+### Production observer gate
 
 Perform Stage 3 only as a separately authorized controlled change:
 

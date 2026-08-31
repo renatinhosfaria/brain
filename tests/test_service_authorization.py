@@ -18,7 +18,7 @@ class ServiceAuthorizationTests(unittest.TestCase):
         return PrincipalConfig(name, mode, token_digest(token), frozenset(tools))
 
     def _authorizer(
-        self, gateway_tools: tuple[str, ...] = ("conversation_context", "turn_register")
+        self, gateway_tools: tuple[str, ...] = ("conversation_context",)
     ) -> Authorizer:
         settings = BrainSettings(
             principals={
@@ -27,13 +27,6 @@ class ServiceAuthorizationTests(unittest.TestCase):
                 ),
                 "observer": self._principal(
                     "observer", "service", "observer-token", "transport_ingest"
-                ),
-                "writer": self._principal(
-                    "writer",
-                    "service",
-                    "writer-token",
-                    "lifecycle_claim",
-                    "lifecycle_result",
                 ),
                 "worker": self._principal(
                     "worker", "worker", "worker-token", "conversation_phone"
@@ -64,25 +57,7 @@ class ServiceAuthorizationTests(unittest.TestCase):
         self.assert_denied(
             "AUTH_TOOL_DENIED",
             lambda: authorizer.parse_service_headers(
-                self._headers("observer-token"), "lifecycle_claim"
-            ),
-        )
-
-    def test_writer_service_can_claim_and_report_only(self) -> None:
-        authorizer = self._authorizer()
-
-        for capability in ("lifecycle_claim", "lifecycle_result"):
-            with self.subTest(capability=capability):
-                self.assertEqual(
-                    authorizer.parse_service_headers(
-                        self._headers("writer-token"), capability
-                    ),
-                    ServiceRequestIdentity(principal="writer"),
-                )
-        self.assert_denied(
-            "AUTH_TOOL_DENIED",
-            lambda: authorizer.parse_service_headers(
-                self._headers("writer-token"), "transport_ingest"
+                self._headers("observer-token"), "conversation_context"
             ),
         )
 
@@ -111,7 +86,7 @@ class ServiceAuthorizationTests(unittest.TestCase):
     def test_gateway_parser_checks_explicit_capability(self) -> None:
         authorizer = self._authorizer()
 
-        for capability in ("conversation_context", "turn_register"):
+        for capability in ("conversation_context",):
             with self.subTest(capability=capability):
                 identity = authorizer.parse_gateway_headers(
                     self._headers("gateway-token"), capability
@@ -152,7 +127,7 @@ class ServiceAuthorizationTests(unittest.TestCase):
         self.assertEqual(identity, ServiceRequestIdentity(principal="observer"))
         self.assert_denied(
             "AUTH_TOOL_DENIED",
-            lambda: authorizer.parse_service_headers(headers, "lifecycle_claim"),
+            lambda: authorizer.parse_service_headers(headers, "conversation_context"),
         )
 
 

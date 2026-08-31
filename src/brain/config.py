@@ -29,11 +29,8 @@ VALID_TOOLS = frozenset(
         "conversation_recent",
         "conversation_search",
         "conversation_phone",
-        "turn_register",
         "conversation_context",
         "transport_ingest",
-        "lifecycle_claim",
-        "lifecycle_result",
     }
 )
 _PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -109,7 +106,6 @@ class BrainSettings:
     port: int = 8765
     principals: Mapping[str, PrincipalConfig] = field(default_factory=dict)
     cursor_secret: bytes = b""
-    runtime_hmac_secret: bytes = b""
     transport_hmac_secret: bytes = b""
     transport_retention_days: int = 90
     display_name_ttl_hours: int = 24
@@ -137,7 +133,7 @@ class BrainSettings:
             raise ValueError("transport_retention_days must be positive")
         if self.display_name_ttl_hours <= 0:
             raise ValueError("display_name_ttl_hours must be positive")
-        # Correlation derives candidate event IDs from these identities, so a
+        # Transport ingestion derives event IDs from these identities, so a
         # fresh deployment can resolve its first message before any transport
         # event exists to discover the device from.
         device_ids = tuple(sorted({str(value) for value in self.observer_device_ids}))
@@ -181,16 +177,8 @@ class BrainSettings:
             object.__setattr__(self, "cursor_secret", secrets.token_bytes(32))
         if len(self.cursor_secret) < 32:
             raise ValueError("cursor_secret must contain at least 32 bytes")
-        if self.runtime_hmac_secret and len(self.runtime_hmac_secret) < 32:
-            raise ValueError("runtime_hmac_secret must contain at least 32 bytes")
         if self.transport_hmac_secret and len(self.transport_hmac_secret) < 32:
             raise ValueError("transport_hmac_secret must contain at least 32 bytes")
-        if (
-            self.runtime_hmac_secret
-            and self.transport_hmac_secret
-            and self.runtime_hmac_secret == self.transport_hmac_secret
-        ):
-            raise ValueError("runtime and transport HMAC secrets must be distinct")
 
     @classmethod
     def from_env(cls, config_path: Path | None = None) -> BrainSettings:
@@ -248,7 +236,6 @@ class BrainSettings:
                 raise ValueError(f"{name} must contain at least 32 bytes")
             return parsed
 
-        runtime_hmac_secret = required_hmac_secret("BRAIN_RUNTIME_HMAC_SECRET")
         transport_hmac_secret = required_hmac_secret("BRAIN_TRANSPORT_HMAC_SECRET")
 
         return cls(
@@ -287,7 +274,6 @@ class BrainSettings:
             port=int(os.environ.get("BRAIN_PORT", server.get("port", 8765))),
             principals=principals,
             cursor_secret=cursor_secret,
-            runtime_hmac_secret=runtime_hmac_secret,
             transport_hmac_secret=transport_hmac_secret,
             transport_retention_days=int(
                 os.environ.get(

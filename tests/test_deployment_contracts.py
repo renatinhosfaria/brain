@@ -125,11 +125,9 @@ class DeploymentContractTests(unittest.TestCase):
         source = (ROOT / "deploy/brain.env.example").read_text(encoding="utf-8")
 
         for name in (
-            "BRAIN_RUNTIME_HMAC_SECRET",
             "BRAIN_TRANSPORT_HMAC_SECRET",
             "BRAIN_GATEWAY_TOKEN",
             "BRAIN_OBSERVER_TOKEN",
-            "BRAIN_WRITER_TOKEN",
         ):
             self.assertIn(f"{name}=", source)
         self.assertIn("distinct", source.lower())
@@ -142,13 +140,12 @@ class DeploymentContractTests(unittest.TestCase):
 
         self.assertEqual(
             data["principals"]["default"]["tools"],
-            ["conversation_context", "turn_register"],
+            ["conversation_context"],
         )
         self.assertEqual(data["principals"]["observer"]["tools"], ["transport_ingest"])
-        self.assertEqual(
-            data["principals"]["writer"]["tools"],
-            ["lifecycle_claim", "lifecycle_result"],
-        )
+        # Amendment 2: Brain holds no FamaChat credential and no writer
+        # principal. Reno owns the transitions through its own MCP surface.
+        self.assertNotIn("writer", data["principals"])
 
     def test_service_example_is_localhost_private_and_documents_runtime_permissions(
         self,
@@ -203,7 +200,6 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("whatsapp:", source)
         self.assertIn("Do not add `brain-context` to cli/telegram", source)
         self.assertIn("conversation_context", source)
-        self.assertIn("turn_register", source)
 
     def test_hermes_check_covers_gateway_plugin_and_context_scope(self) -> None:
         source = (ROOT / "scripts/hermes_integration_check.py").read_text(
@@ -274,61 +270,6 @@ class DeploymentContractTests(unittest.TestCase):
             "do not require reverting",
         ):
             self.assertIn(required, runbook)
-
-    def test_writer_unit_isolates_the_write_credential(self) -> None:
-        source = (ROOT / "deploy/brain-lifecycle-writer.service").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("EnvironmentFile=/etc/brain/writer.env", source)
-        self.assertIn("UMask=0077", source)
-        self.assertIn("NoNewPrivileges=true", source)
-        self.assertIn("Restart=on-failure", source)
-        self.assertIn("ProtectSystem=strict", source)
-
-    def test_writer_unit_cannot_write_hermes_or_the_observer(self) -> None:
-        """Spec 2.1 and 4.2: the writer touches neither upstream nor the session."""
-        source = (ROOT / "deploy/brain-lifecycle-writer.service").read_text(
-            encoding="utf-8"
-        )
-        writable = [
-            line.split("=", 1)[1].strip()
-            for line in source.splitlines()
-            if line.startswith("ReadWritePaths=")
-        ]
-
-        self.assertEqual(writable, ["/var/lib/brain/runtime"])
-        for forbidden in (
-            "/usr/local/lib/hermes-agent",
-            "/root/.hermes",
-            "/var/lib/brain/whatsapp-observer",
-        ):
-            self.assertNotIn(forbidden, source)
-
-    def test_writer_env_example_defaults_to_no_writing(self) -> None:
-        source = (ROOT / "deploy/brain-lifecycle-writer.env.example").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("BRAIN_LIFECYCLE_WRITE_ENABLED=false", source)
-        self.assertIn("BRAIN_CONDITIONAL_WRITE_PROOF=", source)
-        self.assertIn("BRAIN_WRITER_HEALTH_HOST=127.0.0.1", source)
-
-    def test_writer_env_example_carries_no_real_credential(self) -> None:
-        source = (ROOT / "deploy/brain-lifecycle-writer.env.example").read_text(
-            encoding="utf-8"
-        )
-
-        for line in source.splitlines():
-            if line.startswith(("BRAIN_WRITER_TOKEN=", "FAMACHAT_WRITER_KEY=")):
-                self.assertIn("replace-with", line)
-
-    def test_writer_credential_is_not_reachable_from_other_services(self) -> None:
-        """The write credential exists in one file and one unit, by design."""
-        for unit in ("brain.service", "brain-whatsapp-observer.service"):
-            source = (ROOT / "deploy" / unit).read_text(encoding="utf-8")
-            self.assertNotIn("writer.env", source)
-            self.assertNotIn("FAMACHAT_WRITER_KEY", source)
 
     def test_docs_preserve_upstream_and_distinguish_implemented_from_pending(
         self,

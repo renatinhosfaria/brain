@@ -24,20 +24,20 @@ from .authorization import (
 from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
-from .lifecycle_engine import LifecycleEngine
 from .projection import ProjectedMessage, project_rows
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
 from .transport_service import TransportService
-from .turn_correlation import (
-    TurnConflictError,
-    TurnCorrelationService,
-    TurnRegistration,
-    session_key_hmac,
-)
 from .whatsapp_identity import PhoneResolution, resolve_phone
 
 logger = logging.getLogger("brain.audit")
+
+# The CEO asks who it is speaking to now, so the answer is bounded to the
+# conversation at hand. Six hours covers a click and the exchange it starts,
+# including a lead who returns the same afternoon, without turning the reply
+# into an attribution history of the contact.
+CONTEXT_WINDOW_SECONDS = 6 * 60 * 60
+CONTEXT_MAX_EVENTS = 8
 CURSOR_VERSION = 1
 TRUNCATION_MARKER = "\n[… truncated …]"
 FORBIDDEN_ARGUMENTS = frozenset(
@@ -100,42 +100,14 @@ class BrainService:
             timeout_seconds=settings.busy_timeout_seconds,
         )
         self.runtime_ids: RuntimeIds | None = None
-        if settings.runtime_hmac_secret or settings.transport_hmac_secret:
-            if not settings.runtime_hmac_secret or not settings.transport_hmac_secret:
-                raise ValueError("both stable HMAC secrets are required")
-            self.runtime_ids = RuntimeIds(
-                settings.runtime_hmac_secret,
-                settings.transport_hmac_secret,
-            )
+        if settings.transport_hmac_secret:
+            self.runtime_ids = RuntimeIds(settings.transport_hmac_secret)
             self.runtime.initialize()
         self.transport_service = TransportService(
             settings,
             self.runtime,
             self.runtime_ids,
         )
-        self.turn_correlation: TurnCorrelationService | None = None
-        if self.runtime_ids is not None:
-            self.turn_correlation = TurnCorrelationService(
-                self.runtime,
-                self.runtime_ids,
-                runtime_secret=settings.runtime_hmac_secret,
-                observer_device_ids=settings.observer_device_ids,
-            )
-        self.lifecycle: LifecycleEngine | None = None
-        if self.runtime_ids is not None:
-            self.lifecycle = LifecycleEngine(
-                self.runtime,
-                self.runtime_ids,
-                runtime_secret=settings.runtime_hmac_secret,
-            )
-        if self.turn_correlation is not None:
-            self.transport_service.on_contact_observed = (
-                self.turn_correlation.reevaluate_contact
-            )
-        if self.lifecycle is not None:
-            self.transport_service.on_event_ingested = (
-                self.lifecycle.observe_transport_event
-            )
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
 
@@ -178,13 +150,13 @@ class BrainService:
         return bool(
             gateway
             and gateway.mode == "gateway"
-            and {"conversation_context", "turn_register"}.issubset(gateway.tools)
+            and "conversation_context" in gateway.tools
         )
 
     def _runtime_compatible(self) -> bool:
         if self.runtime_ids is None or not self.runtime.path.is_file():
             return False
-        required = {"transport_events", "whatsapp_turns", "turn_events"}
+        required = {"transport_events", "contact_ephemera"}
         try:
             return self.runtime.read(
                 lambda conn: required.issubset(
@@ -192,7 +164,7 @@ class BrainService:
                         str(row[0])
                         for row in conn.execute(
                             "SELECT name FROM sqlite_master "
-                            "WHERE type = 'table' AND name IN (?, ?, ?)",
+                            "WHERE type = 'table' AND name IN (?, ?)",
                             tuple(sorted(required)),
                         )
                     }
@@ -387,81 +359,10 @@ class BrainService:
             )
             raise DatabaseUnavailable() from exc
 
-    def gateway_register_turn(
-        self,
-        headers: Mapping[str, str],
-        context: GatewaySessionContext,
-        turn_id: str,
-        user_message: str,
-        turn_timestamp: float,
-        message_ids: tuple[str, ...] = (),
-    ) -> dict[str, Any]:
-        started = time.perf_counter()
-        identity: dict[str, Any] = {
-            "profile": "unknown",
-            "mode": "unknown",
-            "task_id": None,
-            "run_id": None,
-        }
-        try:
-            request_identity = self.authorizer.parse_gateway_headers(
-                headers, "turn_register"
-            )
-            identity["profile"] = request_identity.principal
-            identity["mode"] = self.settings.principals[request_identity.principal].mode
-            capability = self.authorizer.authorize_gateway(request_identity, context)
-            resolution = resolve_phone(
-                capability.chat_id, self.settings.whatsapp_session_dir
-            )
-            if resolution.status != "ok" or not resolution.phone:
-                raise BrainError("PHONE_NOT_RESOLVED", unavailable=True)
-            if self.runtime_ids is None or self.turn_correlation is None:
-                raise DatabaseUnavailable()
-            result = self.turn_correlation.register(
-                TurnRegistration(
-                    hermes_session_id=context.session_id,
-                    session_key=capability.session_key,
-                    contact_key=self.runtime_ids.contact_key(resolution.phone),
-                    turn_id=turn_id,
-                    user_message=user_message,
-                    turn_timestamp=turn_timestamp,
-                    message_ids=message_ids,
-                )
-            )
-            self._audit(
-                identity=identity,
-                tool="turn_register",
-                decision=str(result["correlation"]),
-                duration_ms=(time.perf_counter() - started) * 1000,
-            )
-            return result
-        except TurnConflictError as exc:
-            raise BrainError("TURN_CONFLICT") from exc
-        except BrainError as exc:
-            self._audit(
-                identity=identity,
-                tool="turn_register",
-                decision="deny" if not exc.unavailable else "unavailable",
-                duration_ms=(time.perf_counter() - started) * 1000,
-                error=exc.code,
-            )
-            raise
-        except Exception as exc:
-            logger.exception("brain turn registration failed: %s", type(exc).__name__)
-            self._audit(
-                identity=identity,
-                tool="turn_register",
-                decision="unavailable",
-                duration_ms=(time.perf_counter() - started) * 1000,
-                error="DB_UNAVAILABLE",
-            )
-            raise DatabaseUnavailable() from exc
-
     def gateway_conversation_context(
         self,
         headers: Mapping[str, str],
         context: GatewaySessionContext,
-        wa_turn_id: str,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         identity: dict[str, Any] = {
@@ -486,15 +387,9 @@ class BrainService:
                 raise DatabaseUnavailable()
             else:
                 contact_key = self.runtime_ids.contact_key(resolution.phone)
-                expected_session_hmac = session_key_hmac(
-                    self.settings.runtime_hmac_secret, capability.session_key
-                )
                 result = self.runtime.read(
                     lambda conn: self._conversation_context_from_runtime(
                         conn,
-                        wa_turn_id=wa_turn_id,
-                        hermes_session_id=context.session_id,
-                        session_key_digest=expected_session_hmac,
                         contact_key=contact_key,
                         phone_e164=resolution.phone,
                         now=time.time(),
@@ -532,46 +427,32 @@ class BrainService:
     def _conversation_context_from_runtime(
         conn: sqlite3.Connection,
         *,
-        wa_turn_id: str,
-        hermes_session_id: str,
-        session_key_digest: str,
         contact_key: str,
         phone_e164: str,
         now: float,
     ) -> dict[str, Any]:
-        turn = conn.execute(
-            "SELECT hermes_session_id, session_key_hmac, contact_key, "
-            "correlation_status FROM whatsapp_turns WHERE wa_turn_id = ?",
-            (wa_turn_id,),
-        ).fetchone()
-        if turn is None:
-            return {"status": "unavailable", "reason": "current_turn_not_registered"}
-        if (
-            str(turn["hermes_session_id"]) != hermes_session_id
-            or not hmac.compare_digest(
-                str(turn["session_key_hmac"]), session_key_digest
-            )
-            or not hmac.compare_digest(str(turn["contact_key"]), contact_key)
-        ):
-            return {"status": "unavailable", "reason": "current_turn_not_registered"}
-        correlation_status = str(turn["correlation_status"])
-        if correlation_status != "correlated":
-            reason = (
-                "ambiguous_transport_events"
-                if correlation_status == "ambiguous"
-                else "turn_not_correlated"
-            )
-            return {"status": "unavailable", "reason": reason}
+        """Transport evidence for the contact the CEO is speaking to right now.
 
+        Keyed by contact rather than by Hermes turn. Amendment 2 removed the
+        turn-correlation spine, and this contract no longer needs it: the CEO
+        asks who is on the other side and whether they arrived from an ad,
+        which is a property of the contact's recent transport, not of Hermes'
+        internal turn structure.
+
+        The window and count bounds are the contract, not tuning. A contact's
+        full transport history is a profile, not context, and section 7
+        forbids reading a lifecycle origin out of the oldest CTWA event ever
+        seen for a phone. Every event stays transport-level evidence:
+        `inbound_kind` is null here and always will be.
+        """
         rows = conn.execute(
-            "SELECT event.event_id, event.transport_kind, event.source_app "
-            "FROM turn_events AS binding JOIN transport_events AS event "
-            "ON event.event_id = binding.event_id WHERE binding.wa_turn_id = ? "
-            "ORDER BY binding.ordinal",
-            (wa_turn_id,),
+            "SELECT event_id, transport_kind, source_app FROM transport_events "
+            "WHERE contact_key = ? AND received_at > ? "
+            "ORDER BY received_at DESC, event_id LIMIT ?",
+            (contact_key, now - CONTEXT_WINDOW_SECONDS, CONTEXT_MAX_EVENTS),
         ).fetchall()
         if not rows:
-            return {"status": "unavailable", "reason": "turn_not_correlated"}
+            return {"status": "unavailable", "reason": "no_recent_transport"}
         ephemera = conn.execute(
             "SELECT display_name FROM contact_ephemera "
             "WHERE contact_key = ? AND expires_at > ? AND display_name IS NOT NULL",
@@ -585,7 +466,6 @@ class BrainService:
                 "display_name": display_name,
                 "display_name_source": "whatsapp_profile" if display_name else None,
             },
-            "turn": {"wa_turn_id": wa_turn_id},
             "events": [
                 {
                     "event_id": str(row["event_id"]),
@@ -595,7 +475,7 @@ class BrainService:
                     else None,
                     "inbound_kind": None,
                 }
-                for row in rows
+                for row in reversed(rows)
             ],
         }
 
