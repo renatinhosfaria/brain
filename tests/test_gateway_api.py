@@ -30,6 +30,11 @@ class GatewayAPITests(unittest.TestCase):
         state = sqlite3.connect(self.state_path)
         state.executescript(
             """
+            CREATE TABLE delivery_obligations (
+                obligation_id TEXT PRIMARY KEY, session_key TEXT, platform TEXT,
+                chat_id TEXT, content TEXT, state TEXT, created_at REAL,
+                updated_at REAL
+            );
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, session_key TEXT, source TEXT,
                 chat_id TEXT, chat_type TEXT, started_at REAL
@@ -51,10 +56,11 @@ class GatewayAPITests(unittest.TestCase):
             """
             CREATE TABLE tasks (
                 id TEXT PRIMARY KEY, assignee TEXT, status TEXT,
-                current_run_id INTEGER, session_id TEXT
+                current_run_id INTEGER, session_id TEXT, idempotency_key TEXT
             );
             CREATE TABLE task_runs (
-                id INTEGER PRIMARY KEY, task_id TEXT, status TEXT
+                id INTEGER PRIMARY KEY, task_id TEXT, status TEXT,
+                summary TEXT, metadata TEXT, started_at REAL, ended_at REAL
             );
             CREATE TABLE kanban_notify_subs (
                 task_id TEXT, platform TEXT, chat_id TEXT,

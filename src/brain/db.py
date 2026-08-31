@@ -14,8 +14,23 @@ T = TypeVar("T")
 
 SCHEMA_REQUIREMENTS: dict[str, dict[str, set[str]]] = {
     "kanban": {
-        "tasks": {"id", "assignee", "status", "current_run_id", "session_id"},
-        "task_runs": {"id", "task_id", "status"},
+        "tasks": {
+            "id",
+            "assignee",
+            "status",
+            "current_run_id",
+            "session_id",
+            "idempotency_key",
+        },
+        "task_runs": {
+            "id",
+            "task_id",
+            "status",
+            "summary",
+            "metadata",
+            "started_at",
+            "ended_at",
+        },
         "kanban_notify_subs": {
             "task_id",
             "platform",
@@ -25,6 +40,16 @@ SCHEMA_REQUIREMENTS: dict[str, dict[str, set[str]]] = {
         },
     },
     "state": {
+        "delivery_obligations": {
+            "obligation_id",
+            "session_key",
+            "platform",
+            "chat_id",
+            "content",
+            "state",
+            "created_at",
+            "updated_at",
+        },
         "sessions": {
             "id",
             "session_key",

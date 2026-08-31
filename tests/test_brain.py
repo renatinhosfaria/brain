@@ -101,6 +101,11 @@ class BrainFixture(unittest.TestCase):
         conn = sqlite3.connect(self.state_path)
         conn.executescript(
             """
+            CREATE TABLE delivery_obligations (
+                obligation_id TEXT PRIMARY KEY, session_key TEXT, platform TEXT,
+                chat_id TEXT, content TEXT, state TEXT, created_at REAL,
+                updated_at REAL
+            );
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, session_key TEXT, source TEXT,
                 chat_id TEXT, chat_type TEXT, started_at REAL
@@ -197,10 +202,11 @@ class BrainFixture(unittest.TestCase):
             """
             CREATE TABLE tasks (
                 id TEXT PRIMARY KEY, assignee TEXT, status TEXT,
-                current_run_id INTEGER, session_id TEXT
+                current_run_id INTEGER, session_id TEXT, idempotency_key TEXT
             );
             CREATE TABLE task_runs (
-                id INTEGER PRIMARY KEY, task_id TEXT, status TEXT
+                id INTEGER PRIMARY KEY, task_id TEXT, status TEXT,
+                summary TEXT, metadata TEXT, started_at REAL, ended_at REAL
             );
             CREATE TABLE kanban_notify_subs (
                 task_id TEXT, platform TEXT, chat_id TEXT,
@@ -209,7 +215,8 @@ class BrainFixture(unittest.TestCase):
             """
         )
         conn.executemany(
-            "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO tasks (id, assignee, status, current_run_id, session_id) "
+            "VALUES (?, ?, ?, ?, ?)",
             [
                 ("task-a", "reno", "running", 101, "a-new"),
                 ("task-b", "reno", "running", 102, "b-one"),
@@ -219,7 +226,7 @@ class BrainFixture(unittest.TestCase):
             ],
         )
         conn.executemany(
-            "INSERT INTO task_runs VALUES (?, ?, ?)",
+            "INSERT INTO task_runs (id, task_id, status) VALUES (?, ?, ?)",
             [
                 (101, "task-a", "running"),
                 (102, "task-b", "running"),
@@ -625,9 +632,13 @@ class BrainFixture(unittest.TestCase):
         conn.close()
         conn = sqlite3.connect(self.kanban_path)
         conn.execute(
-            "INSERT INTO tasks VALUES ('task-group', 'reno', 'running', 204, 'group-one')"
+            "INSERT INTO tasks (id, assignee, status, current_run_id, session_id) "
+            "VALUES ('task-group', 'reno', 'running', 204, 'group-one')"
         )
-        conn.execute("INSERT INTO task_runs VALUES (204, 'task-group', 'running')")
+        conn.execute(
+            "INSERT INTO task_runs (id, task_id, status) "
+            "VALUES (204, 'task-group', 'running')"
+        )
         conn.execute(
             "INSERT INTO kanban_notify_subs VALUES ('task-group', 'whatsapp', 'group@g.us', 'dm', 'default')"
         )
