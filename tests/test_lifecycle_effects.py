@@ -36,10 +36,12 @@ class DesiredStatusTests(unittest.TestCase):
             with self.subTest(facts=sorted(facts)):
                 self.assertEqual(desired_status(facts), expected)
 
-    def test_order_of_arrival_never_changes_the_answer(self) -> None:
-        """Out-of-order evidence is safe: the answer depends on the set only."""
-        both = [FACT_FIRST_T1_SEND_SUCCESS, FACT_FIRST_HUMAN_INBOUND]
-        self.assertEqual(desired_status(set(both)), desired_status(set(reversed(both))))
+    def test_a_partial_fact_set_never_outranks_the_complete_one(self) -> None:
+        """The human fact wins whether or not the T1 proof is present."""
+        self.assertEqual(
+            desired_status({FACT_FIRST_HUMAN_INBOUND}),
+            desired_status({FACT_FIRST_HUMAN_INBOUND, FACT_FIRST_T1_SEND_SUCCESS}),
+        )
 
     def test_unknown_facts_do_not_move_the_state(self) -> None:
         self.assertEqual(
@@ -207,6 +209,21 @@ class EffectTests(unittest.TestCase):
                 self.add_fact(FACT_FIRST_HUMAN_INBOUND)
                 self.engine.recompute_effects("fx_one")
                 self.assertEqual(self.effects(), [])
+
+    def test_arrival_order_does_not_change_the_effect(self) -> None:
+        """Out-of-order evidence is safe end to end, not just in the pure table.
+
+        Learning about the human reply first and the T1 proof second must land
+        on the same effect as the other order.
+        """
+        self.add_fact(FACT_FIRST_HUMAN_INBOUND, observed_at=1100.0)
+        self.engine.recompute_effects("fx_one")
+        self.add_fact(FACT_FIRST_T1_SEND_SUCCESS, observed_at=1200.0)
+        self.engine.recompute_effects("fx_one")
+
+        live = self.live()
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0]["target_status"], EM_ATENDIMENTO)
 
     def test_recompute_is_idempotent(self) -> None:
         self.add_fact(FACT_FIRST_T1_SEND_SUCCESS)

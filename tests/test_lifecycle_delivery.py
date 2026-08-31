@@ -122,9 +122,7 @@ class DeliveryProofTests(unittest.TestCase):
         return self.engine.prove_first_t1_send(
             self.lifecycle_id,
             run or self.reno_run(),
-            list(self.obligation() for _ in range(1))
-            if obligations is None
-            else obligations,
+            [self.obligation()] if obligations is None else obligations,
         )
 
     # ------------------------------------------------------------------

@@ -481,6 +481,115 @@ class LifecycleEngine:
             tuple(parameters),
         )
 
+    def apply_retention(
+        self,
+        *,
+        now: float | None = None,
+        display_name_ttl_hours: float = 24.0,
+        transport_retention_days: float = 90.0,
+    ) -> dict[str, int]:
+        """Delete what the retention policy no longer allows Brain to keep.
+
+        Spec section 19. The minimal active binding deliberately outlives the
+        transport window: a lead may answer after ninety days, and honouring
+        that reply must not require keeping the raw CTWA evidence for it.
+        """
+        moment = self.clock() if now is None else now
+        display_cutoff = moment
+        transport_cutoff = moment - transport_retention_days * 86400
+        audit_cutoff = moment - transport_retention_days * 86400
+
+        def write(conn: sqlite3.Connection) -> dict[str, int]:
+            removed = {"display_names": 0, "transport_events": 0, "lifecycles": 0}
+
+            cursor = conn.execute(
+                "UPDATE contact_ephemera SET display_name = NULL "
+                "WHERE display_name IS NOT NULL AND expires_at <= ?",
+                (display_cutoff,),
+            )
+            removed["display_names"] = cursor.rowcount or 0
+
+            # An event still bound to a turn or standing as a lifecycle origin
+            # is evidence in use, not history.
+            cursor = conn.execute(
+                "DELETE FROM transport_events WHERE created_at <= ? "
+                "AND event_id NOT IN (SELECT event_id FROM turn_events) "
+                "AND event_id NOT IN "
+                "(SELECT origin_event_id FROM lead_lifecycles)",
+                (transport_cutoff,),
+            )
+            removed["transport_events"] = cursor.rowcount or 0
+
+            terminal = [
+                str(row["lifecycle_id"])
+                for row in conn.execute(
+                    "SELECT lifecycle_id FROM lead_lifecycles "
+                    "WHERE phase != ? AND terminal_at IS NOT NULL "
+                    "AND terminal_at <= ?",
+                    (PHASE_ACTIVE, audit_cutoff),
+                )
+            ]
+            for lifecycle_id in terminal:
+                conn.execute(
+                    "DELETE FROM lifecycle_effects WHERE lifecycle_id = ?",
+                    (lifecycle_id,),
+                )
+                conn.execute(
+                    "DELETE FROM lifecycle_facts WHERE lifecycle_id = ?",
+                    (lifecycle_id,),
+                )
+                conn.execute(
+                    "DELETE FROM lead_lifecycles WHERE lifecycle_id = ?",
+                    (lifecycle_id,),
+                )
+            removed["lifecycles"] = len(terminal)
+            return removed
+
+        return self.runtime.write(write)
+
+    def lifecycle_for_turn(self, wa_turn_id: str) -> str | None:
+        """The active lifecycle a stage card's origin turn belongs to."""
+
+        def read(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT lifecycle_id FROM lead_lifecycles "
+                "WHERE wa_turn_id = ? AND phase = ?",
+                (wa_turn_id, PHASE_ACTIVE),
+            ).fetchone()
+            return str(row["lifecycle_id"]) if row is not None else None
+
+        return self.runtime.read(read)
+
+    def session_key_for_turn(self, wa_turn_id: str) -> str | None:
+        """The Hermes session id this turn was registered against.
+
+        Brain keeps only a keyed digest of the session key itself, so the raw
+        value is never readable from its own storage. The session id is what
+        the evidence reader needs to find the right obligations, and the digest
+        is what proves they belong to this turn.
+        """
+
+        def read(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT hermes_session_id FROM whatsapp_turns WHERE wa_turn_id = ?",
+                (wa_turn_id,),
+            ).fetchone()
+            return str(row["hermes_session_id"]) if row is not None else None
+
+        return self.runtime.read(read)
+
+    def active_lifecycle_ids(self) -> list[str]:
+        return self.runtime.read(
+            lambda conn: [
+                str(row["lifecycle_id"])
+                for row in conn.execute(
+                    "SELECT lifecycle_id FROM lead_lifecycles WHERE phase = ? "
+                    "ORDER BY created_at, lifecycle_id",
+                    (PHASE_ACTIVE,),
+                )
+            ]
+        )
+
     def _claim_human_fact(
         self,
         conn: sqlite3.Connection,
