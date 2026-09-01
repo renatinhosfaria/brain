@@ -204,6 +204,44 @@ its databases. It no longer inspects bridge batching, adapter debounce or
 delivery-ledger states: those contracts belonged to turn correlation and to
 proving the first T1 send, and Amendment 2 removed both.
 
+### Bracketing a `hermes update`
+
+An update moves the upstream installation and nothing else should move with it,
+but it also restarts the gateway on its own, so anything it did change is
+already live before anyone looks. `scripts/hermes_update_guard.py` records the
+Fama-owned files beforehand and names what differs afterwards, separating the
+expected movement from the alarming kind.
+
+```sh
+cd /root/brain
+.venv/bin/python scripts/hermes_update_guard.py before \
+    --out /var/lib/brain/runtime/staging/pre-update.json
+
+hermes update
+
+.venv/bin/python scripts/hermes_update_guard.py after \
+    --snapshot /var/lib/brain/runtime/staging/pre-update.json
+```
+
+It watches the CEO plugin's four source files, every Profile's `config.yaml`
+and `SOUL.md`, the CEO's own SOUL and skill, `verify_team.py`, Reno's FamaChat
+allowlist and `/etc/brain/brain.toml`. A moved upstream HEAD is reported as
+expected, together with the reminder that the integrity baseline no longer
+applies; an upstream that did **not** move is reported as a finding, because
+the likeliest explanation is that the update never ran.
+
+The one risk this cannot rule out in advance is Profile config migration. The
+update migrates `config.yaml` across `_config_version` (39 at the time of
+writing) using a deep merge, so user overrides such as Reno's `tools.include`
+should survive — but that is read from the upstream source, not proven by
+running it. The guard is what settles it, and `verify_team.py` is what catches
+the consequence if the merge ever stops preserving them.
+
+Then, in order: `verify_team.py full`, `hermes_integration_check.py`,
+`smoke_test.py`, and the re-baselining below **last**. Integrity is
+re-established only once the rest has confirmed the installation still behaves
+as Brain expects; doing it first would attest a tree nobody had checked.
+
 ### Re-baselining after an authorized Hermes update
 
 An update moves the upstream HEAD, so `hermes_integrity.py verify` will fail
