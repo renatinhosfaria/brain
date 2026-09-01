@@ -91,21 +91,36 @@ def check_upstream_contracts(hermes_root: Path) -> None:
     """Verify only the upstream surface Brain actually depends on.
 
     Amendment 2 left the Brain context plugin with one tool and no hooks. The
-    handover plugin now uses only the public pre-dispatch hook and slash command
-    registrations; the retired turn-correlation hooks remain out of scope.
+    handover plugin uses the public pre-dispatch hook, platform-handler and
+    slash-command registrations. Its active-turn guard wraps the adapter's
+    busy handler before normal messages can be queued.
     """
+    from gateway.platforms.base import BasePlatformAdapter
     from gateway.run import GatewayRunner
     from gateway.session_context import _VAR_MAP, get_session_env
     from hermes_cli.plugins import PluginContext
 
     if "name" not in inspect.signature(PluginContext.register_tool).parameters:
         fail("Hermes public plugin tool registration API changed")
-    if not {"hook_name", "callback"}.issubset(
-        inspect.signature(PluginContext.register_hook).parameters
-    ) or not {"name", "handler"}.issubset(
-        inspect.signature(PluginContext.register_command).parameters
+    if (
+        not {"hook_name", "callback"}.issubset(
+            inspect.signature(PluginContext.register_hook).parameters
+        )
+        or not {"name", "handler"}.issubset(
+            inspect.signature(PluginContext.register_command).parameters
+        )
+        or not {"platform", "factory"}.issubset(
+            inspect.signature(PluginContext.register_platform_handler).parameters
+        )
     ):
-        fail("Hermes public plugin hook/command registration API changed")
+        fail("Hermes public plugin hook/command/platform registration API changed")
+    if (
+        "handler"
+        not in inspect.signature(
+            BasePlatformAdapter.set_busy_session_handler
+        ).parameters
+    ):
+        fail("Hermes busy-session handler registration API changed")
     interrupt_parameters = inspect.signature(
         GatewayRunner._interrupt_and_clear_session
     ).parameters
@@ -136,6 +151,9 @@ def check_upstream_contracts(hermes_root: Path) -> None:
     bridge = hermes_root / "scripts/whatsapp-bridge/bridge.js"
     bridge_source = bridge.read_text(encoding="utf-8")
     adapter_source = (hermes_root / "plugins/platforms/whatsapp/adapter.py").read_text(
+        encoding="utf-8"
+    )
+    base_adapter_source = (hermes_root / "gateway/platforms/base.py").read_text(
         encoding="utf-8"
     )
     gateway_source = (hermes_root / "gateway/run.py").read_text(encoding="utf-8")
@@ -170,6 +188,23 @@ def check_upstream_contracts(hermes_root: Path) -> None:
         )
     ):
         fail("Hermes pre-dispatch handover context changed")
+    if (
+        not all(
+            fragment in base_adapter_source
+            for fragment in (
+                "def _wire_plugin_handlers(self, native:",
+                "if session_key in self._active_sessions:",
+                "if await self._busy_session_handler(event, session_key):",
+            )
+        )
+        or "self._wire_plugin_handlers(None)" not in adapter_source
+    ):
+        fail("Hermes active-session handover interception contract changed")
+    gateway_busy_assignment = (
+        "adapter.set_busy_session_handler(self._handle_active_session_busy_message)"
+    )
+    if gateway_busy_assignment not in "".join(gateway_source.split()):
+        fail("Hermes gateway busy-session handler binding changed")
 
     # The delivery ledger was checked because proving the first successful T1
     # send read its states. Nothing derives that fact any more.
@@ -396,13 +431,14 @@ def main() -> int:
         "on",
     }:
         fail("CEO: WHATSAPP_FORWARD_OWNER_MESSAGES is not enabled")
-    for env_name in (
-        "FAMA_HANDOVER_TELEGRAM_CHAT_ID",
-        "FAMA_HANDOVER_TELEGRAM_THREAD_ID",
-        "FAMA_HANDOVER_TELEGRAM_USER_ID",
-    ):
-        if not ceo_env.get(env_name, "").strip():
-            fail(f"CEO: {env_name} is missing")
+    expected_handover_admin = {
+        "FAMA_HANDOVER_TELEGRAM_CHAT_ID": "-1004374717222",
+        "FAMA_HANDOVER_TELEGRAM_THREAD_ID": "1",
+        "FAMA_HANDOVER_TELEGRAM_USER_ID": "8564576789",
+    }
+    for env_name, expected in expected_handover_admin.items():
+        if ceo_env.get(env_name, "").strip() != expected:
+            fail(f"CEO: {env_name} does not match the authorized administrator")
     plugin_path = Path(__file__).parents[1] / "integrations/hermes/brain-ceo-bridge"
     if not plugin_path.is_dir():
         fail(f"CEO: versioned Brain bridge is missing: {plugin_path}")

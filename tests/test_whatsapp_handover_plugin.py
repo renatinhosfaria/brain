@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -35,6 +36,7 @@ def load_plugin():
 class FakeSessionStore:
     def __init__(self) -> None:
         self.messages: list[tuple[str, dict]] = []
+        self.transcript: list[dict] = []
 
     def get_or_create_session(self, source, touch_activity=False):
         return SimpleNamespace(
@@ -51,6 +53,9 @@ class FakeSessionStore:
     def append_to_transcript(self, session_id, message):
         self.messages.append((session_id, dict(message)))
 
+    def load_transcript(self, session_id):
+        return list(self.transcript)
+
 
 class FakeAgent:
     def __init__(self) -> None:
@@ -65,9 +70,13 @@ class FakeGateway:
         self._running_agents = {
             "agent:main:whatsapp:dm:553499602714": agent,
         }
+        self.invalidations: list[tuple[str, str]] = []
 
     def _session_key_for_source(self, source):
         return "agent:main:whatsapp:dm:553499602714"
+
+    def _invalidate_session_run_generation(self, session_key, *, reason):
+        self.invalidations.append((session_key, reason))
 
 
 class AsyncHardGateway(FakeGateway):
@@ -88,11 +97,44 @@ class AsyncHardGateway(FakeGateway):
         )
 
 
-def event(*, text: str, message_id: str, from_owner: bool):
+class BusyGateway(AsyncHardGateway):
+    def __init__(self, agent: FakeAgent, session_store: FakeSessionStore) -> None:
+        super().__init__(agent)
+        self.session_store = session_store
+        self.original_busy_calls: list[tuple[object, str]] = []
+
+    async def original_busy(self, event, session_key):
+        self.original_busy_calls.append((event, session_key))
+        return False
+
+
+class BusyAdapter:
+    def __init__(self, gateway: BusyGateway) -> None:
+        self.gateway = gateway
+        self._busy_session_handler = gateway.original_busy
+
+    @property
+    def original_busy_calls(self):
+        return self.gateway.original_busy_calls
+
+    def set_busy_session_handler(self, handler):
+        self._busy_session_handler = handler
+
+
+def event(
+    *,
+    text: str,
+    message_id: str,
+    from_owner: bool,
+    media_urls: list[str] | None = None,
+    media_types: list[str] | None = None,
+):
     return SimpleNamespace(
         text=text,
         message_id=message_id,
         metadata={"whatsapp_from_owner": from_owner},
+        media_urls=media_urls or [],
+        media_types=media_types or [],
         source=SimpleNamespace(
             platform=SimpleNamespace(value="whatsapp"),
             chat_type="dm",
@@ -251,6 +293,15 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         self.assertEqual(result, {"action": "skip", "reason": "human_handover"})
         self.assertEqual(agent.interrupts, ["[control interrupt: human handover]"])
         self.assertEqual(
+            gateway.invalidations,
+            [
+                (
+                    "agent:main:whatsapp:dm:553499602714",
+                    "human_handover",
+                )
+            ],
+        )
+        self.assertEqual(
             gateway.hard_interrupts,
             [
                 (
@@ -261,6 +312,59 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_owner_reply_bypasses_busy_queue_and_awaits_hard_stop(self):
+        plugin = load_plugin()
+        sessions = FakeSessionStore()
+        agent = FakeAgent()
+        gateway = BusyGateway(agent, sessions)
+        adapter = BusyAdapter(gateway)
+        plugin._wire_whatsapp_adapter(None, adapter)
+        owner_event = event(
+            text="[owner reply] Vou assumir agora.",
+            message_id="owner-busy-1",
+            from_owner=True,
+        )
+
+        consumed = asyncio.run(
+            adapter._busy_session_handler(
+                owner_event,
+                "agent:main:whatsapp:dm:553499602714",
+            )
+        )
+
+        self.assertTrue(consumed)
+        self.assertEqual(adapter.original_busy_calls, [])
+        self.assertEqual(len(gateway.hard_interrupts), 1)
+        self.assertTrue(plugin.HandoverStore.from_env().is_paused("553499602714"))
+        self.assertEqual(len(sessions.messages), 1)
+
+    def test_busy_paused_customer_message_is_consumed_without_queueing(self):
+        plugin = load_plugin()
+        plugin.HandoverStore.from_env().pause(
+            "553499602714",
+            session_key="agent:main:whatsapp:dm:553499602714",
+            owner_message_id="owner-1",
+        )
+        sessions = FakeSessionStore()
+        gateway = BusyGateway(FakeAgent(), sessions)
+        adapter = BusyAdapter(gateway)
+        plugin._wire_whatsapp_adapter(None, adapter)
+
+        consumed = asyncio.run(
+            adapter._busy_session_handler(
+                event(
+                    text="Continuando enquanto você atende.",
+                    message_id="customer-busy-1",
+                    from_owner=False,
+                ),
+                "agent:main:whatsapp:dm:553499602714",
+            )
+        )
+
+        self.assertTrue(consumed)
+        self.assertEqual(adapter.original_busy_calls, [])
+        self.assertEqual(len(sessions.messages), 1)
 
     def test_paused_customer_message_is_ingested_without_reaching_the_llm(self):
         plugin = load_plugin()
@@ -296,6 +400,92 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_paused_media_references_are_preserved_in_the_transcript(self):
+        plugin = load_plugin()
+        plugin.HandoverStore.from_env().pause(
+            "553499602714",
+            session_key="agent:main:whatsapp:dm:553499602714",
+            owner_message_id="owner-1",
+        )
+        sessions = FakeSessionStore()
+
+        result = plugin.pre_gateway_dispatch(
+            event=event(
+                text="",
+                message_id="customer-audio-1",
+                from_owner=False,
+                media_urls=["/tmp/hermes/audio-customer-audio-1.ogg"],
+                media_types=["audio/ogg"],
+            ),
+            gateway=FakeGateway(FakeAgent()),
+            session_store=sessions,
+        )
+
+        self.assertEqual(result, {"action": "skip", "reason": "human_handover"})
+        content = sessions.messages[0][1]["content"]
+        self.assertIn("audio/ogg", content)
+        self.assertIn("/tmp/hermes/audio-customer-audio-1.ogg", content)
+
+    def test_recent_agent_echo_after_bridge_restart_does_not_pause_contact(self):
+        plugin = load_plugin()
+        sessions = FakeSessionStore()
+        sessions.transcript = [
+            {
+                "role": "assistant",
+                "content": "Resposta que acabou de sair.",
+                "timestamp": time.time(),
+                "observed": False,
+            }
+        ]
+
+        result = plugin.pre_gateway_dispatch(
+            event=event(
+                text="[owner reply] Resposta que acabou de sair.",
+                message_id="echo-after-restart",
+                from_owner=True,
+            ),
+            gateway=FakeGateway(FakeAgent()),
+            session_store=sessions,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "human_handover_agent_echo"},
+        )
+        self.assertFalse(plugin.HandoverStore.from_env().is_paused("553499602714"))
+        self.assertEqual(sessions.messages, [])
+
+    def test_recent_chunked_agent_echo_after_restart_does_not_pause_contact(self):
+        plugin = load_plugin()
+        sessions = FakeSessionStore()
+        sessions.transcript = [
+            {
+                "role": "assistant",
+                "content": (
+                    "Primeira parte da resposta. "
+                    "Esta é a segunda parte entregue separadamente."
+                ),
+                "timestamp": time.time(),
+                "observed": False,
+            }
+        ]
+
+        result = plugin.pre_gateway_dispatch(
+            event=event(
+                text=("[owner reply] Esta é a segunda parte entregue separadamente."),
+                message_id="chunk-echo-after-restart",
+                from_owner=True,
+            ),
+            gateway=FakeGateway(FakeAgent()),
+            session_store=sessions,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "human_handover_agent_echo"},
+        )
+        self.assertFalse(plugin.HandoverStore.from_env().is_paused("553499602714"))
 
     def test_pause_survives_lid_to_phone_identity_transition(self):
         session_dir = Path(self.temp_dir.name) / "platforms" / "whatsapp" / "session"
@@ -568,14 +758,18 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
             "⛔ Não foi possível alterar a pausa. Tente novamente.",
         )
 
-    def test_registers_only_handover_hook_and_resume_command(self):
+    def test_registers_handover_hook_platform_guard_and_resume_command(self):
         plugin = load_plugin()
         hooks: list[tuple[str, object]] = []
         commands: list[tuple[str, object, str, str]] = []
+        platform_handlers: list[tuple[str, object]] = []
 
         class Context:
             def register_hook(self, name, callback):
                 hooks.append((name, callback))
+
+            def register_platform_handler(self, name, callback):
+                platform_handlers.append((name, callback))
 
             def register_command(
                 self,
@@ -591,6 +785,10 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         register(Context())
 
         self.assertEqual(hooks, [("pre_gateway_dispatch", plugin.pre_gateway_dispatch)])
+        self.assertEqual(
+            platform_handlers,
+            [("whatsapp", plugin._wire_whatsapp_adapter)],
+        )
         self.assertEqual(
             commands,
             [

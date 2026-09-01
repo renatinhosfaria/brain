@@ -224,6 +224,11 @@ class DeploymentContractTests(unittest.TestCase):
             "installed_handover_plugin",
             "whatsapp_from_owner",
             '"observed"',
+            "register_platform_handler",
+            "set_busy_session_handler",
+            "_handle_active_session_busy_message",
+            '"-1004374717222"',
+            '"8564576789"',
         ):
             self.assertIn(required, source)
 
@@ -297,6 +302,9 @@ class DeploymentContractTests(unittest.TestCase):
             "FAMA_HANDOVER_TELEGRAM_USER_ID=8564576789",
             "/retomar <telefone>",
             "does not send",
+            "disable `fama-whatsapp-human-handover`",
+            "WHATSAPP_FORWARD_OWNER_MESSAGES=false",
+            "handover.db",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, runbook)

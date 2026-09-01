@@ -352,6 +352,14 @@ and keep the worker Profiles' Brain MCP entries disabled. Stopping
 `brain.service` is safe: Brain owns no transcript and writes no Hermes domain
 data.
 
+For a WhatsApp handover-only rollback, disable `fama-whatsapp-human-handover`
+and set
+`WHATSAPP_FORWARD_OWNER_MESSAGES=false` in the same gateway restart. Retain
+`$HERMES_HOME/plugin-data/fama-whatsapp-human-handover/handover.db` by default
+so paused-contact state remains recoverable and auditable. Delete that database
+only after an explicit, permanent decommission decision; disabling the plugin
+does not require deleting it.
+
 Rollback does not require reverting files under `/usr/local/lib/hermes-agent`;
 those files are never deployment targets for Brain. Brain rollback and
 Hermes-core rollback do not require reverting the same artifacts.

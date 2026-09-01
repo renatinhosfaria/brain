@@ -8,6 +8,12 @@ as an observed human assistant reply in the canonical Hermes transcript, and
 interrupts any in-flight CEO turn. Customer messages received while paused are
 recorded as observed user messages and skipped before the LLM.
 
+Text and attachment type/path references are kept in the transcript. Media is
+not transcribed while the contact is paused, because the silent path invokes no
+LLM, tool or action. During the first two minutes after a gateway restart, an
+exact match against a recent non-observed CEO response is treated as a bridge
+echo and does not activate handover.
+
 The pause remains until the configured CEO administrator sends
 `/retomar <telefone>` in the configured Telegram chat and topic. Resuming does
 not send a WhatsApp message or process the accumulated messages; the next
