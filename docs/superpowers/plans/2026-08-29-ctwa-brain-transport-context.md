@@ -51,7 +51,7 @@
 - `parse_gateway_headers(headers, required_capability)` replaces the current phone-specific gateway gate.
 - `BrainSettings` adds `runtime_db`, `observer_session_dir`, `transport_hmac_secret`, `transport_retention_days=90`, `display_name_ttl_hours=24`.
 
-- [ ] **Step 1: Write failing config tests**
+- [x] **Step 1: Write failing config tests**
 
 Add tests that accept:
 
@@ -64,7 +64,7 @@ principals={
 
 and reject a short/missing stable runtime or transport HMAC secret in production settings.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_config -v
@@ -72,7 +72,7 @@ PYTHONPATH=src .venv/bin/python -m unittest tests.test_config -v
 
 Expected: service mode/settings unsupported.
 
-- [ ] **Step 3: Implement minimal settings/ACL**
+- [x] **Step 3: Implement minimal settings/ACL**
 
 Use exact defaults:
 
@@ -88,7 +88,7 @@ VALID_TOOLS = frozenset({
 
 No unused `kanban_binding_register` capability is added.
 
-- [ ] **Step 4: Prove mode/capability separation**
+- [x] **Step 4: Prove mode/capability separation**
 
 `tests/test_service_authorization.py` must prove the observer can only `transport_ingest` and that worker/gateway tokens are rejected by the service parser. Gateway parser must require the named capability and reject service tokens.
 
@@ -98,7 +98,7 @@ PYTHONPATH=src .venv/bin/python -m unittest tests.test_config tests.test_service
 
 Expected: PASS.
 
-- [ ] **Step 5: Update example config and commit**
+- [x] **Step 5: Update example config and commit**
 
 Add server paths/retention and distinct principal examples; secrets are comments/env references, never checked-in values.
 
@@ -122,21 +122,21 @@ git commit -m "feat: add Brain runtime service principals"
 - `RuntimeIds(transport_secret)` with `contact_key`, `event_id`, `body_hmac`, `jid_hmac`, `opaque_hmac`.
 - Tables: `transport_events` and `contact_ephemera`. Amendment 2 removed the other eight.
 
-- [ ] **Step 1: Write schema and ID stability tests**
+- [x] **Step 1: Write schema and ID stability tests**
 
 Assert the exact table set, unique keys and WAL. Prove the same observer/device message gives the same `waevt_`, a different device gives a different ID, and that changing the one transport secret moves every derived identifier.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_runtime_db -v
 ```
 
-- [ ] **Step 3: Implement SQLite/IDs**
+- [x] **Step 3: Implement SQLite/IDs**
 
 Use HMAC-SHA256 with explicit domain prefixes and one transaction for schema initialization. Do not reuse the Hermes `ReadOnlyDatabase` class for Brain writes.
 
-- [ ] **Step 4: Wire into `BrainService` and run regression tests**
+- [x] **Step 4: Wire into `BrainService` and run regression tests**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_runtime_db tests.test_brain tests.test_gateway_api -v
@@ -144,7 +144,7 @@ PYTHONPATH=src .venv/bin/python -m unittest tests.test_runtime_db tests.test_bra
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/brain/runtime_db.py src/brain/transport_models.py src/brain/service.py tests/test_runtime_db.py tests/test_brain.py tests/test_gateway_api.py
@@ -169,19 +169,19 @@ git commit -m "feat: add Brain runtime persistence"
 - Input contains only: `event_id`, `observer_device_id`, `received_at`, `message_timestamp`, `remote_jid_hmac`, optional derived `contact_key`, `body_hmac`, `body_length`, sanitized optional `display_name`, `native_type`, `transport_kind`, and already-sanitized CTWA metadata (`source_type`, `source_app`, source-id length/HMAC, URL hostname/length/HMAC, ctwaClid length/HMAC, booleans).
 - No raw body/JID/message ID/source ID/ctwaClid/full URL is accepted by this endpoint.
 
-- [ ] **Step 1: Add mapping-directory contact-key verification tests**
+- [x] **Step 1: Add mapping-directory contact-key verification tests**
 
 Extend `whatsapp_identity.py` with a helper that enumerates only valid allowlisted PN/LID mapping files, derives `contact_key`/`remote_jid_hmac` using the transport key, and requires exactly one canonical phone match. Conflicting/invalid mapping evidence is unavailable.
 
-- [ ] **Step 2: Write ingestion RED tests**
+- [x] **Step 2: Write ingestion RED tests**
 
 Prove a safe CTWA envelope persists. Prove payloads containing forbidden raw fields (`body`, `remote_jid`, `message_id`, `sourceId`, `ctwaClid`, `sourceUrl`) are rejected. Prove duplicate `event_id` is a successful no-op. Prove unverified contact/JID HMAC returns retryable unavailable without persisting.
 
-- [ ] **Step 3: Implement strict route**
+- [x] **Step 3: Implement strict route**
 
 Authenticate before body read, cap body size, validate exact field set/types, verify `event_id`/HMAC formats, independently match observer identity evidence through the observer mapping directory, and persist only the safe envelope. Display name is control-stripped/160-char bounded and gets an expiry timestamp.
 
-- [ ] **Step 4: Run focused suite**
+- [x] **Step 4: Run focused suite**
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_transport_ingest tests.test_whatsapp_identity tests.test_gateway_api -v
@@ -189,7 +189,7 @@ PYTHONPATH=src .venv/bin/python -m unittest tests.test_transport_ingest tests.te
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/brain/transport_api.py src/brain/transport_service.py src/brain/mcp_server.py src/brain/whatsapp_identity.py src/brain/service.py tests/test_transport_ingest.py tests/test_whatsapp_identity.py
@@ -276,19 +276,19 @@ git commit -m "feat: ingest privacy-safe WhatsApp transport events"
 - Health adds `runtime_db` and `hermes_compatibility` without PII.
 - Compatibility checker verifies required public hooks/payload IDs, session ContextVars, read-only schemas, delivery-ledger semantics, and supported WhatsApp batching behavior; it never writes upstream.
 
-- [ ] **Step 1: Add deployment-contract RED tests**
+- [x] **Step 1: Add deployment-contract RED tests**
 
 Require the stable transport HMAC secret, runtime/observer paths, the default gateway capability `[conversation_context]`, the observer principal, and the CEO plugin's single expected tool `conversation_context`.
 
-- [ ] **Step 2: Implement compatibility/health updates**
+- [x] **Step 2: Implement compatibility/health updates**
 
 Unsupported Hermes means Brain lifecycle/context degraded/unavailable and writes disabled; Hermes service itself continues.
 
-- [ ] **Step 3: Update docs/examples**
+- [x] **Step 3: Update docs/examples**
 
 Document `/var/lib/brain/runtime` 0700, runtime DB 0600, secret separation, plugin deployment outside upstream, and rollback without upstream edits.
 
-- [ ] **Step 4: Run full Brain quality gate**
+- [x] **Step 4: Run full Brain quality gate**
 
 ```bash
 uv run ruff check src tests scripts integrations
@@ -298,12 +298,30 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/brain/service.py deploy scripts tests/test_deployment_contracts.py README.md docs/runbook.md
 git commit -m "chore: harden Brain transport context deployment"
 ```
+
+## Bookkeeping
+
+**Audited 2026-09-01.** Tasks 1, 2, 3 and 6 had every step unticked while their
+code had been shipped and tested for days; tasks 4 and 5 were ticked because
+they were rewritten under Amendment 2 and the boxes were maintained then. The
+boxes are now ticked against named evidence, not from memory:
+
+| Task | Proven by |
+| --- | --- |
+| 1 · settings and principal ACL | `tests/test_config.py`, `tests/test_service_authorization.py` |
+| 2 · runtime schema and derived IDs | `tests/test_runtime_db.py` |
+| 3 · observer envelope ingestion | `tests/test_transport_ingest.py` |
+| 4 · retention on the ingestion path | `tests/test_transport_ingest.py` retention suites |
+| 5 · contact-scoped `conversation_context()` | `tests/test_gateway_api.py`, `tests/test_ceo_bridge_plugin.py` |
+| 6 · health, compatibility, deployment examples | `tests/test_brain.py`, `tests/test_deployment_contracts.py` |
+
+A ticked box is worth exactly the evidence behind it. These now name theirs.
 
 ## Acceptance Gate
 
