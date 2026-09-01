@@ -138,8 +138,10 @@ def create(root: Path, repo: Path, config: Path) -> Path:
     A bundle is named by a commit, so its contents are that commit's, and
     rewriting them would silently change what `active` or `previous` means for
     anyone who verified it earlier. An existing directory is therefore never
-    deleted: it is rebuilt beside itself and compared. Identical is a no-op,
-    different is a refusal, and the operator is told which files disagree.
+    deleted: it is rebuilt beside itself and compared. Different is a refusal
+    naming the files that disagree; identical is accepted only after it passes
+    `verify`, so the acceptance path asserts the same property every other
+    caller relies on.
     """
     head = _require_clean_worktree(repo)
     _validate_config(config)
@@ -168,6 +170,11 @@ def create(root: Path, repo: Path, config: Path) -> Path:
                     f"{head} already exists and differs in {differing}. A bundle "
                     "is immutable; build a new commit instead of rewriting one."
                 )
+            # Equality already implies the manifest agrees, but acceptance is
+            # where "this bundle is good" is asserted, so it goes through the
+            # same check every other caller trusts rather than a private
+            # shortcut that could drift from it.
+            verify(root, head)
         else:
             os.replace(staging, target)
     finally:

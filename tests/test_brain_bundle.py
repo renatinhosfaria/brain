@@ -251,6 +251,29 @@ class BundleImmutabilityTests(BundleTests):
         self.assertEqual((first / "brain.toml").read_text(encoding="utf-8"), marker)
         self.assertEqual(bundle.verify(self.root, "candidate"), first.name)
 
+    def test_accepting_an_existing_bundle_routes_through_verify(self) -> None:
+        """Acceptance must be a verification, not only a comparison.
+
+        Content equality implies the manifest agrees today, but the acceptance
+        path is where "this bundle is good" is asserted, and it should say so
+        through the same function every other caller trusts.
+        """
+        self.create()
+        checked = []
+        real_verify = bundle.verify
+
+        def watched(root, ref):
+            checked.append(ref)
+            return real_verify(root, ref)
+
+        bundle.verify = watched
+        try:
+            self.create()
+        finally:
+            bundle.verify = real_verify
+
+        self.assertTrue(checked, "create accepted an existing bundle unverified")
+
     def test_a_corrupt_existing_bundle_is_not_silently_repaired(self) -> None:
         first = self.create()
         (first / "brain.toml").write_text("tampered", encoding="utf-8")
