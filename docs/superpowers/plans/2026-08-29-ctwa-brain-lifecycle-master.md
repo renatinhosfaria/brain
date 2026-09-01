@@ -63,10 +63,9 @@ been deleted.
 - [x] Validate the context contract with `transport_kind` present and `inbound_kind=null`.
 - [x] Prove retention actually runs: an expired display name is deleted from storage, not merely hidden from reads.
 - [x] Brain deploys no status writer and holds no FamaChat credential.
-- [ ] **Not closed:** the code has never run in production. Per the Completion
-  Definition below, a stage is complete when its component has processed a real
-  case end to end, and Stage 1's code sits in a branch while the machine runs
-  the previous release.
+- [x] **Closed 2026-09-01.** The code processed a real case end to end: a
+  controlled CTWA at 09:10:08 was captured, ingested, and served to the CEO as
+  contact-scoped context at 09:10:43.
 
 **Gate:** component plan 1 all PASS, upstream Hermes untouched.
 
@@ -126,10 +125,9 @@ a tool it no longer has.
 - [x] Pair it manually as a second linked device; never disconnect Hermes device.
 - [x] Repeat one controlled CTWA and require Brain safe ingest. Five CTWA
   events are stored and the observer has not changed since.
-- [ ] **Expired, not failed:** the served `conversation_context()` half of that
-  proof was collected on 2026-08-30 against the turn-correlated contract
-  Amendment 2 deleted. It is re-proven in Stage 5, where the hook-free plugin
-  is deployed.
+- [x] **Re-proven 2026-09-01.** The served `conversation_context()` half was
+  collected again under the contact-scoped contract: `status: ok`, no `turn`
+  object, both events of the window returned with `inbound_kind` null.
 - [x] Re-run upstream integrity verify.
 
 **Gate:** component plan 2 acceptance gate; no CRM write capability enabled.
@@ -167,9 +165,11 @@ production invocation in the runbook to name that same runtime.
 - [x] Add `fc_patch_clientes_by_id` to Reno with the mandatory-`expectedStatus` contract, and record that this reverses a deliberate Stage 4 removal.
 - [x] Run `verify_team.py core` then `full`.
 - [x] Re-run upstream integrity verify after any gateway/Profile restart required to load Fama-owned changes.
-- [ ] **Not closed:** the gateway has not reloaded these Profiles, so the CEO
-  and Reno are still running the previous prompts. A contract only takes effect
-  when the process holding it restarts, which happens in the Stage 5 window.
+- [x] **Closed 2026-09-01.** The gateway restarted and the Profiles reloaded.
+  The corrected contracts held on first contact with production: the CEO
+  created all three cards with no idempotency key at all, where the previous
+  prompt had produced `whatsapp-context-unavailable:<uuid>:porteiro`; and Reno
+  carried `expectedStatus` on its very first status write, unprompted.
 
 **Gate:** component plan 3 acceptance gate, upstream untouched.
 
@@ -225,36 +225,36 @@ was tested as, and the mismatch stays silent until the next restart.
 
 **Before**
 
-- [ ] Re-record `/var/lib/brain/runtime/stage0-baseline.json`. Every
+- [x] Re-record `/var/lib/brain/runtime/stage0-baseline.json`. Every
   `dirty_lines` must be `0`.
-- [ ] Merge `descope-amendment-2`. `brain.service` runs straight out of the
+- [x] Merge `descope-amendment-2`. `brain.service` runs straight out of the
   working tree, so a branch switch on this machine is itself an artefact change.
-- [ ] Prepare the post-Amendment-2 `brain.toml` outside the repository, then
+- [x] Prepare the post-Amendment-2 `brain.toml` outside the repository, then
   `brain_bundle.py create` and `verify candidate`.
 
 **Install — all three, then restart**
 
-- [ ] Check out the candidate's commit.
-- [ ] Swap `/root/.hermes/plugins/brain-ceo-bridge` by staging beside the live
+- [x] Check out the candidate's commit.
+- [x] Swap `/root/.hermes/plugins/brain-ceo-bridge` by staging beside the live
   copy, never by deleting it first.
-- [ ] Install the bundle's `brain.toml` as `/etc/brain/brain.toml`, mode 0600.
-- [ ] Restart `brain.service`, then the Hermes gateway. **The gateway restart is
+- [x] Install the bundle's `brain.toml` as `/etc/brain/brain.toml`, mode 0600.
+- [x] Restart `brain.service`, then the Hermes gateway. **The gateway restart is
   not only for the plugin:** it is what makes the CEO and Reno load the prompts
   corrected in Stage 4. Until it happens they run the contracts that teach the
   removed architecture, which is Stage 4's open item.
 
 **Validate against the live system, not a copy**
 
-- [ ] Plugin Doctor on the *installed* copy: one tool, zero hooks.
-- [ ] `hermes_integration_check.py` — it doctors both copies and fails on any
+- [x] Plugin Doctor on the *installed* copy: one tool, zero hooks.
+- [x] `hermes_integration_check.py` — it doctors both copies and fails on any
   byte difference between them.
-- [ ] `smoke_test.py`.
-- [ ] `hermes_integrity.py verify`.
-- [ ] Full Python suite, and the observer suite on `/opt/brain/node`.
-- [ ] One controlled CTWA: the CEO receives contact-scoped context from a real
+- [x] `smoke_test.py`.
+- [x] `hermes_integrity.py verify`.
+- [x] Full Python suite, and the observer suite on `/opt/brain/node`.
+- [x] One controlled CTWA: the CEO receives contact-scoped context from a real
   inbound. This closes Stage 3's expired proof and Stage 1's open item — its
   code will have processed a real case end to end.
-- [ ] Prove Reno's status write: read a client, PATCH with `expectedStatus`,
+- [x] Prove Reno's status write: read a client, PATCH with `expectedStatus`,
   and confirm FamaChat returns 409 on a stale predicate. This is
   `RENO_CONDITIONAL_STATUS_WRITE` and `MANUAL_CRM_STATE_NEVER_DOWNGRADED`,
   which the Final Gate and the E2E matrix both require and which no stage owned
@@ -262,7 +262,7 @@ was tested as, and the mismatch stays silent until the next restart.
 
 **Record**
 
-- [ ] Only after every gate above passes, `brain_bundle.py promote`.
+- [x] Only after every gate above passes, `brain_bundle.py promote`.
 
 **Gate:** every validation above green, and the authoritative state naming the
 bundle that produced them.
@@ -274,7 +274,15 @@ Final Gate and the E2E matrix demand. Rewritten to match `docs/runbook.md` step
 for step, so the plan and the procedure cannot disagree about what a deployment
 is.
 
-**No rollback exists for this window.** It is the first release of this
+**Deployed 2026-09-01 09:04–09:20**, bundle
+`55d6f278c983d905ada46c025cf00de9f4d397f2`, promoted after every gate above
+passed. Both halves of the conditional write were proven against the live
+server: Reno's own write returned 200 with a matching predicate, and a
+deliberately stale `expectedStatus` returned 409 with
+`currentStatus: "Em Atendimento"`. The 2026-08-31 proof was kept as
+`.superseded` rather than deleted — it predates the MCP rebuild.
+
+**No rollback existed for this window.** It is the first release of this
 architecture, so `previous` is unset and the artefacts on the machine are not a
 bundle of it. A failure is answered by rolling forward, or by an explicitly
 authorized architectural reversion.
