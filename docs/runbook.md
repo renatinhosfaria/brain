@@ -106,6 +106,41 @@ This proves the reader sees live WAL content rather than only the last
 checkpoint. Do not enable `ProtectSystem=strict` until this test passes with the
 gateway active.
 
+## Stage 0 baseline
+
+Recorded before any change, and re-recorded before any window, so "what did
+this machine look like" is a file rather than a memory. A baseline that lives
+only in a conversation cannot be compared against later.
+
+```sh
+OUT=/var/lib/brain/runtime/stage0-baseline.json
+install -d -m 700 "$(dirname "$OUT")"
+{
+  printf '{\n'
+  printf '  "recorded_at": "%s",\n' "$(date -Iseconds)"
+  printf '  "brain": {"head": "%s", "branch": "%s", "dirty_lines": %s},\n' \
+    "$(git -C /root/brain rev-parse HEAD)" \
+    "$(git -C /root/brain rev-parse --abbrev-ref HEAD)" \
+    "$(git -C /root/brain status --porcelain | wc -l)"
+  printf '  "hermes-operational": {"head": "%s", "branch": "%s", "dirty_lines": %s},\n' \
+    "$(git -C /root/.hermes rev-parse HEAD)" \
+    "$(git -C /root/.hermes rev-parse --abbrev-ref HEAD)" \
+    "$(git -C /root/.hermes status --porcelain | wc -l)"
+  printf '  "hermes-upstream": {"head": "%s", "dirty_lines": %s},\n' \
+    "$(git -C /usr/local/lib/hermes-agent rev-parse HEAD)" \
+    "$(git -C /usr/local/lib/hermes-agent status --porcelain | wc -l)"
+  printf '  "brain_health": %s,\n' "$(curl -fsS --max-time 5 http://127.0.0.1:8765/health)"
+  printf '  "observer_health": %s\n' "$(curl -fsS --max-time 5 http://127.0.0.1:8775/health)"
+  printf '}\n'
+} > "$OUT"
+chmod 600 "$OUT"
+```
+
+Every `dirty_lines` must be `0`. A dirty tree means the recorded HEAD does not
+describe the machine, which is the whole value of the record. `/root/.hermes`
+reported five dirty lines until 2026-09-01, when the skill curator's backup
+directories were finally ignored.
+
 ### Mandatory upstream integrity gate before Stage 3
 
 Before the first Stage 3 deployment or restart of any Brain observer/plugin

@@ -39,10 +39,23 @@ Removed by Amendment 2: the lifecycle engine plan and the writer/rollout plan. T
 
 ### Stage 0 — Clean baselines
 
-- [x] Record current Brain and operational Hermes repo HEAD/status.
+- [x] Record current Brain and operational Hermes repo HEAD/status, into
+  `/var/lib/brain/runtime/stage0-baseline.json` rather than into a conversation.
+  The command is in `docs/runbook.md`; every `dirty_lines` must be `0`.
 - [x] Record installed upstream Hermes version/HEAD/status and critical-file hashes.
 - [x] Confirm current Hermes WhatsApp health/queue and Brain health.
-- [x] Do not pair/restart/change any upstream Hermes component as part of implementation setup.
+- [x] Do not pair/restart/change any upstream Hermes component as part of
+  implementation setup. Restarting `hermes-gateway` to load a Fama-owned plugin
+  is not a change to upstream, and the integrity gate is what proves it.
+
+**Audited 2026-09-01.** Three defects were found behind boxes that were already
+ticked. There was no durable baseline at all — the record existed only in a
+conversation, so nothing could be compared against it later. `/root/.hermes`
+had five untracked skill-curator backup directories, so its status was never
+clean and its HEAD never described the machine; they are now ignored. And
+`ctwa-shadow-results.json` remained in the runtime directory, holding gate
+verdicts for an architecture that no longer exists, feeding a script that had
+been deleted.
 
 ### Stage 1 — Brain transport/context foundation
 
