@@ -22,9 +22,15 @@ Creation refuses a dirty worktree. A bundle built from uncommitted edits
 cannot be rebuilt later, which makes it unverifiable by construction and turns
 `previous` into a promise the repository cannot keep.
 
-    python scripts/brain_bundle.py create --config /etc/brain/brain.toml
+Prepare the config outside the repository. A file written under `/root/brain`
+dirties the worktree, and `create` then refuses the very sequence the runbook
+prescribes.
+
+    python scripts/brain_bundle.py create \
+        --config /var/lib/brain/runtime/staging/brain.toml.next
     python scripts/brain_bundle.py verify candidate
     python scripts/brain_bundle.py promote
+    python scripts/brain_bundle.py rollback
     python scripts/brain_bundle.py status
 """
 
@@ -33,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -40,7 +47,7 @@ import tomllib
 from pathlib import Path
 
 DEFAULT_ROOT = Path("/var/lib/brain/runtime/bundles")
-PLUGIN_SOURCE = Path(__file__).resolve().parents[1] / "integrations/hermes/brain-ceo-bridge"
+PLUGIN_SUBPATH = Path("integrations/hermes/brain-ceo-bridge")
 SLOTS = ("candidate", "active", "previous")
 REQUIRED_GATEWAY_TOOLS = {"conversation_context"}
 
@@ -106,36 +113,83 @@ def _manifest_for(directory: Path) -> dict[str, str]:
     }
 
 
-def create(root: Path, repo: Path, config: Path) -> Path:
-    head = _require_clean_worktree(repo)
-    _validate_config(config)
-
-    target = root / head
-    if target.exists():
-        shutil.rmtree(target)
+def _materialise(target: Path, repo: Path, config: Path, head: str) -> None:
+    plugin_source = repo / PLUGIN_SUBPATH
+    if not plugin_source.is_dir():
+        raise BundleError(f"plugin source is missing: {plugin_source}")
     (target / "plugin").mkdir(parents=True)
-    root.chmod(0o700)
-
-    for item in sorted(PLUGIN_SOURCE.iterdir()):
+    for item in sorted(plugin_source.iterdir()):
         if item.is_file():
             shutil.copy2(item, target / "plugin" / item.name)
     shutil.copy2(config, target / "brain.toml")
     (target / "brain.toml").chmod(0o600)
-
-    manifest = _manifest_for(target)
     (target / "MANIFEST.json").write_text(
-        json.dumps({"commit": head, "files": manifest}, indent=2, sort_keys=True) + "\n",
+        json.dumps(
+            {"commit": head, "files": _manifest_for(target)}, indent=2, sort_keys=True
+        )
+        + "\n",
         encoding="utf-8",
     )
+
+
+def create(root: Path, repo: Path, config: Path) -> Path:
+    """Build the bundle for HEAD, or accept an identical one already built.
+
+    A bundle is named by a commit, so its contents are that commit's, and
+    rewriting them would silently change what `active` or `previous` means for
+    anyone who verified it earlier. An existing directory is therefore never
+    deleted: it is rebuilt beside itself and compared. Identical is a no-op,
+    different is a refusal, and the operator is told which files disagree.
+    """
+    head = _require_clean_worktree(repo)
+    _validate_config(config)
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
+
+    target = root / head
+    staging = root / f".staging-{head}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        _materialise(staging, repo, config, head)
+        if target.exists():
+            # Compare against what is on disk, not against its own manifest: a
+            # tampered bundle must be reported, never quietly overwritten.
+            existing = _manifest_for(target)
+            rebuilt = _manifest_for(staging)
+            if existing != rebuilt:
+                differing = sorted(
+                    set(existing) ^ set(rebuilt)
+                ) or sorted(
+                    name for name in rebuilt if existing.get(name) != rebuilt[name]
+                )
+                raise BundleError(
+                    f"{head} already exists and differs in {differing}. A bundle "
+                    "is immutable; build a new commit instead of rewriting one."
+                )
+        else:
+            os.replace(staging, target)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
     _point(root, "candidate", head)
     return target
 
 
 def _point(root: Path, slot: str, sha: str) -> None:
-    link = root / slot
-    if link.is_symlink() or link.exists():
-        link.unlink()
-    link.symlink_to(sha)
+    """Repoint a slot atomically.
+
+    Unlink-then-symlink leaves a window in which the slot does not exist, and
+    an operator or script reading it in that instant sees no bundle at all.
+    A rename over the existing link has no such window.
+    """
+    staging = root / f".{slot}.swap"
+    if staging.is_symlink() or staging.exists():
+        staging.unlink()
+    staging.symlink_to(sha)
+    os.replace(staging, root / slot)
 
 
 def _resolve(root: Path, ref: str) -> Path:
@@ -180,6 +234,30 @@ def promote(root: Path) -> tuple[str, str | None]:
     return candidate.name, outgoing
 
 
+def rollback(root: Path) -> tuple[str, str]:
+    """Make `previous` active again, and record the swap in the slots.
+
+    Restoring the runtime without moving the slots leaves them describing a
+    deployment that no longer exists, so the next operator reads `active` and
+    is told the wrong thing. The outgoing bundle becomes `previous`, which
+    keeps a way back from the way back.
+    """
+    if not (root / "previous").is_symlink():
+        raise BundleError(
+            "no previous bundle: this architecture has never had an earlier "
+            "release, so a failure here is answered by rolling forward or by "
+            "an explicitly authorized architectural reversion"
+        )
+    verify(root, "previous")
+    restored = (root / "previous").resolve().name
+    displaced = (root / "active").resolve().name if (root / "active").is_symlink() else None
+    if displaced is None:
+        raise BundleError("no active bundle to roll back from")
+    _point(root, "active", restored)
+    _point(root, "previous", displaced)
+    return restored, displaced
+
+
 def status(root: Path) -> list[tuple[str, str, str]]:
     rows = []
     for slot in SLOTS:
@@ -199,7 +277,9 @@ def status(root: Path) -> list[tuple[str, str, str]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("create", "verify", "promote", "status"))
+    parser.add_argument(
+        "action", choices=("create", "verify", "promote", "rollback", "status")
+    )
     parser.add_argument("ref", nargs="?", default="candidate")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
@@ -214,6 +294,11 @@ def main() -> int:
             print("candidate ->", target.name)
         elif args.action == "verify":
             print(f"{args.ref} verified: {verify(args.root, args.ref)}")
+        elif args.action == "rollback":
+            restored, displaced = rollback(args.root)
+            print(f"active   -> {restored} (restored)")
+            print(f"previous -> {displaced} (rolled back from)")
+            print("now install this bundle's artefacts and restart the services")
         elif args.action == "promote":
             active, previous = promote(args.root)
             print(f"active   -> {active}")

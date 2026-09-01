@@ -38,6 +38,10 @@ class BundleTests(unittest.TestCase):
             ["config", "user.name", "t"],
         ):
             subprocess.run(["git", "-C", str(self.repo), *args], check=True)
+        plugin = self.repo / "integrations/hermes/brain-ceo-bridge"
+        plugin.mkdir(parents=True)
+        (plugin / "tools.py").write_text("# fake tools\n", encoding="utf-8")
+        (plugin / "__init__.py").write_text("# fake init\n", encoding="utf-8")
         (self.repo / "file.txt").write_text("one", encoding="utf-8")
         self.commit("first")
 
@@ -100,10 +104,18 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(bundle.BundleError, "writer"):
             self.create()
 
-    def test_the_bundle_carries_plugin_and_config(self) -> None:
+    def test_the_plugin_comes_from_the_named_repo(self) -> None:
+        """--repo must control the plugin source, not just the git metadata.
+
+        A test that silently copies /root/brain's plugin is asserting against
+        the developer's working tree, not against the bundle it built.
+        """
         created = self.create()
 
-        self.assertTrue((created / "plugin" / "tools.py").is_file())
+        self.assertEqual(
+            (created / "plugin" / "tools.py").read_text(encoding="utf-8"),
+            "# fake tools\n",
+        )
         self.assertTrue((created / "plugin" / "__init__.py").is_file())
         self.assertEqual(
             (created / "brain.toml").read_text(encoding="utf-8"), GOOD_CONFIG
@@ -201,6 +213,111 @@ class BundleTests(unittest.TestCase):
 
         self.assertEqual(recorded["commit"], created.name)
         self.assertIn("plugin/tools.py", recorded["files"])
+
+
+class BundleImmutabilityTests(BundleTests):
+    """A bundle names a commit; its contents may never be rewritten."""
+
+    def test_rebuilding_an_identical_bundle_is_accepted(self) -> None:
+        first = self.create()
+
+        again = self.create()
+
+        self.assertEqual(again, first)
+        self.assertEqual(bundle.verify(self.root, "candidate"), first.name)
+
+    def test_rebuilding_with_different_content_is_refused(self) -> None:
+        """The config can change under a commit; the bundle must not."""
+        self.create()
+        self.config.write_text(
+            GOOD_CONFIG.replace('token_sha256 = "a1"', 'token_sha256 = "b2"'),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(bundle.BundleError, "differs"):
+            self.create()
+
+    def test_a_rebuild_never_destroys_an_existing_bundle(self) -> None:
+        first = self.create()
+        marker = (first / "brain.toml").read_text(encoding="utf-8")
+        self.config.write_text(
+            GOOD_CONFIG.replace('token_sha256 = "a1"', 'token_sha256 = "b2"'),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(bundle.BundleError):
+            self.create()
+
+        self.assertEqual((first / "brain.toml").read_text(encoding="utf-8"), marker)
+        self.assertEqual(bundle.verify(self.root, "candidate"), first.name)
+
+    def test_a_corrupt_existing_bundle_is_not_silently_repaired(self) -> None:
+        first = self.create()
+        (first / "brain.toml").write_text("tampered", encoding="utf-8")
+
+        with self.assertRaises(bundle.BundleError):
+            self.create()
+
+
+class SlotAtomicityTests(BundleTests):
+    def test_repointing_never_leaves_the_slot_missing(self) -> None:
+        """A slot that vanishes mid-swap is a slot nobody can trust."""
+        first = self.create()
+        bundle.promote(self.root)
+        seen = []
+        real_replace = bundle.os.replace
+
+        def watched(src, dst):
+            seen.append((self.root / "active").is_symlink())
+            return real_replace(src, dst)
+
+        bundle.os.replace = watched
+        try:
+            bundle._point(self.root, "active", first.name)
+        finally:
+            bundle.os.replace = real_replace
+
+        self.assertTrue(seen and all(seen), "slot was absent during the swap")
+        self.assertEqual((self.root / "active").resolve().name, first.name)
+
+
+class RollbackActionTests(BundleTests):
+    def second_bundle(self) -> Path:
+        (self.repo / "file.txt").write_text("two", encoding="utf-8")
+        self.commit("second")
+        return self.create()
+
+    def test_rollback_makes_previous_active_and_records_the_swap(self) -> None:
+        first = self.create()
+        bundle.promote(self.root)
+        second = self.second_bundle()
+        bundle.promote(self.root)
+
+        restored, displaced = bundle.rollback(self.root)
+
+        self.assertEqual(restored, first.name)
+        self.assertEqual(displaced, second.name)
+        self.assertEqual((self.root / "active").resolve().name, first.name)
+        self.assertEqual((self.root / "previous").resolve().name, second.name)
+
+    def test_rollback_without_a_previous_bundle_is_refused(self) -> None:
+        self.create()
+        bundle.promote(self.root)
+
+        with self.assertRaisesRegex(bundle.BundleError, "no previous"):
+            bundle.rollback(self.root)
+
+    def test_rollback_verifies_previous_before_swapping(self) -> None:
+        first = self.create()
+        bundle.promote(self.root)
+        second = self.second_bundle()
+        bundle.promote(self.root)
+        (first / "brain.toml").write_text("tampered", encoding="utf-8")
+
+        with self.assertRaises(bundle.BundleError):
+            bundle.rollback(self.root)
+
+        self.assertEqual((self.root / "active").resolve().name, second.name)
 
 
 if __name__ == "__main__":

@@ -275,19 +275,29 @@ still declares a writer principal; it validates that file and never edits it.
 
 Prepare the post-Amendment-2 config, then build and verify the candidate:
 
+The prepared config is written **outside** the repository. Writing it inside
+`/root/brain` dirties the worktree, and `create` then refuses the very sequence
+this runbook prescribes:
+
 ```sh
-cd /root/brain
+install -d -m 700 /var/lib/brain/runtime/staging
 sed 's/tools = \["conversation_context", "turn_register"\]/tools = ["conversation_context"]/' \
-    /etc/brain/brain.toml > /root/brain/brain.toml.next
+    /etc/brain/brain.toml > /var/lib/brain/runtime/staging/brain.toml.next
+chmod 600 /var/lib/brain/runtime/staging/brain.toml.next
+
+cd /root/brain
 PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py create \
-    --config /root/brain/brain.toml.next
+    --config /var/lib/brain/runtime/staging/brain.toml.next
 PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py verify candidate
 PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py status
 ```
 
 Confirm the generated config keeps every token digest unchanged. `create` fails
 loudly if the config or the worktree is not ready, which is the point: the
-bundle cannot be assembled from a half-prepared machine.
+bundle cannot be assembled from a half-prepared machine. Re-running `create` on
+an unchanged commit is safe and returns the same bundle; if anything about the
+inputs changed, it refuses rather than rewriting a bundle someone may already
+have verified.
 
 ### The window
 
