@@ -309,13 +309,11 @@ Let `BUNDLE=/var/lib/brain/runtime/bundles/candidate`.
 3. Install `$BUNDLE/brain.toml` as `/etc/brain/brain.toml`, mode 0600.
 4. Only once all three are in place, restart `brain.service`, then the Hermes
    gateway so the CEO reloads the plugin.
-5. After validation passes, record the rotation:
-   `scripts/brain_bundle.py promote`.
+5. Run the validation block below in full.
+6. Only after every gate passes, record the deployment, as described
+   under **Record the deployment**.
 
-Promotion is the last step, not the first. `promote` verifies the candidate
-before rotating, so a corrupt bundle can never displace a good `active`.
-
-### Validate in the real environment
+#### Validation block
 
 Every check below must pass against the live system, not a copy:
 
@@ -342,6 +340,20 @@ the gateway loads something else is exactly the drift that went unnoticed on
 
 Finish with one controlled CTWA and confirm the CEO receives contact-scoped
 context from a real inbound.
+
+#### Record the deployment
+
+Only now, with every gate above green, does the authoritative state move:
+
+```sh
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py promote
+```
+
+Recording is the last step, never the first. Until it runs, the state still
+names the previous deployment, which is the correct thing for it to say while
+the new one is unproven. `promote` verifies the candidate before rotating, so a
+corrupt bundle can never displace a good `active`, and it writes `active` and
+`previous` in one atomic operation rather than as two separate links.
 
 ### Partial-deploy recovery
 
@@ -380,18 +392,46 @@ From the second release onward, `previous` names a real bundle of this
 architecture and rollback becomes ordinary:
 
 ```sh
+cd /root/brain
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py plan-rollback
+```
+
+`plan-rollback` verifies the previous bundle and reports it. It changes
+nothing: between planning and recording you will install artefacts, restart
+services and run every gate, and any of those can fail. Until they all pass,
+the authoritative state must keep naming the last release that was actually
+validated.
+
+Install the bundle it named:
+
+```sh
 PREVIOUS=/var/lib/brain/runtime/bundles/previous
-PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py verify previous
-cd /root/brain && git checkout "$(basename "$(readlink -f "$PREVIOUS")")"
+git checkout "$(basename "$(readlink -f "$PREVIOUS")")"
 rm -rf /root/.hermes/plugins/brain-ceo-bridge
 cp -a "$PREVIOUS/plugin" /root/.hermes/plugins/brain-ceo-bridge
 install -m 600 "$PREVIOUS/brain.toml" /etc/brain/brain.toml
 systemctl restart brain.service
 ```
 
-Verify before restoring. A `previous` slot that fails verification is not a
-fallback, and `scripts/brain_bundle.py status` reports that state as INVALID
-rather than letting it be discovered mid-incident. Rollback never touches
+Restart the Hermes gateway, then run the **full validation block** above:
+`hermes_integration_check.py`, `smoke_test.py`, `hermes_integrity.py`, and one
+controlled CTWA. Only after every one of them passes:
+
+```sh
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py record-rollback
+```
+
+`record-rollback` makes `previous` active and files the outgoing bundle as the
+new `previous`, in a single atomic write, so there is a way back from the way
+back. Recording it earlier would leave the state naming a release nobody
+proved; skipping it entirely leaves `active` naming a deployment that no longer
+exists, and the next operator to read it is told the wrong thing.
+
+`active` and `previous` are one fact recorded in `slots.json`, not two
+symlinks. The symlinks are a view redrawn from that file, so a stale or
+tampered link changes nothing the tool believes. A slot that fails verification
+is not a fallback, and `status` reports it as INVALID rather than letting that
+be discovered mid-incident. Rollback never touches
 `/usr/local/lib/hermes-agent`, which is not a deployment target.
 
 ### Architectural reversion

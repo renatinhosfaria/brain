@@ -181,8 +181,58 @@ def create(root: Path, repo: Path, config: Path) -> Path:
         if staging.exists():
             shutil.rmtree(staging)
 
-    _point(root, "candidate", head)
+    state = read_state(root)
+    state["candidate"] = head
+    write_state(root, state)
     return target
+
+
+STATE_FILE = "slots.json"
+
+
+def read_state(root: Path) -> dict[str, str | None]:
+    """The authoritative record of what is deployed.
+
+    The symlinks are a convenience for humans and shell scripts. This file is
+    the truth: a tampered or stale link changes nothing the tool believes.
+    """
+    path = root / STATE_FILE
+    empty: dict[str, str | None] = dict.fromkeys(SLOTS)
+    if not path.is_file():
+        return empty
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise BundleError(f"{path} is not readable state: {exc}") from exc
+    return {slot: stored.get(slot) for slot in SLOTS}
+
+
+def write_state(root: Path, state: dict[str, str | None]) -> None:
+    """Commit the whole state in one rename, then redraw the views.
+
+    `active` and `previous` are one fact, not two. Updating them as separate
+    symlinks left a window in which an interruption could leave them
+    inconsistent, or equal, with no way to tell which had landed.
+    """
+    staging = root / f".{STATE_FILE}.tmp"
+    staging.write_text(
+        json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.replace(staging, root / STATE_FILE)
+    refresh_views(root)
+
+
+def refresh_views(root: Path) -> None:
+    """Redraw the symlinks from the state. Never the other way round."""
+    state = read_state(root)
+    for slot in SLOTS:
+        sha = state.get(slot)
+        link = root / slot
+        if sha is None:
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            continue
+        _point(root, slot, sha)
 
 
 def _point(root: Path, slot: str, sha: str) -> None:
@@ -226,66 +276,89 @@ def verify(root: Path, ref: str) -> str:
 
 
 def promote(root: Path) -> tuple[str, str | None]:
-    """Make candidate active, and the outgoing active previous."""
-    candidate = _resolve(root, "candidate")
-    verify(root, "candidate")
+    """Record that the candidate is the deployment that passed validation.
 
-    outgoing = None
-    active_link = root / "active"
-    if active_link.is_symlink():
-        outgoing = active_link.resolve().name
-        if outgoing == candidate.name:
-            raise BundleError("candidate is already active; nothing to promote")
-        _point(root, "previous", outgoing)
-    _point(root, "active", candidate.name)
-    return candidate.name, outgoing
-
-
-def rollback(root: Path) -> tuple[str, str]:
-    """Make `previous` active again, and record the swap in the slots.
-
-    Restoring the runtime without moving the slots leaves them describing a
-    deployment that no longer exists, so the next operator reads `active` and
-    is told the wrong thing. The outgoing bundle becomes `previous`, which
-    keeps a way back from the way back.
+    Called last, never first. The state must only ever name a release that was
+    actually installed and validated, so promoting before the checks would
+    make it describe something nobody proved.
     """
-    if not (root / "previous").is_symlink():
+    state = read_state(root)
+    candidate = state.get("candidate")
+    if candidate is None:
+        raise BundleError("no candidate bundle to promote")
+    verify(root, candidate)
+    if state.get("active") == candidate:
+        raise BundleError("candidate is already active; nothing to promote")
+
+    outgoing = state.get("active")
+    write_state(
+        root, {"candidate": candidate, "active": candidate, "previous": outgoing}
+    )
+    return candidate, outgoing
+
+
+def plan_rollback(root: Path) -> tuple[str, str]:
+    """Verify the previous bundle and report it. Changes nothing.
+
+    Deliberately separate from recording. Between planning and recording the
+    operator installs artefacts, restarts services and runs every gate; any of
+    those can fail, and until they all pass the authoritative state must keep
+    naming the last release that was actually validated.
+    """
+    state = read_state(root)
+    previous = state.get("previous")
+    if previous is None:
         raise BundleError(
             "no previous bundle: this architecture has never had an earlier "
             "release, so a failure here is answered by rolling forward or by "
             "an explicitly authorized architectural reversion"
         )
-    verify(root, "previous")
-    restored = (root / "previous").resolve().name
-    displaced = (root / "active").resolve().name if (root / "active").is_symlink() else None
-    if displaced is None:
+    active = state.get("active")
+    if active is None:
         raise BundleError("no active bundle to roll back from")
-    _point(root, "active", restored)
-    _point(root, "previous", displaced)
-    return restored, displaced
+    verify(root, previous)
+    return previous, active
+
+
+def record_rollback(root: Path) -> tuple[str, str]:
+    """Record a rollback that has already been installed and validated."""
+    previous, active = plan_rollback(root)
+    state = read_state(root)
+    write_state(
+        root, {"candidate": state.get("candidate"), "active": previous, "previous": active}
+    )
+    return previous, active
 
 
 def status(root: Path) -> list[tuple[str, str, str]]:
+    state = read_state(root)
     rows = []
     for slot in SLOTS:
-        link = root / slot
-        if not link.is_symlink():
+        sha = state.get(slot)
+        if sha is None:
             rows.append((slot, "-", "unset"))
             continue
-        sha = link.resolve().name
         try:
-            verify(root, slot)
-            state = "verified"
+            verify(root, sha)
+            state_text = "verified"
         except BundleError as exc:
-            state = f"INVALID: {exc}"
-        rows.append((slot, sha, state))
+            state_text = f"INVALID: {exc}"
+        rows.append((slot, sha, state_text))
     return rows
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "action", choices=("create", "verify", "promote", "rollback", "status")
+        "action",
+        choices=(
+            "create",
+            "verify",
+            "promote",
+            "plan-rollback",
+            "record-rollback",
+            "status",
+        ),
     )
     parser.add_argument("ref", nargs="?", default="candidate")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -301,11 +374,18 @@ def main() -> int:
             print("candidate ->", target.name)
         elif args.action == "verify":
             print(f"{args.ref} verified: {verify(args.root, args.ref)}")
-        elif args.action == "rollback":
-            restored, displaced = rollback(args.root)
+        elif args.action == "plan-rollback":
+            target, outgoing = plan_rollback(args.root)
+            print(f"verified previous bundle: {target}")
+            print(f"currently active:         {outgoing}")
+            print("install this bundle's artefacts, restart Brain and the Hermes")
+            print("gateway, run every validation gate, and only then record it with")
+            print("  brain_bundle.py record-rollback")
+            print("nothing has changed yet")
+        elif args.action == "record-rollback":
+            restored, displaced = record_rollback(args.root)
             print(f"active   -> {restored} (restored)")
             print(f"previous -> {displaced} (rolled back from)")
-            print("now install this bundle's artefacts and restart the services")
         elif args.action == "promote":
             active, previous = promote(args.root)
             print(f"active   -> {active}")

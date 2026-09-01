@@ -21,7 +21,10 @@ tools = ["conversation_context"]
 """
 
 
-class BundleTests(unittest.TestCase):
+class _Fixture:
+    """Shared setup only. Not a TestCase, so nothing here is inherited
+    into every suite and run again under a different name."""
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
@@ -63,8 +66,8 @@ class BundleTests(unittest.TestCase):
     def create(self) -> Path:
         return bundle.create(self.root, self.repo, self.config)
 
-    # ------------------------------------------------------------------
 
+class BundleTests(_Fixture, unittest.TestCase):
     def test_identity_is_the_full_sha(self) -> None:
         """An abbreviation can collide; a slot must name exactly one tree."""
         created = self.create()
@@ -215,7 +218,7 @@ class BundleTests(unittest.TestCase):
         self.assertIn("plugin/tools.py", recorded["files"])
 
 
-class BundleImmutabilityTests(BundleTests):
+class BundleImmutabilityTests(_Fixture, unittest.TestCase):
     """A bundle names a commit; its contents may never be rewritten."""
 
     def test_rebuilding_an_identical_bundle_is_accepted(self) -> None:
@@ -282,7 +285,7 @@ class BundleImmutabilityTests(BundleTests):
             self.create()
 
 
-class SlotAtomicityTests(BundleTests):
+class SlotAtomicityTests(_Fixture, unittest.TestCase):
     def test_repointing_never_leaves_the_slot_missing(self) -> None:
         """A slot that vanishes mid-swap is a slot nobody can trust."""
         first = self.create()
@@ -304,43 +307,204 @@ class SlotAtomicityTests(BundleTests):
         self.assertEqual((self.root / "active").resolve().name, first.name)
 
 
-class RollbackActionTests(BundleTests):
+class AuthoritativeStateTests(_Fixture, unittest.TestCase):
+    """active and previous are one state, changed by one atomic write."""
+
     def second_bundle(self) -> Path:
         (self.repo / "file.txt").write_text("two", encoding="utf-8")
         self.commit("second")
         return self.create()
 
-    def test_rollback_makes_previous_active_and_records_the_swap(self) -> None:
+    def test_state_lives_in_one_file(self) -> None:
+        first = self.create()
+        bundle.promote(self.root)
+
+        state = bundle.read_state(self.root)
+
+        self.assertEqual(state["active"], first.name)
+        self.assertIsNone(state["previous"])
+        self.assertTrue((self.root / "slots.json").is_file())
+
+    def test_symlinks_are_a_view_of_the_state(self) -> None:
+        first = self.create()
+        bundle.promote(self.root)
+        (self.root / "active").unlink()
+
+        bundle.refresh_views(self.root)
+
+        self.assertEqual((self.root / "active").resolve().name, first.name)
+
+    def test_the_state_file_is_authoritative_over_the_symlinks(self) -> None:
+        """A tampered view must never change what the tool believes."""
         first = self.create()
         bundle.promote(self.root)
         second = self.second_bundle()
+        (self.root / "active").unlink()
+        (self.root / "active").symlink_to(second.name)
+
+        self.assertEqual(bundle.read_state(self.root)["active"], first.name)
+
+    def test_a_rotation_is_a_single_write(self) -> None:
+        """Two sequential updates can be interrupted between them."""
+        self.create()
+        bundle.promote(self.root)
+        self.second_bundle()
+        writes = []
+        real_replace = bundle.os.replace
+
+        def counted(src, dst):
+            if Path(dst).name == "slots.json":
+                writes.append(Path(dst).name)
+            return real_replace(src, dst)
+
+        bundle.os.replace = counted
+        try:
+            bundle.promote(self.root)
+        finally:
+            bundle.os.replace = real_replace
+
+        self.assertEqual(len(writes), 1, "state must change in exactly one write")
+
+    def test_an_interrupted_state_write_leaves_the_old_state(self) -> None:
+        first = self.create()
+        bundle.promote(self.root)
+        second = self.second_bundle()
+        real_replace = bundle.os.replace
+
+        def crash(src, dst):
+            if Path(dst).name == "slots.json":
+                raise OSError("interrupted mid-rotation")
+            return real_replace(src, dst)
+
+        bundle.os.replace = crash
+        try:
+            with self.assertRaises(OSError):
+                bundle.promote(self.root)
+        finally:
+            bundle.os.replace = real_replace
+
+        state = bundle.read_state(self.root)
+        self.assertEqual(state["active"], first.name)
+        self.assertIsNone(state["previous"])
+        self.assertNotEqual(state["active"], second.name)
+
+    def test_active_and_previous_are_never_the_same_bundle(self) -> None:
+        self.create()
+        bundle.promote(self.root)
+        self.second_bundle()
         bundle.promote(self.root)
 
-        restored, displaced = bundle.rollback(self.root)
+        state = bundle.read_state(self.root)
 
-        self.assertEqual(restored, first.name)
-        self.assertEqual(displaced, second.name)
-        self.assertEqual((self.root / "active").resolve().name, first.name)
-        self.assertEqual((self.root / "previous").resolve().name, second.name)
+        self.assertNotEqual(state["active"], state["previous"])
 
-    def test_rollback_without_a_previous_bundle_is_refused(self) -> None:
+
+class RollbackTransactionTests(_Fixture, unittest.TestCase):
+    """Planning a rollback must not record one."""
+
+    def two_releases(self) -> tuple[Path, Path]:
+        first = self.create()
+        bundle.promote(self.root)
+        (self.repo / "file.txt").write_text("two", encoding="utf-8")
+        self.commit("second")
+        second = self.create()
+        bundle.promote(self.root)
+        return first, second
+
+    def test_planning_verifies_previous_and_changes_nothing(self) -> None:
+        first, second = self.two_releases()
+        before = bundle.read_state(self.root)
+
+        target, outgoing = bundle.plan_rollback(self.root)
+
+        self.assertEqual(target, first.name)
+        self.assertEqual(outgoing, second.name)
+        self.assertEqual(bundle.read_state(self.root), before)
+
+    def test_planning_refuses_an_unverifiable_previous(self) -> None:
+        first, _ = self.two_releases()
+        (first / "brain.toml").write_text("tampered", encoding="utf-8")
+
+        with self.assertRaises(bundle.BundleError):
+            bundle.plan_rollback(self.root)
+
+    def test_a_failed_validation_leaves_the_last_validated_deployment(self) -> None:
+        """Planning then abandoning must not move the authoritative state."""
+        _, second = self.two_releases()
+
+        bundle.plan_rollback(self.root)
+        # Validation fails here, so record_rollback is never reached.
+
+        self.assertEqual(bundle.read_state(self.root)["active"], second.name)
+
+    def test_recording_swaps_active_and_previous(self) -> None:
+        first, second = self.two_releases()
+
+        bundle.plan_rollback(self.root)
+        restored, displaced = bundle.record_rollback(self.root)
+
+        self.assertEqual((restored, displaced), (first.name, second.name))
+        state = bundle.read_state(self.root)
+        self.assertEqual(state["active"], first.name)
+        self.assertEqual(state["previous"], second.name)
+
+    def test_recording_without_a_previous_bundle_is_refused(self) -> None:
         self.create()
         bundle.promote(self.root)
 
         with self.assertRaisesRegex(bundle.BundleError, "no previous"):
-            bundle.rollback(self.root)
+            bundle.record_rollback(self.root)
 
-    def test_rollback_verifies_previous_before_swapping(self) -> None:
-        first = self.create()
-        bundle.promote(self.root)
-        second = self.second_bundle()
-        bundle.promote(self.root)
-        (first / "brain.toml").write_text("tampered", encoding="utf-8")
 
-        with self.assertRaises(bundle.BundleError):
-            bundle.rollback(self.root)
+class RunbookContractTests(unittest.TestCase):
+    """The documented procedure must record state only after validating."""
 
-        self.assertEqual((self.root / "active").resolve().name, second.name)
+    RUNBOOK = Path(__file__).resolve().parents[1] / "docs/runbook.md"
+
+    def rollback_section(self) -> str:
+        text = self.RUNBOOK.read_text(encoding="utf-8")
+        start = text.index("### Rollback")
+        return text[start : text.index("### Architectural reversion")]
+
+    def test_rollback_is_recorded_after_the_whole_validation_block(self) -> None:
+        section = self.rollback_section()
+
+        record = section.index("brain_bundle.py record-rollback")
+        for gate in (
+            "hermes_integration_check.py",
+            "smoke_test.py",
+            "hermes_integrity.py",
+            "controlled CTWA",
+        ):
+            with self.subTest(gate=gate):
+                self.assertLess(
+                    section.index(gate),
+                    record,
+                    f"{gate} must be validated before the rollback is recorded",
+                )
+
+    def test_rollback_plans_before_it_installs(self) -> None:
+        """Match the invocation, not the prose that describes it."""
+        section = self.rollback_section()
+
+        self.assertLess(
+            section.index("brain_bundle.py plan-rollback"),
+            section.index("systemctl restart"),
+        )
+
+    def test_the_window_promotes_only_after_validation(self) -> None:
+        text = self.RUNBOOK.read_text(encoding="utf-8")
+        window = text[text.index("### The window") : text.index("### Partial-deploy recovery")]
+
+        promote = window.index("brain_bundle.py promote")
+        for gate in (
+            "hermes_integration_check.py",
+            "smoke_test.py",
+            "hermes_integrity.py",
+            "controlled CTWA",
+        ):
+            with self.subTest(gate=gate):
+                self.assertLess(window.index(gate), promote)
 
 
 if __name__ == "__main__":
