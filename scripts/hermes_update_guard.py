@@ -48,6 +48,12 @@ WATCHED = [
     Path("/etc/brain/brain.toml"),
 ]
 
+# Bundled skills are synced by the update on purpose, and this repository
+# versions them deliberately, so they move on a routine update. Reporting that
+# as a failure trains the operator to ignore the guard, which costs more than
+# the check is worth. Anything outside these prefixes is still a finding.
+EXPECTED_DIRTY_MARKER = "/skills/"
+
 
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
@@ -88,6 +94,30 @@ def snapshot() -> dict:
     }
 
 
+def _classify_dirty(porcelain: str) -> tuple[list[str], list[str]]:
+    """Split `git status --porcelain` into synced skills and everything else."""
+    bundled, ours = [], []
+    for line in porcelain.splitlines():
+        # Split on whitespace rather than a fixed offset. `_git` strips its
+        # output, so the first porcelain line loses the leading space of its
+        # two-character status field, and a fixed slice then eats a character
+        # of the path — which on 2026-09-01 filed a synced skill as a finding.
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        path = parts[1].strip().strip('"')
+        if " -> " in path:  # rename: judge the destination
+            path = path.split(" -> ", 1)[1].strip().strip('"')
+        if not path:
+            continue
+        target = bundled if (
+            path.startswith("skills/")
+            or (path.startswith("profiles/") and EXPECTED_DIRTY_MARKER in path)
+        ) else ours
+        target.append(line.strip())
+    return bundled, ours
+
+
 def compare(before: dict, after: dict) -> tuple[list[str], list[str]]:
     """Return (expected movement, findings that need a human)."""
     expected: list[str] = []
@@ -109,9 +139,16 @@ def compare(before: dict, after: dict) -> tuple[list[str], list[str]]:
             "the operational Hermes repository moved; an update should not "
             "commit there"
         )
-    if after["hermes_home"]["dirty"] and not before["hermes_home"]["dirty"]:
+    bundled, ours = _classify_dirty(after["hermes_home"]["dirty"])
+    if bundled:
+        expected.append(
+            f"{len(bundled)} bundled skill file(s) synced into the operational "
+            "repository; review and commit them as an ordinary change"
+        )
+    if ours:
         findings.append(
-            f"the operational repository is now dirty:\n{after['hermes_home']['dirty']}"
+            "the operational repository is dirty outside the bundled skills:\n  "
+            + "\n  ".join(ours)
         )
 
     for path, digest in before["files"].items():

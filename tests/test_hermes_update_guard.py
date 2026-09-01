@@ -60,7 +60,7 @@ class CompareTests(unittest.TestCase):
             snap(), snap(upstream="ccc", dirty_home=" M profiles/reno/config.yaml")
         )
 
-        self.assertTrue(any("now dirty" in f for f in findings))
+        self.assertTrue(any("outside the bundled skills" in f for f in findings))
 
     def test_a_commit_in_the_operational_repository_is_a_finding(self) -> None:
         _, findings = guard.compare(snap(), snap(upstream="ccc", home="zzz"))
@@ -99,6 +99,68 @@ class WatchListTests(unittest.TestCase):
     def test_brain_config_is_watched(self) -> None:
         self.assertIn(Path("/etc/brain/brain.toml"), guard.WATCHED)
 
+
+class DirtyClassificationTests(unittest.TestCase):
+    """A guard that fails on a routine update is a guard nobody reads."""
+
+    SYNCED = (
+        " M skills/research/arxiv/SKILL.md\n"
+        " D skills/github/codebase-inspection/SKILL.md\n"
+        "?? profiles/dev/skills/web/\n"
+        " M profiles/reno/skills/autonomous-ai-agents/hermes-agent/references/x.md\n"
+    )
+
+    def test_synced_bundled_skills_are_expected_not_findings(self) -> None:
+        expected, findings = guard.compare(
+            snap(), snap(upstream="ccc", dirty_home=self.SYNCED)
+        )
+
+        self.assertEqual(findings, [])
+        self.assertTrue(any("bundled skill" in line for line in expected))
+
+    def test_a_touched_contract_is_still_a_finding(self) -> None:
+        dirty = self.SYNCED + " M profiles/reno/config.yaml\n"
+
+        _, findings = guard.compare(snap(), snap(upstream="ccc", dirty_home=dirty))
+
+        self.assertTrue(any("profiles/reno/config.yaml" in f for f in findings))
+
+    def test_a_touched_soul_is_still_a_finding(self) -> None:
+        _, findings = guard.compare(
+            snap(), snap(upstream="ccc", dirty_home=" M profiles/reno/SOUL.md\n")
+        )
+
+        self.assertTrue(any("SOUL.md" in f for f in findings))
+
+    def test_a_stripped_first_line_is_still_parsed_correctly(self) -> None:
+        """`git status` output is stripped, so line one loses a leading space.
+
+        A fixed three-character slice then eats a character of the path, and on
+        2026-09-01 that filed a synced bundled skill as a finding.
+        """
+        dirty = "M profiles/cadastro/skills/a/b.md\n M skills/research/arxiv/SKILL.md"
+
+        expected, findings = guard.compare(
+            snap(), snap(upstream="ccc", dirty_home=dirty)
+        )
+
+        self.assertEqual(findings, [])
+        self.assertTrue(any("2 bundled skill" in line for line in expected))
+
+    def test_a_rename_is_judged_by_its_destination(self) -> None:
+        dirty = "R  skills/old/SKILL.md -> skills/new/SKILL.md"
+
+        _, findings = guard.compare(snap(), snap(upstream="ccc", dirty_home=dirty))
+
+        self.assertEqual(findings, [])
+
+    def test_a_touched_verifier_is_still_a_finding(self) -> None:
+        _, findings = guard.compare(
+            snap(),
+            snap(upstream="ccc", dirty_home=" M ops/hermes-team/verify_team.py\n"),
+        )
+
+        self.assertTrue(any("verify_team" in f for f in findings))
 
 if __name__ == "__main__":
     unittest.main()
