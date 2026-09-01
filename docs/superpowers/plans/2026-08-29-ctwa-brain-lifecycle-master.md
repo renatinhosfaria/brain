@@ -162,13 +162,41 @@ production invocation in the runbook to name that same runtime.
 
 ### Stage 4 — Operational Profile contracts and least privilege
 
-- [ ] Execute `2026-08-29-ctwa-hermes-profile-contracts.md` in the operational Hermes repo.
-- [ ] Generate Reno exact FamaChat allowlist from live MCP `tools/list`; no wildcard.
-- [ ] Add `fc_patch_clientes_by_id` to Reno with the mandatory-`expectedStatus` contract, and record that this reverses a deliberate Stage 4 removal.
-- [ ] Run `verify_team.py core` then `full`.
-- [ ] Re-run upstream integrity verify after any gateway/Profile restart required to load Fama-owned changes.
+- [x] Execute `2026-08-29-ctwa-hermes-profile-contracts.md` in the operational Hermes repo.
+- [x] Generate Reno exact FamaChat allowlist from live MCP `tools/list`; no wildcard.
+- [x] Add `fc_patch_clientes_by_id` to Reno with the mandatory-`expectedStatus` contract, and record that this reverses a deliberate Stage 4 removal.
+- [x] Run `verify_team.py core` then `full`.
+- [x] Re-run upstream integrity verify after any gateway/Profile restart required to load Fama-owned changes.
+- [ ] **Not closed:** the gateway has not reloaded these Profiles, so the CEO
+  and Reno are still running the previous prompts. A contract only takes effect
+  when the process holding it restarts, which happens in the Stage 5 window.
 
 **Gate:** component plan 3 acceptance gate, upstream untouched.
+
+**Audited 2026-09-01** (operational repo `fd35b5c`). Least privilege held: 277
+tools reduced to 1 / 3 / 13, `brain` and `famachat` present only on the workers'
+CLI with `no_mcp` everywhere else, and the CEO without any worker MCP server.
+`verify_team.py` passed `core` and `full` — and it was passing partly because it
+*required* the dead contract.
+
+Three defects, all in prompts running in production:
+
+- The CEO's SOUL and skill still taught `turn.wa_turn_id`, the
+  `whatsapp:<wa_turn_id>:<etapa>` idempotency format, and an "automação de ciclo
+  de vida" that no longer exists. This is what produced
+  `whatsapp-context-unavailable:<uuid>:porteiro` on 31/08: an instruction obeyed
+  after its input disappeared. Both now say to omit the key rather than compose
+  one, and carry the incident as the reason.
+- `verify_team.py` enforced that format as a required marker, so fixing the
+  prompts would have failed the gate. It moved to FORBIDDEN, along with
+  `turn.wa_turn_id`, so it cannot return as an instruction.
+- Reno lacked `fc_patch_clientes_by_id`. Granted, with the `fc_patch_*` prefix
+  ban intact and the exception keyed by (profile, exact tool). Verified by
+  trying it both ways: another `fc_patch_*` for Reno is refused, and this tool
+  for Cadastro is refused. Its SOUL now carries the two rules the server will
+  not enforce — mandatory `expectedStatus`, and forward-only transitions, since
+  a matching predicate proves nobody moved the card, never that the direction
+  makes sense.
 
 ### Stage 5 — Deploy the hook-free CEO plugin
 
