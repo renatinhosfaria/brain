@@ -128,6 +128,7 @@ def event(
     from_owner: bool,
     media_urls: list[str] | None = None,
     media_types: list[str] | None = None,
+    internal: bool = False,
 ):
     return SimpleNamespace(
         text=text,
@@ -135,6 +136,7 @@ def event(
         metadata={"whatsapp_from_owner": from_owner},
         media_urls=media_urls or [],
         media_types=media_types or [],
+        internal=internal,
         source=SimpleNamespace(
             platform=SimpleNamespace(value="whatsapp"),
             chat_type="dm",
@@ -365,6 +367,34 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         self.assertTrue(consumed)
         self.assertEqual(adapter.original_busy_calls, [])
         self.assertEqual(len(sessions.messages), 1)
+
+    def test_busy_internal_event_is_suppressed_without_transcript_pollution(self):
+        plugin = load_plugin()
+        plugin.HandoverStore.from_env().pause(
+            "553499602714",
+            session_key="agent:main:whatsapp:dm:553499602714",
+            owner_message_id="owner-1",
+        )
+        sessions = FakeSessionStore()
+        gateway = BusyGateway(FakeAgent(), sessions)
+        adapter = BusyAdapter(gateway)
+        plugin._wire_whatsapp_adapter(None, adapter)
+
+        consumed = asyncio.run(
+            adapter._busy_session_handler(
+                event(
+                    text="Processo em segundo plano concluído.",
+                    message_id="internal-busy-1",
+                    from_owner=False,
+                    internal=True,
+                ),
+                "agent:main:whatsapp:dm:553499602714",
+            )
+        )
+
+        self.assertTrue(consumed)
+        self.assertEqual(adapter.original_busy_calls, [])
+        self.assertEqual(sessions.messages, [])
 
     def test_paused_customer_message_is_ingested_without_reaching_the_llm(self):
         plugin = load_plugin()

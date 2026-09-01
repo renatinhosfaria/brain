@@ -345,7 +345,12 @@ def _handle_whatsapp_handover(
     )
     try:
         store = HandoverStore.from_env()
-        if not from_owner and not store.is_paused(contact_id):
+        paused = store.is_paused(contact_id)
+        if bool(getattr(event, "internal", False)):
+            if paused:
+                return {"action": "skip", "reason": "human_handover_internal"}
+            return None
+        if not from_owner and not paused:
             return None
 
         entry = _session_entry(session_store, event)
