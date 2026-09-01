@@ -198,6 +198,21 @@ Three defects, all in prompts running in production:
   a matching predicate proves nobody moved the card, never that the direction
   makes sense.
 
+Two more were found on a second pass (operational repo `35a893c`), both able to
+survive because nothing exercised them:
+
+- `inventory_reno_famachat_tools.py` regenerates Reno's allowlist from the live
+  `tools/list` and filtered `fc_patch_*` unconditionally, so running it — the
+  documented procedure when FamaChat gains endpoints — would have stripped the
+  grant back out and left the next `verify_team` failing for no visible reason.
+  Generator and verifier now hold the same nominal exception.
+- `DEPLOYED_SHA256SUMS` was a checksum manifest of the deployed operational
+  files: 65 of 90 entries failing, 2 naming files that no longer existed, 40
+  covering volatile runtime state, its first line the hash of itself captured
+  empty, and no consumer anywhere. It is removed. Integrity here is git and
+  contract is `verify_team.py`; a third record that can never pass is not a
+  control, it is a false assurance for whoever finds it.
+
 ### Stage 5 — Deploy the hook-free CEO plugin
 
 - [ ] Update `/etc/brain/brain.toml` so the `default` principal grants only `conversation_context`. The file is read at startup, so the edit itself changes nothing; the constraint is that code, plugin and config must all be in place before the restart, because whichever is stale at that moment is what fails.
