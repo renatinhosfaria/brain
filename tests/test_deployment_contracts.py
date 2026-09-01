@@ -285,7 +285,7 @@ class DeploymentContractTests(unittest.TestCase):
         plan = (
             ROOT / "docs/superpowers/plans/2026-08-29-ctwa-brain-lifecycle-master.md"
         ).read_text(encoding="utf-8")
-        stage = plan[plan.index("### Stage 5") : plan.index("## Required controlled")]
+        stage = plan[plan.index("### Stage 5") : plan.index("## Controlled E2E matrix")]
 
         for required in (
             "stage0-baseline.json",
@@ -308,7 +308,7 @@ class DeploymentContractTests(unittest.TestCase):
         plan = (
             ROOT / "docs/superpowers/plans/2026-08-29-ctwa-brain-lifecycle-master.md"
         ).read_text(encoding="utf-8")
-        stage = plan[plan.index("### Stage 5") : plan.index("## Required controlled")]
+        stage = plan[plan.index("### Stage 5") : plan.index("## Controlled E2E matrix")]
 
         promote = stage.index("brain_bundle.py promote")
         for gate in ("Plugin Doctor", "controlled CTWA", "expectedStatus"):

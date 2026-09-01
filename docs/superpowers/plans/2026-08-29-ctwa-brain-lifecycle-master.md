@@ -342,6 +342,19 @@ HERMES_ORIGINAL_INTEGRITY
 
 Evidence must be current, not merely present. A PASS derived from a run older than the change it claims to cover is `STALE` and blocks exactly like a failure: on 2026-08-31 a gate reported PASS from the previous day's rows while the mechanism producing them was dead.
 
+**Status 2026-09-01: eight of nine.** Every item above is proven against the
+deployed system by the controlled CTWA lead recorded in the matrix, except
+`RETENTION_ENFORCED`, which is covered by tests and by two automatic triggers
+but has never been observed purging production data. It closes on its own:
+client 12802's display name expires 24 hours after 09:13, and reading
+`contact_ephemera` after that settles it.
+
+The bundle was promoted at eight of nine deliberately. The ninth is not a risk
+being carried — retention removes data rather than serving it, so its absence
+would show as data outliving its window, never as a wrong answer. Recording
+"nine of nine" today would have been the same overclaim this section warns
+about one paragraph above.
+
 ## Completion Definition
 
 Implementation is complete only when:
