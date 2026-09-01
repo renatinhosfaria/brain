@@ -124,10 +124,33 @@ a tool it no longer has.
 - [x] Execute `2026-08-29-ctwa-whatsapp-observer.md` completely.
 - [x] Install `brain-whatsapp-observer.service` with its own session and secrets.
 - [x] Pair it manually as a second linked device; never disconnect Hermes device.
-- [x] Repeat one controlled CTWA and require Brain safe ingest plus a served `conversation_context()`.
+- [x] Repeat one controlled CTWA and require Brain safe ingest. Five CTWA
+  events are stored and the observer has not changed since.
+- [ ] **Expired, not failed:** the served `conversation_context()` half of that
+  proof was collected on 2026-08-30 against the turn-correlated contract
+  Amendment 2 deleted. It is re-proven in Stage 5, where the hook-free plugin
+  is deployed.
 - [x] Re-run upstream integrity verify.
 
-**Gate:** component plan 2 acceptance gate + real `CONVERSATION_CONTEXT_E2E=PASS`; no CRM write capability enabled.
+**Gate:** component plan 2 acceptance gate; no CRM write capability enabled.
+`CONVERSATION_CONTEXT_E2E` moved to Stage 5 rather than being carried forward:
+this plan's own rule is that a PASS older than the change it claims to cover is
+`STALE` and blocks like a failure, and it would be a poor place to make an
+exception for our own bookkeeping.
+
+**Audited 2026-09-01.** The observer holds, and holds well. All ten of plan 2's
+gates verify against the live system: Baileys pinned at 7.0.0-rc13, its session
+a different inode from Hermes', zero send APIs anywhere in its source, health
+connected with an empty outbox, both services coexisting, five CTWA events
+ingested, upstream integrity verified. The installed unit is byte-identical to
+the versioned one, and isolation is enforced by `ProtectSystem=strict` with
+`ReadWritePaths` naming only the observer's own directory — the observer cannot
+write Hermes' session because the kernel will not let it, not because the code
+declines to. 105 observer tests pass. The envelope carries no `inbound_kind`,
+no turn and nothing else Amendment 2 removed.
+
+The one correction was the expired proof above, and a line in plan 2 that still
+gated on "lifecycle write work" that no longer exists.
 
 ### Stage 4 — Operational Profile contracts and least privilege
 

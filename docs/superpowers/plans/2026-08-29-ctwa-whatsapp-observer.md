@@ -277,4 +277,4 @@ CTWA_INGEST_TO_BRAIN=PASS
 HERMES_CORE_FILES_TOUCHED=NO
 ```
 
-Do not proceed to lifecycle write work until a real CTWA reaches Brain and `conversation_context()` correlates it successfully in shadow mode.
+Amendment 2 removed the lifecycle write work this line used to gate, and with it the correlation it asked for. What still holds is the substance: do not treat this plan as finished until a real CTWA reaches Brain and the CEO is served contact-scoped context from it. That proof belongs to Stage 5 of the master plan, because it needs the hook-free plugin deployed, and the proof collected on 2026-08-30 does not carry over — it exercised a turn-correlated contract that no longer exists.
