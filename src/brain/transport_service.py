@@ -14,6 +14,10 @@ from typing import Any
 from .config import BrainSettings
 from .errors import DatabaseUnavailable
 from .runtime_db import RuntimeDatabase
+
+# One pass an hour is far finer than either limit it enforces (24 hours and
+# 90 days), and keeps the cost off the common ingestion path.
+RETENTION_INTERVAL_SECONDS = 3_600.0
 from .transport_models import RuntimeIds
 from .whatsapp_identity import verify_transport_identity
 
@@ -330,6 +334,8 @@ class TransportService:
         self.settings = settings
         self.runtime = runtime
         self.transport_ids = transport_ids
+        # Never run, so the first ingestion after start also enforces policy.
+        self._retention_ran_at = 0.0
 
     def ingest(self, payload: object) -> dict[str, object]:
         envelope = TransportEnvelope.parse(payload)
@@ -353,7 +359,49 @@ class TransportService:
             raise
         except sqlite3.Error as exc:
             raise DatabaseUnavailable() from exc
+        self._apply_retention(ingestion_now)
         return {"status": "ok", "event_id": envelope.event_id, "duplicate": duplicate}
+
+    def _apply_retention(self, now: float) -> None:
+        """Enforce section 19 on the path that creates the data it governs.
+
+        Deliberately not a scheduled job. Until 2026-08-31 this policy lived in
+        a reconciliation loop nothing ever called, so neither limit had ever
+        been applied to production data. Ingestion is the only source of
+        display names and transport events, which makes it the one place the
+        enforcement cannot be silently absent while the data keeps growing.
+
+        Best-effort and after the durable write: the observer's acknowledgement
+        must never depend on housekeeping, and the next event retries it.
+        """
+        if now - self._retention_ran_at < RETENTION_INTERVAL_SECONDS:
+            return
+        self._retention_ran_at = now
+        transport_cutoff = now - self.settings.transport_retention_days * 86_400
+
+        def purge(conn: sqlite3.Connection) -> tuple[int, int]:
+            names = conn.execute(
+                "UPDATE contact_ephemera SET display_name = NULL, "
+                "updated_at = ? WHERE display_name IS NOT NULL AND expires_at <= ?",
+                (now, now),
+            ).rowcount
+            events = conn.execute(
+                "DELETE FROM transport_events WHERE created_at <= ?",
+                (transport_cutoff,),
+            ).rowcount
+            return names or 0, events or 0
+
+        try:
+            names, events = self.runtime.write(purge)
+        except sqlite3.Error:
+            logger.warning("retention pass failed after transport ingestion")
+            return
+        if names or events:
+            logger.info(
+                "retention removed %d display names and %d transport events",
+                names,
+                events,
+            )
 
     def _persist(
         self,

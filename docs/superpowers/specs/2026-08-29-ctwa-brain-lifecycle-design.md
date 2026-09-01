@@ -784,12 +784,19 @@ The outbox uses bounded retention and contains no raw message text or raw transp
 ## 19. Retention
 
 - raw WhatsApp display name: maximum 24 hours;
-- transport events, turn/event mappings, CTWA technical attribution: maximum 90 days;
-- minimal active lifecycle binding (`contact_key`, `client_id`, lifecycle ID, phase): retained while the lifecycle remains active;
-- after the lifecycle becomes terminal for this automation (`Em Atendimento` or leaves the managed statuses), retain minimal lifecycle/effect audit for 90 additional days, then purge;
+- transport events and CTWA technical attribution: maximum 90 days;
 - secrets and Baileys credentials follow service-secret/session lifecycle, never general event retention.
 
-The purpose of retaining the minimal active binding beyond 90 transport days is to support a late human reply without retaining historical raw CTWA data.
+Amendment 2 removed the lifecycle bindings and turn/event mappings this section
+also covered, so the two remaining limits are the whole policy.
+
+Enforcement is not optional and must not depend on a scheduler that may never
+be wired: until 2026-08-31 this policy was implemented only inside a
+reconciliation loop that nothing ever called, so neither limit was ever
+applied in production. Retention now runs on the ingestion path itself,
+throttled, because ingestion is the only thing that creates data subject to
+these limits and is therefore guaranteed to happen whenever the policy has
+work to do.
 
 ## 20. Failure behavior
 

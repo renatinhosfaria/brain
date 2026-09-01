@@ -5,6 +5,7 @@ import json
 import math
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -469,3 +470,92 @@ class TransportIngestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetentionTests(TransportIngestTests):
+    """Section 19, enforced on the path that creates the governed data."""
+
+    def rows_of(self, table: str) -> list:
+        return self.rows(table)
+
+    def test_first_ingestion_enforces_policy_immediately(self) -> None:
+        self.post(self.envelope(display_name="Name"))
+        service = self.service.transport_service
+
+        self.assertGreater(service._retention_ran_at, 0.0)
+
+    def test_expired_display_name_is_deleted_not_merely_hidden(self) -> None:
+        self.post(self.envelope(display_name="Maria Silva"))
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "UPDATE contact_ephemera SET expires_at = 1.0"
+            )
+        )
+        self.service.transport_service._retention_ran_at = 0.0
+
+        self.post(self.envelope(message_id="later", body="oi de novo"))
+
+        stored = self.service.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT display_name FROM contact_ephemera"
+            ).fetchone()[0]
+        )
+        self.assertIsNone(stored)
+
+    def test_a_live_display_name_survives(self) -> None:
+        self.post(self.envelope(display_name="Maria Silva"))
+        self.service.transport_service._retention_ran_at = 0.0
+
+        self.post(self.envelope(message_id="later", body="oi de novo"))
+
+        stored = self.service.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT display_name FROM contact_ephemera"
+            ).fetchone()[0]
+        )
+        self.assertEqual(stored, "Maria Silva")
+
+    def test_transport_events_past_the_window_are_purged(self) -> None:
+        self.post(self.envelope(message_id="old", body="antigo"))
+        cutoff_days = self.service.settings.transport_retention_days
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "UPDATE transport_events SET created_at = ?",
+                (time.time() - (cutoff_days + 1) * 86_400,),
+            )
+        )
+        self.service.transport_service._retention_ran_at = 0.0
+
+        self.post(self.envelope(message_id="new", body="recente"))
+
+        remaining = self.service.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT COUNT(*) FROM transport_events"
+            ).fetchone()[0]
+        )
+        self.assertEqual(remaining, 1)
+
+    def test_retention_is_throttled_between_passes(self) -> None:
+        self.post(self.envelope(message_id="one", body="um"))
+        first = self.service.transport_service._retention_ran_at
+
+        self.post(self.envelope(message_id="two", body="dois"))
+
+        self.assertEqual(self.service.transport_service._retention_ran_at, first)
+
+    def test_a_failing_retention_pass_does_not_fail_ingestion(self) -> None:
+        self.service.transport_service._retention_ran_at = 0.0
+        original = self.service.runtime.write
+        calls = {"n": 0}
+
+        def flaky(callback):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise sqlite3.OperationalError("retention exploded")
+            return original(callback)
+
+        self.service.runtime.write = flaky  # type: ignore[method-assign]
+        response = self.post(self.envelope(message_id="durable", body="fica"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.rows("transport_events")), 1)
