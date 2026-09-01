@@ -419,7 +419,7 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         self.assertTrue(callable(resume), "resume command is not implemented")
         response = resume("5534999602714")
 
-        self.assertEqual(gate, {"action": "allow"})
+        self.assertIsNone(gate)
         self.assertEqual(
             response,
             "▶️ Atendimento automático retomado para 5534999602714.",
@@ -453,7 +453,7 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         )
         response = plugin.resume_command("5534999602714")
 
-        self.assertEqual(gate, {"action": "allow"})
+        self.assertIsNone(gate)
         self.assertEqual(
             response,
             "▶️ Atendimento automático retomado para 5534999602714.",
@@ -536,7 +536,7 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         )
         response = plugin.resume_command("553199887766")
 
-        self.assertEqual(gate, {"action": "allow"})
+        self.assertIsNone(gate)
         self.assertEqual(
             response,
             "⛔ Comando disponível somente no Telegram administrativo do CEO.",
@@ -562,7 +562,7 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         ):
             response = plugin.resume_command("5534999602714")
 
-        self.assertEqual(gate, {"action": "allow"})
+        self.assertIsNone(gate)
         self.assertEqual(
             response,
             "⛔ Não foi possível alterar a pausa. Tente novamente.",

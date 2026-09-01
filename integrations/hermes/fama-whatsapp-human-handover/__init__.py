@@ -274,7 +274,7 @@ def pre_gateway_dispatch(*, event: Any, gateway: Any, session_store: Any, **_: A
         if not _is_authorized_resume_source(event):
             return {"action": "skip", "reason": "unauthorized_handover_command"}
         _RESUME_AUTHORIZED.set(re.sub(r"\D+", "", resume_args))
-        return {"action": "allow"}
+        return None
 
     if _platform_value(event) != "whatsapp":
         return None
