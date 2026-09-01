@@ -213,15 +213,71 @@ survive because nothing exercised them:
   contract is `verify_team.py`; a third record that can never pass is not a
   control, it is a false assurance for whoever finds it.
 
-### Stage 5 — Deploy the hook-free CEO plugin
+### Stage 5 — The deployment window
 
-- [ ] Update `/etc/brain/brain.toml` so the `default` principal grants only `conversation_context`. The file is read at startup, so the edit itself changes nothing; the constraint is that code, plugin and config must all be in place before the restart, because whichever is stale at that moment is what fails.
-- [ ] Replace the installed `/root/.hermes/plugins/brain-ceo-bridge` with the hook-free version.
-- [ ] Confirm the gateway loads it and registers exactly one tool and zero hooks.
-- [ ] Run one controlled CTWA and confirm the CEO receives contact-scoped context.
-- [ ] Re-run upstream integrity verify.
+One window installs one bundle: Brain's code, the CEO plugin built from the
+same commit, and the `brain.toml` that matches them. The title used to say
+"deploy the hook-free CEO plugin", which invited exactly the mistake the runbook
+warns about — installing one artefact of three produces a combination nothing
+was tested as, and the mismatch stays silent until the next restart.
 
-**Gate:** no hook is registered by this plugin, and `conversation_context()` answers from a real inbound.
+`docs/runbook.md` holds the commands; this is what the window must achieve.
+
+**Before**
+
+- [ ] Re-record `/var/lib/brain/runtime/stage0-baseline.json`. Every
+  `dirty_lines` must be `0`.
+- [ ] Merge `descope-amendment-2`. `brain.service` runs straight out of the
+  working tree, so a branch switch on this machine is itself an artefact change.
+- [ ] Prepare the post-Amendment-2 `brain.toml` outside the repository, then
+  `brain_bundle.py create` and `verify candidate`.
+
+**Install — all three, then restart**
+
+- [ ] Check out the candidate's commit.
+- [ ] Swap `/root/.hermes/plugins/brain-ceo-bridge` by staging beside the live
+  copy, never by deleting it first.
+- [ ] Install the bundle's `brain.toml` as `/etc/brain/brain.toml`, mode 0600.
+- [ ] Restart `brain.service`, then the Hermes gateway. **The gateway restart is
+  not only for the plugin:** it is what makes the CEO and Reno load the prompts
+  corrected in Stage 4. Until it happens they run the contracts that teach the
+  removed architecture, which is Stage 4's open item.
+
+**Validate against the live system, not a copy**
+
+- [ ] Plugin Doctor on the *installed* copy: one tool, zero hooks.
+- [ ] `hermes_integration_check.py` — it doctors both copies and fails on any
+  byte difference between them.
+- [ ] `smoke_test.py`.
+- [ ] `hermes_integrity.py verify`.
+- [ ] Full Python suite, and the observer suite on `/opt/brain/node`.
+- [ ] One controlled CTWA: the CEO receives contact-scoped context from a real
+  inbound. This closes Stage 3's expired proof and Stage 1's open item — its
+  code will have processed a real case end to end.
+- [ ] Prove Reno's status write: read a client, PATCH with `expectedStatus`,
+  and confirm FamaChat returns 409 on a stale predicate. This is
+  `RENO_CONDITIONAL_STATUS_WRITE` and `MANUAL_CRM_STATE_NEVER_DOWNGRADED`,
+  which the Final Gate and the E2E matrix both require and which no stage owned
+  until this audit. It needs a client the operator designates as disposable.
+
+**Record**
+
+- [ ] Only after every gate above passes, `brain_bundle.py promote`.
+
+**Gate:** every validation above green, and the authoritative state naming the
+bundle that produced them.
+
+**Audited 2026-09-01.** The stage had five checkboxes and was missing most of
+the window: no merge, no bundle, no gateway restart for the Profile reload, no
+validation beyond integrity, and no owner for the Reno write proof that both the
+Final Gate and the E2E matrix demand. Rewritten to match `docs/runbook.md` step
+for step, so the plan and the procedure cannot disagree about what a deployment
+is.
+
+**No rollback exists for this window.** It is the first release of this
+architecture, so `previous` is unset and the artefacts on the machine are not a
+bundle of it. A failure is answered by rolling forward, or by an explicitly
+authorized architectural reversion.
 
 ## Required controlled E2E matrix
 

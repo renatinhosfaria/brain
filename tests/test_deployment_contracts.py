@@ -280,6 +280,41 @@ class DeploymentContractTests(unittest.TestCase):
         ):
             self.assertIn(required, runbook)
 
+    def test_the_window_stage_and_the_runbook_agree(self) -> None:
+        """A plan and a procedure that disagree let a step fall between them."""
+        plan = (
+            ROOT / "docs/superpowers/plans/2026-08-29-ctwa-brain-lifecycle-master.md"
+        ).read_text(encoding="utf-8")
+        stage = plan[plan.index("### Stage 5") : plan.index("## Required controlled")]
+
+        for required in (
+            "stage0-baseline.json",
+            "brain_bundle.py create",
+            "brain.toml",
+            "restart",
+            "Plugin Doctor",
+            "hermes_integration_check.py",
+            "smoke_test.py",
+            "hermes_integrity.py",
+            "/opt/brain/node",
+            "controlled CTWA",
+            "expectedStatus",
+            "promote",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, stage)
+
+    def test_the_window_records_only_after_validating(self) -> None:
+        plan = (
+            ROOT / "docs/superpowers/plans/2026-08-29-ctwa-brain-lifecycle-master.md"
+        ).read_text(encoding="utf-8")
+        stage = plan[plan.index("### Stage 5") : plan.index("## Required controlled")]
+
+        promote = stage.index("brain_bundle.py promote")
+        for gate in ("Plugin Doctor", "controlled CTWA", "expectedStatus"):
+            with self.subTest(gate=gate):
+                self.assertLess(stage.index(gate), promote)
+
     def test_the_observer_suite_runs_on_the_runtime_the_service_uses(self) -> None:
         """A pin proves nothing if the tests run on the other side of it."""
         unit = (ROOT / "deploy/brain-whatsapp-observer.service").read_text(
