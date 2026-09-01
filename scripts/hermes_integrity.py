@@ -17,6 +17,20 @@ from typing import Any, NoReturn
 
 SCHEMA_VERSION = 1
 MANIFEST_VERSION = 1
+# Defence in depth, not the only line. `git_head` plus `git_clean` already
+# cover every tracked file in the installation, so any edit to any of the ten
+# thousand is caught; these six are hashed explicitly so a report says which
+# file moved rather than only that something did.
+#
+# The list has drifted from what Brain depends on, and deliberately stays put.
+# `delivery_ledger.py` was protected because proving the first T1 send read its
+# states, and `kanban_tools.py` because Kanban idempotency was rewritten from a
+# correlated turn; Amendment 2 removed both. Meanwhile `hermes_cli/plugins.py`
+# and `gateway/whatsapp_identity.py` are depended upon today and are not named
+# here. Changing the tuple invalidates the installed baseline — verify requires
+# the recorded file set to equal it exactly — and re-capturing replaces the
+# artefact this whole stage rests on. Since coverage is identical either way,
+# the control is left alone and the drift is written down instead.
 CRITICAL_MANIFEST = (
     "scripts/whatsapp-bridge/bridge.js",
     "plugins/platforms/whatsapp/adapter.py",

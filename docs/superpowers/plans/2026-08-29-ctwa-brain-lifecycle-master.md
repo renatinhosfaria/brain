@@ -92,6 +92,22 @@ that has not been installed. Three defects were found and fixed:
 
 **Gate:** `HERMES_ORIGINAL_INTEGRITY=PASS`.
 
+**Audited 2026-09-01.** The stage holds. The baseline was captured 2026-08-29
+23:20, before the observer was paired (30/08 19:20) and before the plugin was
+installed (30/08 22:17), which is the ordering the stage exists to guarantee;
+it is mode 0600 and still verifies. Nineteen tests cover capture and verify,
+and mutating away the HEAD comparison, the clean-worktree check or the hash
+comparison each turns one red, so the gate bites rather than merely passing.
+
+One finding, recorded rather than fixed. `CRITICAL_MANIFEST` still names
+`delivery_ledger.py` and `kanban_tools.py`, protected for a T1 proof and a
+Kanban rewrite that Amendment 2 removed, while `hermes_cli/plugins.py` and
+`gateway/whatsapp_identity.py` are depended upon today and are not named.
+Coverage is unaffected — `git_head` and `git_clean` already cover all 10,561
+tracked files — so the only gain from editing the tuple would be documentation,
+and the cost would be invalidating and re-capturing the baseline this stage
+rests on. The rationale is now written in the script instead.
+
 ### Stage 3 — Production observer in capture-only mode
 
 - [x] Execute `2026-08-29-ctwa-whatsapp-observer.md` completely.
