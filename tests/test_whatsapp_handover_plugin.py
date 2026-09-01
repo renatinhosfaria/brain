@@ -108,6 +108,18 @@ class BusyGateway(AsyncHardGateway):
         return False
 
 
+class FailingHardGateway(BusyGateway):
+    async def _interrupt_and_clear_session(
+        self,
+        session_key,
+        source,
+        *,
+        interrupt_reason,
+        invalidation_reason,
+    ):
+        raise RuntimeError("hard interrupt failed before invalidation")
+
+
 class BusyAdapter:
     def __init__(self, gateway: BusyGateway) -> None:
         self.gateway = gateway
@@ -341,6 +353,36 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         self.assertTrue(plugin.HandoverStore.from_env().is_paused("553499602714"))
         self.assertEqual(len(sessions.messages), 1)
 
+    def test_busy_hard_interrupt_failure_still_invalidates_generation(self):
+        plugin = load_plugin()
+        sessions = FakeSessionStore()
+        gateway = FailingHardGateway(FakeAgent(), sessions)
+        adapter = BusyAdapter(gateway)
+        plugin._wire_whatsapp_adapter(None, adapter)
+
+        with self.assertLogs(plugin.logger, level="ERROR"):
+            consumed = asyncio.run(
+                adapter._busy_session_handler(
+                    event(
+                        text="[owner reply] Vou assumir mesmo com a falha.",
+                        message_id="owner-busy-failure-1",
+                        from_owner=True,
+                    ),
+                    "agent:main:whatsapp:dm:553499602714",
+                )
+            )
+
+        self.assertTrue(consumed)
+        self.assertEqual(
+            gateway.invalidations,
+            [
+                (
+                    "agent:main:whatsapp:dm:553499602714",
+                    "human_handover_fallback",
+                )
+            ],
+        )
+
     def test_busy_paused_customer_message_is_consumed_without_queueing(self):
         plugin = load_plugin()
         plugin.HandoverStore.from_env().pause(
@@ -485,6 +527,39 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         )
         self.assertFalse(plugin.HandoverStore.from_env().is_paused("553499602714"))
         self.assertEqual(sessions.messages, [])
+
+    def test_agent_echo_is_suppressed_after_independent_late_bridge_restart(self):
+        plugin = load_plugin()
+        sessions = FakeSessionStore()
+        sessions.transcript = [
+            {
+                "role": "assistant",
+                "content": "Resposta recente antes do bridge reconectar.",
+                "timestamp": time.time(),
+                "observed": False,
+            }
+        ]
+
+        with patch.object(
+            plugin.time,
+            "monotonic",
+            return_value=time.monotonic() + 3600,
+        ):
+            result = plugin.pre_gateway_dispatch(
+                event=event(
+                    text=("[owner reply] Resposta recente antes do bridge reconectar."),
+                    message_id="late-independent-bridge-echo",
+                    from_owner=True,
+                ),
+                gateway=FakeGateway(FakeAgent()),
+                session_store=sessions,
+            )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "human_handover_agent_echo"},
+        )
+        self.assertFalse(plugin.HandoverStore.from_env().is_paused("553499602714"))
 
     def test_recent_chunked_agent_echo_after_restart_does_not_pause_contact(self):
         plugin = load_plugin()

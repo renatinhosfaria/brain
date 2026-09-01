@@ -10,9 +10,10 @@ recorded as observed user messages and skipped before the LLM.
 
 Text and attachment type/path references are kept in the transcript. Media is
 not transcribed while the contact is paused, because the silent path invokes no
-LLM, tool or action. During the first two minutes after a gateway restart, an
-exact match against a recent non-observed CEO response is treated as a bridge
-echo and does not activate handover.
+LLM, tool or action. Any forwarded owner-looking message that exactly matches
+a non-observed CEO response from the previous two minutes is treated as a
+bridge echo and does not activate handover, including after a bridge-only
+restart.
 
 The pause remains until the configured CEO administrator sends
 `/retomar <telefone>` in the configured Telegram chat and topic. Resuming does

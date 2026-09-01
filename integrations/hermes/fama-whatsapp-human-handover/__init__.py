@@ -21,7 +21,6 @@ from gateway.whatsapp_identity import (
 _OWNER_PREFIX = "[owner reply] "
 _HUMAN_PREFIX = "[Atendimento humano] "
 _AGENT_ECHO_GRACE_SECONDS = 120.0
-_STARTED_MONOTONIC = time.monotonic()
 _RESUME_AUTHORIZED: ContextVar[str | None] = ContextVar(
     "fama_handover_resume_authorized",
     default=None,
@@ -227,8 +226,6 @@ def _looks_like_recent_agent_echo(
     event: Any,
 ) -> bool:
     """Suppress a narrow bridge-restart echo without treating it as human input."""
-    if time.monotonic() - _STARTED_MONOTONIC > _AGENT_ECHO_GRACE_SECONDS:
-        return False
     candidate = str(getattr(event, "text", "") or "").removeprefix(_OWNER_PREFIX)
     candidate = " ".join(candidate.split())
     if not candidate:
@@ -439,6 +436,13 @@ def _wire_whatsapp_adapter(_native_handler: Any, adapter: Any) -> None:
                 )
             except Exception:
                 logger.exception("WhatsApp handover hard interrupt failed")
+                invalidate = getattr(
+                    gateway,
+                    "_invalidate_session_run_generation",
+                    None,
+                )
+                if callable(invalidate):
+                    invalidate(session_key, reason="human_handover_fallback")
         return True
 
     adapter.set_busy_session_handler(handover_busy_handler)
