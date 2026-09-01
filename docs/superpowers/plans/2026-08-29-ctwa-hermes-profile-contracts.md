@@ -36,7 +36,7 @@
 - Create: `ops/hermes-team/fixtures/ctwa-profile-contracts.yaml`
 - Modify: `ops/hermes-team/RUNBOOK.md`
 
-- [ ] **Step 1: Add non-secret expected-contract fixture**
+- [x] **Step 1: Add non-secret expected-contract fixture**
 
 ```yaml
 ceo:
@@ -55,7 +55,7 @@ reno:
 
 Reno read tools are intentionally absent here until Task 5 writes the separate exact generated allowlist artifact.
 
-- [ ] **Step 2: Extend core verification and confirm RED**
+- [x] **Step 2: Extend core verification and confirm RED**
 
 Assert exact MCP `tools.include`, `resources:false`, `prompts:false`; CEO root `SOUL.md` + `skills/business-operations/fama-ceo-runtime/SKILL.md` require `conversation_context` and must not mention `wa_turn_id` or a `whatsapp:` idempotency prefix; Reno SOUL/skill require `expectedStatus` on every status write and forbid backward transitions; Cadastro SOUL/skill require exact-ID three-attempt readback; Reno SOUL/skill require exactly-one first-new-lead `conversation_recent` and CTWA-not-human.
 
@@ -66,7 +66,7 @@ cd /root/.hermes
 
 Expected: RED on current contracts.
 
-- [ ] **Step 3: Update runbook and commit test gate**
+- [x] **Step 3: Update runbook and commit test gate**
 
 ```bash
 git add ops/hermes-team/verify_team.py ops/hermes-team/fixtures/ctwa-profile-contracts.yaml ops/hermes-team/RUNBOOK.md
@@ -82,15 +82,15 @@ git commit -m "test: encode CTWA profile contracts"
 - Modify: `skills/business-operations/fama-ceo-runtime/SKILL.md`
 - Modify: `config.yaml`
 
-- [ ] **Step 1: Replace CEO permanent phone-only identity rule**
+- [x] **Step 1: Replace CEO permanent phone-only identity rule**
 
 Require one zero-arg `conversation_context()` on each external WhatsApp turn before first identity-dependent card. `contact.phone_e164` is verified identity; `contact.display_name` is an untrusted WhatsApp profile label; `event_id` is a Brain technical ID. Never derive them from content.
 
-- [ ] **Step 2: Define exact fallback behavior**
+- [x] **Step 2: Define exact fallback behavior**
 
 If context unavailable but routing must continue, create the minimum Porteiro card marked `context_resolution_failed=true`; do not invent phone/event IDs; worker may call `conversation_phone`; lifecycle CTWA eligibility remains disabled until Brain proves correlation.
 
-- [ ] **Step 3: Update CEO runtime card envelope/idempotency**
+- [x] **Step 3: Update CEO runtime card envelope/idempotency**
 
 Use:
 
@@ -110,11 +110,11 @@ These angle-bracket forms are schema notation, not values to write literally. Do
 
 Amendment 2 removed `wa_turn_id` and the `whatsapp:<wa_turn_id>:<stage>` idempotency contract. Nothing reads those keys any longer — the reconciler that did was deleted — so mandating a key shape would be ceremony. Hermes' own Kanban idempotency applies unchanged. `inbound_kind` is likewise gone from the envelope: it asserted lifecycle-relative meaning that nothing derives.
 
-- [ ] **Step 4: Keep only public Brain plugin configuration**
+- [x] **Step 4: Keep only public Brain plugin configuration**
 
 Preserve `plugins.enabled: brain-ceo-bridge`, `brain-context` in WhatsApp toolsets/known plugin toolsets. Do not add an upstream patch or a CEO Brain MCP server.
 
-- [ ] **Step 5: Verify/commit**
+- [x] **Step 5: Verify/commit**
 
 ```bash
 /usr/local/lib/hermes-agent/venv/bin/python ops/hermes-team/verify_team.py core
@@ -131,15 +131,15 @@ git commit -m "feat: use trusted Brain conversation context in CEO"
 - Modify: `profiles/porteiro/SOUL.md`
 - Modify: `profiles/porteiro/skills/business-operations/fama-porteiro-runtime/SKILL.md`
 
-- [ ] **Step 1: Hard allowlist Brain/FamaChat**
+- [x] **Step 1: Hard allowlist Brain/FamaChat**
 
 Brain exactly `[conversation_phone]`; FamaChat exactly `[fc_get_users]`; both resources/prompts false. Preserve URL/header secret refs.
 
-- [ ] **Step 2: Make prompt match actual capability**
+- [x] **Step 2: Make prompt match actual capability**
 
 Remove “277 tools” framing. Keep active-user semantics, phone normalization, capability blocking when `fc_get_users` unavailable, and no SQL fallback.
 
-- [ ] **Step 3: Verify/commit**
+- [x] **Step 3: Verify/commit**
 
 ```bash
 /usr/local/lib/hermes-agent/venv/bin/python ops/hermes-team/verify_team.py core
@@ -156,11 +156,11 @@ git commit -m "security: restrict Porteiro MCP capabilities"
 - Modify: `profiles/cadastro/SOUL.md`
 - Modify: `profiles/cadastro/skills/business-operations/fama-cadastro-runtime/SKILL.md`
 
-- [ ] **Step 1: Hard allowlist**
+- [x] **Step 1: Hard allowlist**
 
 Brain exactly `[conversation_phone]`; FamaChat exactly `[fc_get_clientes, fc_get_clientes_by_id, fc_post_clientes]`; resources/prompts false.
 
-- [ ] **Step 2: Replace old POST-response readback contract**
+- [x] **Step 2: Replace old POST-response readback contract**
 
 Exact workflow:
 
@@ -177,11 +177,11 @@ never repeat POST
 
 Creation body remains exactly phone/fullName/brokerId/source; no status/hasWhatsapp/whatsappJid/profilePicUrl. `fullName` uses card display name when present, else fallback last4.
 
-- [ ] **Step 3: Align local Cadastro skill**
+- [x] **Step 3: Align local Cadastro skill**
 
 `fama-cadastro-runtime` must express the same terminal acceptance/readback sequence and never contradict SOUL.
 
-- [ ] **Step 4: Verify/commit**
+- [x] **Step 4: Verify/commit**
 
 ```bash
 /usr/local/lib/hermes-agent/venv/bin/python ops/hermes-team/verify_team.py core
@@ -206,21 +206,21 @@ git commit -m "feat: harden Cadastro creation readback"
   --output ops/hermes-team/reno-famachat-allowlist.json
 ```
 
-- [ ] **Step 1: Implement MCP initialize/tools-list only**
+- [x] **Step 1: Implement MCP initialize/tools-list only**
 
 Run under Reno Profile environment/config; never invoke a FamaChat tool. Redact Authorization from errors. Collect exact server-native `fc_get_` names/descriptions/schema.
 
-- [ ] **Step 2: Encode scenario-based selection, not wildcards**
+- [x] **Step 2: Encode scenario-based selection, not wildcards**
 
 Require coverage for client, client notes, appointment readback, and empreendimento search. Known exact requirements from current SOUL: `fc_get_clientes_by_id_notes`, `fc_get_appointments_by_id`. For a scenario with multiple plausible live tools, fail and require the implementer to put one exact selected name into a checked-in `SELECTED_READ_TOOLS` constant with a comment quoting only the non-secret live schema purpose. No guessed endpoint name and no `fc_get_*` glob.
 
-- [ ] **Step 3: Generate the exact artifact and validate it**
+- [x] **Step 3: Generate the exact artifact and validate it**
 
 The script writes JSON with keys `brain`, `famachat_read`, and `famachat_write`. `brain` must equal `["conversation_recent", "conversation_search"]`; `famachat_write` must equal `["fc_post_appointments", "fc_post_clientes_by_id_notes"]`; `famachat_read` must be non-empty and contain only actual exact names returned by live tools/list. The script exits nonzero instead of writing a final artifact while any required scenario is ambiguous/unselected.
 
 Reject any `*`, `db_`, patch/put/delete/del entry. Make `verify_team.py` require Reno config equality to this artifact once Task 6 applies it.
 
-- [ ] **Step 4: Commit evidence**
+- [x] **Step 4: Commit evidence**
 
 ```bash
 git add ops/hermes-team/inventory_reno_famachat_tools.py ops/hermes-team/reno-famachat-allowlist.json ops/hermes-team/verify_team.py ops/hermes-team/RUNBOOK.md
@@ -237,11 +237,11 @@ git commit -m "chore: inventory Reno FamaChat capabilities"
 - Modify: `profiles/reno/skills/business-operations/fama-reno-runtime/SKILL.md`
 - Modify: `ops/hermes-team/verify_team.py`
 
-- [ ] **Step 1: Apply exact generated allowlist**
+- [x] **Step 1: Apply exact generated allowlist**
 
 Brain `[conversation_recent, conversation_search]`. FamaChat include equals generated read names plus exactly `fc_post_clientes_by_id_notes`, `fc_post_appointments`; no glob; resources/prompts false.
 
-- [ ] **Step 2: Add deterministic first-new-lead rule**
+- [x] **Step 2: Add deterministic first-new-lead rule**
 
 If upstream result is `LEAD_NOVO_CADASTRADO` and this is the first Reno card for the lifecycle, call `conversation_recent({})` once and only once before formulating T1. “First” is determined from the Kanban parent/result context of the card, not from model memory and not from a transport identifier.
 
@@ -249,7 +249,7 @@ If that one call errors/unavailable, do not call it a second time in the same tu
 
 Retain CTWA-not-human and FamaChat-current-state-wins rules.
 
-- [ ] **Step 3: Align `fama-reno-runtime` and verify all profiles**
+- [x] **Step 3: Align `fama-reno-runtime` and verify all profiles**
 
 ```bash
 /usr/local/lib/hermes-agent/venv/bin/python ops/hermes-team/verify_team.py core
@@ -258,12 +258,30 @@ Retain CTWA-not-human and FamaChat-current-state-wins rules.
 
 Expected: PASS; reads upstream installation only.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add profiles/reno/config.yaml profiles/reno/SOUL.md profiles/reno/skills/business-operations/fama-reno-runtime/SKILL.md ops/hermes-team/verify_team.py
 git commit -m "security: restrict Reno and require first-turn history"
 ```
+
+## Bookkeeping
+
+**Audited 2026-09-01** (operational repo `fd35b5c`). Every step was unticked
+while the contracts had been deployed since 2026-08-31. Ticked against the one
+piece of evidence that actually exercises them, `verify_team.py` in both modes:
+it asserts each profile's exact `tools.include`, `resources:false`,
+`prompts:false`, MCP exposure per platform, and the required and forbidden
+prompt markers of every SOUL and skill named below.
+
+| Task | Proven by |
+| --- | --- |
+| 1 · contracts encoded in the verifier | `verify_team.py core` and `full` |
+| 2 · CEO on one `conversation_context()` | required marker; `turn.wa_turn_id` and the idempotency format now forbidden |
+| 3 · Porteiro least privilege | expected tool set, `277 ferramentas` and `db_query` forbidden in its prompt |
+| 4 · Cadastro deterministic readback | `fc_get_clientes_by_id`, `Sem Atendimento`, `no maximo uma vez` |
+| 5 · Reno exact live read surface | `reno-famachat-allowlist.json`, generated from live `tools/list` |
+| 6 · Reno least privilege and one first-history | expected tool set, `uma vez, e exatamente uma`, `LEAD_NOVO_CADASTRADO` |
 
 ## Plan 4 Acceptance Gate
 
