@@ -252,38 +252,58 @@ only unit that is ever deployed or restored:
 | `/root/.hermes/plugins/brain-ceo-bridge` | one tool, zero hooks |
 | `/etc/brain/brain.toml` | `default` principal grants only `conversation_context` |
 
-Never restore one of these without the other two. A mixed set is what the
-failure modes above describe, and every one of them is silent until a restart.
+Never install or restore one of these without the other two. Every failure
+mode above is a mixed set, and each stays silent until the next restart.
 
-### Staging the rollback bundle
+Bundles are built and rotated by `scripts/brain_bundle.py`, which keeps three
+slots under `/var/lib/brain/runtime/bundles`:
 
-Build the restore target from the reviewed commit **before** touching anything,
-so rollback never depends on hand-editing under pressure:
-
-```sh
-SHA=$(git -C /root/brain rev-parse --short HEAD)
-BUNDLE=/var/lib/brain/runtime/bundle-$SHA
-install -d -m 700 "$BUNDLE"
-echo "$SHA" > "$BUNDLE/commit"
-cp -a /root/brain/integrations/hermes/brain-ceo-bridge "$BUNDLE/plugin"
-sed 's/tools = \["conversation_context", "turn_register"\]/tools = ["conversation_context"]/' \
-    /etc/brain/brain.toml > "$BUNDLE/brain.toml"
-chmod 600 "$BUNDLE/brain.toml"
-grep -A3 '\[principals.default\]' "$BUNDLE/brain.toml"
+```text
+candidate   what review approved and the next window will install
+active      what the running service was deployed from
+previous    what active was before the last promotion
 ```
 
-Confirm the generated TOML grants only `conversation_context` and that its
-token digests are unchanged. This file is the config for both the deploy and
-any rollback within this architecture.
+A bundle is identified by the **full** 40-character commit SHA, because a slot
+must name exactly one tree and abbreviations can collide. Creation refuses a
+dirty worktree — a bundle built from uncommitted edits cannot be rebuilt, so
+it can never be verified and `previous` would be a promise the repository
+cannot keep. It also refuses a config that still grants `turn_register` or
+still declares a writer principal; it validates that file and never edits it.
+
+### Before the window
+
+Prepare the post-Amendment-2 config, then build and verify the candidate:
+
+```sh
+cd /root/brain
+sed 's/tools = \["conversation_context", "turn_register"\]/tools = ["conversation_context"]/' \
+    /etc/brain/brain.toml > /root/brain/brain.toml.next
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py create \
+    --config /root/brain/brain.toml.next
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py verify candidate
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py status
+```
+
+Confirm the generated config keeps every token digest unchanged. `create` fails
+loudly if the config or the worktree is not ready, which is the point: the
+bundle cannot be assembled from a half-prepared machine.
 
 ### The window
 
-1. Check out the reviewed commit in `/root/brain`.
+Let `BUNDLE=/var/lib/brain/runtime/bundles/candidate`.
+
+1. Check out the candidate's commit in `/root/brain`.
 2. Replace `/root/.hermes/plugins/brain-ceo-bridge/` with `$BUNDLE/plugin`,
    removing the directory first so no stale source file survives.
 3. Install `$BUNDLE/brain.toml` as `/etc/brain/brain.toml`, mode 0600.
 4. Only once all three are in place, restart `brain.service`, then the Hermes
    gateway so the CEO reloads the plugin.
+5. After validation passes, record the rotation:
+   `scripts/brain_bundle.py promote`.
+
+Promotion is the last step, not the first. `promote` verifies the candidate
+before rotating, so a corrupt bundle can never displace a good `active`.
 
 ### Validate in the real environment
 
@@ -313,32 +333,66 @@ the gateway loads something else is exactly the drift that went unnoticed on
 Finish with one controlled CTWA and confirm the CEO receives contact-scoped
 context from a real inbound.
 
-### Rollback
+### Partial-deploy recovery
 
-Rollback restores a coherent bundle. It does **not** revert the architecture.
+If the window is interrupted — the plugin copied but the config missed, a
+restart taken before all three artefacts were in place — the fix is to finish
+applying the same bundle, not to undo anything:
 
 ```sh
-BUNDLE=/var/lib/brain/runtime/bundle-$(cat /var/lib/brain/runtime/bundle-current)
-git checkout "$(cat "$BUNDLE/commit")"
+BUNDLE=/var/lib/brain/runtime/bundles/candidate
+git checkout "$(basename "$(readlink -f "$BUNDLE")")"
 rm -rf /root/.hermes/plugins/brain-ceo-bridge
 cp -a "$BUNDLE/plugin" /root/.hermes/plugins/brain-ceo-bridge
 install -m 600 "$BUNDLE/brain.toml" /etc/brain/brain.toml
 systemctl restart brain.service
 ```
 
-Then restart the Hermes gateway and re-run the validation block. Rollback never
-touches `/usr/local/lib/hermes-agent`, which is not a deployment target.
+Then restart the Hermes gateway and re-run the validation block. This is
+recovery, not rollback: the target is the bundle that was already being
+installed.
 
-On the first window there is no earlier post-Amendment-2 bundle, so rollback
-here means re-applying the same bundle correctly — the realistic failure is a
-partial application, such as the plugin copied but the config missed, or a
-restart taken before all three were in place.
+### Rollback
 
-### Architectural revert
+**The first post-Amendment-2 release has no compatible rollback.** `previous`
+is unset because no earlier bundle of this architecture was ever deployed, and
+the artefacts currently on the machine are not one: they are writer-era code, a
+plugin registering three hooks, and a principal granting `turn_register`.
+Restoring them is not a rollback, it is a different architecture.
+
+So for this window there are exactly two responses to a failure:
+
+- **roll forward** — diagnose, fix on the branch, build a new candidate, and
+  run the window again; this is the default;
+- **architectural reversion** — explicitly authorized, described below.
+
+From the second release onward, `previous` names a real bundle of this
+architecture and rollback becomes ordinary:
+
+```sh
+PREVIOUS=/var/lib/brain/runtime/bundles/previous
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py verify previous
+cd /root/brain && git checkout "$(basename "$(readlink -f "$PREVIOUS")")"
+rm -rf /root/.hermes/plugins/brain-ceo-bridge
+cp -a "$PREVIOUS/plugin" /root/.hermes/plugins/brain-ceo-bridge
+install -m 600 "$PREVIOUS/brain.toml" /etc/brain/brain.toml
+systemctl restart brain.service
+```
+
+Verify before restoring. A `previous` slot that fails verification is not a
+fallback, and `scripts/brain_bundle.py status` reports that state as INVALID
+rather than letting it be discovered mid-incident. Rollback never touches
+`/usr/local/lib/hermes-agent`, which is not a deployment target.
+
+### Architectural reversion
 
 Returning to the pre-Amendment-2 code, the hooked plugin and a `turn_register`
-principal is not a rollback. It reinstates the turn-correlation spine, the
-lifecycle writer and a FamaChat credential in Brain, and it requires explicit
-authorization. If it is ever done, all three artefacts move together as one
-bundle; restoring the old plugin under the new code, or the reverse, produces a
-system neither version was tested as.
+principal reinstates the turn-correlation spine, the lifecycle writer and a
+FamaChat credential in Brain. It requires explicit authorization and is never
+an operator's own call during an incident.
+
+If it is ever done, all three artefacts move together. Restoring the old plugin
+under the new code, or the reverse, produces a system neither version was
+tested as — and the specific shape of that failure is known: hooks calling a
+`/internal/gateway/turn-register` route that no longer exists, failing open and
+silently, which is how a whole turn was lost on 2026-08-31.
