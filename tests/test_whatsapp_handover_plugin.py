@@ -7,7 +7,6 @@ import os
 import re
 import sys
 import tempfile
-import time
 import types
 import unittest
 from pathlib import Path
@@ -36,7 +35,6 @@ def load_plugin():
 class FakeSessionStore:
     def __init__(self) -> None:
         self.messages: list[tuple[str, dict]] = []
-        self.transcript: list[dict] = []
 
     def get_or_create_session(self, source, touch_activity=False):
         return SimpleNamespace(
@@ -52,9 +50,6 @@ class FakeSessionStore:
 
     def append_to_transcript(self, session_id, message):
         self.messages.append((session_id, dict(message)))
-
-    def load_transcript(self, session_id):
-        return list(self.transcript)
 
 
 class FakeAgent:
@@ -131,6 +126,17 @@ class BusyAdapter:
 
     def set_busy_session_handler(self, handler):
         self._busy_session_handler = handler
+
+
+class OutboundAdapter(BusyAdapter):
+    def __init__(self, gateway: BusyGateway, send_result: SimpleNamespace) -> None:
+        super().__init__(gateway)
+        self.send_result = send_result
+        self.sent: list[tuple[str, str]] = []
+
+    async def send(self, chat_id, content, **kwargs):
+        self.sent.append((chat_id, content))
+        return self.send_result
 
 
 def event(
@@ -499,22 +505,27 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
         self.assertIn("audio/ogg", content)
         self.assertIn("/tmp/hermes/audio-customer-audio-1.ogg", content)
 
-    def test_recent_agent_echo_after_bridge_restart_does_not_pause_contact(self):
+    def test_durable_outbound_id_prevents_false_pause_after_bridge_restart(self):
         plugin = load_plugin()
         sessions = FakeSessionStore()
-        sessions.transcript = [
-            {
-                "role": "assistant",
-                "content": "Resposta que acabou de sair.",
-                "timestamp": time.time(),
-                "observed": False,
-            }
-        ]
+        gateway = BusyGateway(FakeAgent(), sessions)
+        adapter = OutboundAdapter(
+            gateway,
+            SimpleNamespace(
+                success=True,
+                message_id="bot-outbound-last",
+                continuation_message_ids=(),
+                raw_response={"message_ids": ["bot-outbound-last"]},
+            ),
+        )
+        plugin._wire_whatsapp_adapter(None, adapter)
+        asyncio.run(adapter.send("553499602714", "Resposta que acabou de sair."))
+        reloaded_plugin = load_plugin()
 
-        result = plugin.pre_gateway_dispatch(
+        result = reloaded_plugin.pre_gateway_dispatch(
             event=event(
-                text="[owner reply] Resposta que acabou de sair.",
-                message_id="echo-after-restart",
+                text="[owner reply] Qualquer texto de eco.",
+                message_id="bot-outbound-last",
                 from_owner=True,
             ),
             gateway=FakeGateway(FakeAgent()),
@@ -525,61 +536,31 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
             result,
             {"action": "skip", "reason": "human_handover_agent_echo"},
         )
-        self.assertFalse(plugin.HandoverStore.from_env().is_paused("553499602714"))
+        self.assertFalse(
+            reloaded_plugin.HandoverStore.from_env().is_paused("553499602714")
+        )
         self.assertEqual(sessions.messages, [])
 
-    def test_agent_echo_is_suppressed_after_independent_late_bridge_restart(self):
+    def test_every_chunk_id_is_persisted_for_bridge_restart_echoes(self):
         plugin = load_plugin()
         sessions = FakeSessionStore()
-        sessions.transcript = [
-            {
-                "role": "assistant",
-                "content": "Resposta recente antes do bridge reconectar.",
-                "timestamp": time.time(),
-                "observed": False,
-            }
-        ]
-
-        with patch.object(
-            plugin.time,
-            "monotonic",
-            return_value=time.monotonic() + 3600,
-        ):
-            result = plugin.pre_gateway_dispatch(
-                event=event(
-                    text=("[owner reply] Resposta recente antes do bridge reconectar."),
-                    message_id="late-independent-bridge-echo",
-                    from_owner=True,
-                ),
-                gateway=FakeGateway(FakeAgent()),
-                session_store=sessions,
-            )
-
-        self.assertEqual(
-            result,
-            {"action": "skip", "reason": "human_handover_agent_echo"},
+        gateway = BusyGateway(FakeAgent(), sessions)
+        adapter = OutboundAdapter(
+            gateway,
+            SimpleNamespace(
+                success=True,
+                message_id="bot-chunk-2",
+                continuation_message_ids=("bot-chunk-1",),
+                raw_response={"message_ids": ["bot-chunk-1", "bot-chunk-2"]},
+            ),
         )
-        self.assertFalse(plugin.HandoverStore.from_env().is_paused("553499602714"))
-
-    def test_recent_chunked_agent_echo_after_restart_does_not_pause_contact(self):
-        plugin = load_plugin()
-        sessions = FakeSessionStore()
-        sessions.transcript = [
-            {
-                "role": "assistant",
-                "content": (
-                    "Primeira parte da resposta. "
-                    "Esta é a segunda parte entregue separadamente."
-                ),
-                "timestamp": time.time(),
-                "observed": False,
-            }
-        ]
+        plugin._wire_whatsapp_adapter(None, adapter)
+        asyncio.run(adapter.send("553499602714", "Resposta longa em partes."))
 
         result = plugin.pre_gateway_dispatch(
             event=event(
-                text=("[owner reply] Esta é a segunda parte entregue separadamente."),
-                message_id="chunk-echo-after-restart",
+                text="[owner reply] Primeira parte.",
+                message_id="bot-chunk-1",
                 from_owner=True,
             ),
             gateway=FakeGateway(FakeAgent()),
@@ -591,6 +572,36 @@ class WhatsAppHandoverPluginTests(unittest.TestCase):
             {"action": "skip", "reason": "human_handover_agent_echo"},
         )
         self.assertFalse(plugin.HandoverStore.from_env().is_paused("553499602714"))
+
+    def test_same_text_with_a_different_id_is_legitimate_human_handover(self):
+        plugin = load_plugin()
+        sessions = FakeSessionStore()
+        gateway = BusyGateway(FakeAgent(), sessions)
+        adapter = OutboundAdapter(
+            gateway,
+            SimpleNamespace(
+                success=True,
+                message_id="bot-original-id",
+                continuation_message_ids=(),
+                raw_response=None,
+            ),
+        )
+        plugin._wire_whatsapp_adapter(None, adapter)
+        repeated_text = "Esta resposta será repetida manualmente."
+        asyncio.run(adapter.send("553499602714", repeated_text))
+
+        result = plugin.pre_gateway_dispatch(
+            event=event(
+                text=f"[owner reply] {repeated_text}",
+                message_id="human-manual-different-id",
+                from_owner=True,
+            ),
+            gateway=FakeGateway(FakeAgent()),
+            session_store=sessions,
+        )
+
+        self.assertEqual(result, {"action": "skip", "reason": "human_handover"})
+        self.assertTrue(plugin.HandoverStore.from_env().is_paused("553499602714"))
 
     def test_pause_survives_lid_to_phone_identity_transition(self):
         session_dir = Path(self.temp_dir.name) / "platforms" / "whatsapp" / "session"

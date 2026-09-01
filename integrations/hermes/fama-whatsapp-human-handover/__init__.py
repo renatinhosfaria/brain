@@ -9,7 +9,6 @@ import re
 import sqlite3
 import time
 from contextvars import ContextVar
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,7 @@ from gateway.whatsapp_identity import (
 
 _OWNER_PREFIX = "[owner reply] "
 _HUMAN_PREFIX = "[Atendimento humano] "
-_AGENT_ECHO_GRACE_SECONDS = 120.0
+_OUTBOUND_ID_TTL_SECONDS = 24 * 60 * 60
 _RESUME_AUTHORIZED: ContextVar[str | None] = ContextVar(
     "fama_handover_resume_authorized",
     default=None,
@@ -65,6 +64,15 @@ class HandoverStore:
                     session_key TEXT NOT NULL,
                     paused_at REAL NOT NULL,
                     owner_message_id TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_outbound_messages (
+                    message_id TEXT PRIMARY KEY,
+                    contact_id TEXT NOT NULL,
+                    recorded_at REAL NOT NULL
                 )
                 """
             )
@@ -151,6 +159,55 @@ class HandoverStore:
             )
         return matches[0]
 
+    def remember_agent_outbound(
+        self,
+        contact_id: str,
+        message_ids: set[str],
+    ) -> None:
+        safe_ids = {
+            str(message_id).strip()
+            for message_id in message_ids
+            if str(message_id).strip() and len(str(message_id).strip()) <= 512
+        }
+        if not safe_ids:
+            return
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM agent_outbound_messages WHERE recorded_at < ?",
+                (now - _OUTBOUND_ID_TTL_SECONDS,),
+            )
+            conn.executemany(
+                """
+                INSERT INTO agent_outbound_messages (
+                    message_id, contact_id, recorded_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    contact_id=excluded.contact_id,
+                    recorded_at=excluded.recorded_at
+                """,
+                ((message_id, contact_id, now) for message_id in safe_ids),
+            )
+
+    def is_agent_outbound(self, contact_id: str, message_id: str | None) -> bool:
+        candidate = str(message_id or "").strip()
+        if not candidate:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT contact_id, recorded_at
+                FROM agent_outbound_messages
+                WHERE message_id = ?
+                """,
+                (candidate,),
+            ).fetchone()
+        if row is None or float(row[1]) < time.time() - _OUTBOUND_ID_TTL_SECONDS:
+            return False
+        return bool(
+            _identity_aliases(contact_id).intersection(_identity_aliases(str(row[0])))
+        )
+
 
 def _platform_value(event: Any) -> str:
     platform = getattr(getattr(event, "source", None), "platform", None)
@@ -205,42 +262,6 @@ def _message_body(event: Any, *, from_owner: bool) -> str:
         descriptor += "; ".join(attachments) + "]"
         body = f"{body}\n{descriptor}" if body else descriptor
     return f"{_HUMAN_PREFIX}{body}" if from_owner else body
-
-
-def _timestamp_seconds(value: Any) -> float | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        pass
-    try:
-        return datetime.fromisoformat(str(value)).timestamp()
-    except (TypeError, ValueError):
-        return None
-
-
-def _looks_like_recent_agent_echo(
-    session_store: Any,
-    session_id: str,
-    event: Any,
-) -> bool:
-    """Suppress a narrow bridge-restart echo without treating it as human input."""
-    candidate = str(getattr(event, "text", "") or "").removeprefix(_OWNER_PREFIX)
-    candidate = " ".join(candidate.split())
-    if not candidate:
-        return False
-    now = time.time()
-    for message in reversed(session_store.load_transcript(session_id)[-20:]):
-        if message.get("role") != "assistant" or bool(message.get("observed")):
-            continue
-        timestamp = _timestamp_seconds(message.get("timestamp"))
-        if timestamp is None or not -10 <= now - timestamp <= _AGENT_ECHO_GRACE_SECONDS:
-            continue
-        previous = " ".join(str(message.get("content") or "").split())
-        if previous == candidate or (len(candidate) >= 20 and candidate in previous):
-            return True
-    return False
 
 
 def _interrupt_running_turn(gateway: Any, event: Any) -> None:
@@ -350,13 +371,12 @@ def _handle_whatsapp_handover(
         if not from_owner and not paused:
             return None
 
-        entry = _session_entry(session_store, event)
-        if from_owner and _looks_like_recent_agent_echo(
-            session_store,
-            entry.session_id,
-            event,
+        if from_owner and store.is_agent_outbound(
+            contact_id,
+            getattr(event, "message_id", None),
         ):
             return {"action": "skip", "reason": "human_handover_agent_echo"}
+        entry = _session_entry(session_store, event)
         if from_owner:
             store.pause(
                 contact_id,
@@ -403,6 +423,8 @@ def pre_gateway_dispatch(*, event: Any, gateway: Any, session_store: Any, **_: A
 
 def _wire_whatsapp_adapter(_native_handler: Any, adapter: Any) -> None:
     """Intercept active-session events before Hermes can queue them."""
+    if bool(getattr(adapter, "_fama_handover_wrapped", False)):
+        return
     original_busy = getattr(adapter, "_busy_session_handler", None)
     if not callable(original_busy):
         logger.error("WhatsApp handover could not find the Hermes busy handler")
@@ -445,7 +467,56 @@ def _wire_whatsapp_adapter(_native_handler: Any, adapter: Any) -> None:
                     invalidate(session_key, reason="human_handover_fallback")
         return True
 
+    def outbound_ids(result: Any) -> set[str]:
+        if not bool(getattr(result, "success", False)):
+            return set()
+        ids = {
+            str(message_id)
+            for message_id in (
+                getattr(result, "message_id", None),
+                *(getattr(result, "continuation_message_ids", None) or ()),
+            )
+            if message_id
+        }
+        raw = getattr(result, "raw_response", None)
+        if isinstance(raw, dict):
+            for key in ("message_ids", "messageIds"):
+                ids.update(
+                    str(message_id) for message_id in (raw.get(key) or ()) if message_id
+                )
+        return ids
+
+    def wrap_outbound(method_name: str) -> None:
+        original = getattr(adapter, method_name, None)
+        if not callable(original):
+            return
+
+        async def tracked_outbound(*args: Any, **kwargs: Any):
+            result = await original(*args, **kwargs)
+            ids = outbound_ids(result)
+            chat_id = args[0] if args else kwargs.get("chat_id")
+            if ids and chat_id:
+                try:
+                    HandoverStore.from_env().remember_agent_outbound(
+                        canonical_whatsapp_identifier(str(chat_id)),
+                        ids,
+                    )
+                except Exception:
+                    logger.exception("WhatsApp outbound ID tracking failed")
+            return result
+
+        setattr(adapter, method_name, tracked_outbound)
+
     adapter.set_busy_session_handler(handover_busy_handler)
+    for method_name in (
+        "send",
+        "edit_message",
+        "_send_media_to_bridge",
+        "send_poll",
+        "send_location",
+    ):
+        wrap_outbound(method_name)
+    adapter._fama_handover_wrapped = True
 
 
 def register(ctx: Any) -> None:
