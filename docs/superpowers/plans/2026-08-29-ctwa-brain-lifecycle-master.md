@@ -108,6 +108,17 @@ tracked files — so the only gain from editing the tuple would be documentation
 and the cost would be invalidating and re-capturing the baseline this stage
 rests on. The rationale is now written in the script instead.
 
+Two gaps were fixed. The runbook's Hermes update gate said nothing about the
+baseline, yet an update moves the upstream HEAD and makes `verify` fail from
+then on: an operator following the document would have found a permanently red
+gate with no sanctioned repair, and the realistic outcome is a control that
+gets ignored or re-captured without ceremony. A re-baselining procedure is now
+documented, and it renames the superseded baseline rather than deleting it so
+the chain of what was trusted when survives. The same section also still
+claimed the compatibility checker inspects bridge batching, adapter debounce
+and delivery-ledger states, all removed by Amendment 2 — a document describing
+a tool it no longer has.
+
 ### Stage 3 — Production observer in capture-only mode
 
 - [x] Execute `2026-08-29-ctwa-whatsapp-observer.md` completely.

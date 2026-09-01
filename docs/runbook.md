@@ -192,9 +192,46 @@ If any security check fails, stop the rollout and disable Brain until the
 compatibility issue is corrected. Do not use `hermes tools list --platform` as
 proof of MCP containment; only the resolver check is authoritative.
 
-The checker is read-only: it inspects the public plugin API, session ContextVars, state/Kanban schemas,
-WhatsApp bridge batching (`"\n"` join and timer reset), adapter identity, and
-delivery-ledger states. It never repairs Hermes or writes its databases.
+The checker is read-only: it inspects the public plugin registration API,
+session ContextVars, the state/Kanban schemas, WhatsApp identity mapping, the
+resolver, and both copies of the CEO plugin. It never repairs Hermes or writes
+its databases. It no longer inspects bridge batching, adapter debounce or
+delivery-ledger states: those contracts belonged to turn correlation and to
+proving the first T1 send, and Amendment 2 removed both.
+
+### Re-baselining after an authorized Hermes update
+
+An update moves the upstream HEAD, so `hermes_integrity.py verify` will fail
+with `HEAD_MISMATCH` from then on, permanently and correctly: the installation
+is no longer the one that was baselined. The gate must be re-established, never
+ignored, and `capture` refuses to overwrite an existing baseline precisely so
+that re-establishing it is a deliberate act.
+
+Do this only immediately after an update you performed yourself, from a clean
+upstream worktree. A baseline captured at any other moment records whatever the
+installation happens to contain, including a change nobody authorized — the
+control can only ever attest that the tree has not moved since it was trusted,
+so the moment of trust must be one you can vouch for.
+
+```sh
+cd /root/brain
+git -C /usr/local/lib/hermes-agent status --porcelain   # must be empty
+git -C /usr/local/lib/hermes-agent rev-parse HEAD       # record the new HEAD
+
+BASE=/var/lib/brain/runtime/hermes-integrity-baseline.json
+mv "$BASE" "$BASE.$(date +%Y%m%d-%H%M%S).superseded"
+
+PYTHONPATH=src .venv/bin/python scripts/hermes_integrity.py capture \
+  --repo /usr/local/lib/hermes-agent --output "$BASE"
+PYTHONPATH=src .venv/bin/python scripts/hermes_integrity.py verify \
+  --repo /usr/local/lib/hermes-agent --baseline "$BASE"
+```
+
+The superseded file is renamed rather than deleted, so the chain of what was
+trusted when survives. Then re-run `scripts/smoke_test.py` and
+`scripts/hermes_integration_check.py`: integrity proves the tree is unchanged
+since capture, compatibility proves the APIs Brain depends on still behave, and
+an update is exactly the event that can satisfy one while breaking the other.
 
 ## Implementation boundary
 

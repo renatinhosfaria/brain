@@ -280,6 +280,37 @@ class DeploymentContractTests(unittest.TestCase):
         ):
             self.assertIn(required, runbook)
 
+    def test_the_runbook_documents_how_to_re_establish_the_integrity_gate(
+        self,
+    ) -> None:
+        """An update breaks the baseline; a gate with no repair path is dropped."""
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+        section = runbook[runbook.index("### Re-baselining") :]
+
+        for required in ("status --porcelain", "superseded", "capture", "verify"):
+            with self.subTest(required=required):
+                self.assertIn(required, section)
+        # The old baseline is renamed, never deleted: the record of what was
+        # trusted when is the only thing that makes a later question answerable.
+        opening = section.index("```sh") + len("```sh")
+        block = section[opening : section.index("```", opening)]
+        self.assertIn("superseded", block)
+        self.assertNotIn("rm ", block)
+
+    def test_the_runbook_does_not_claim_retired_compatibility_checks(self) -> None:
+        """Scoped to what the checker claims to inspect, not to the whole page.
+
+        The paragraph goes on to say those contracts were retired, so matching
+        the words anywhere would fail on the sentence that tells the truth.
+        """
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+        start = runbook.index("The checker is read-only:")
+        claims = runbook[start : runbook.index("It never repairs", start)]
+
+        for retired in ("delivery-ledger states", "timer reset", "debounce"):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, claims)
+
     def test_docs_preserve_upstream_and_distinguish_implemented_from_pending(
         self,
     ) -> None:
