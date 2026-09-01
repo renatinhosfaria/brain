@@ -46,7 +46,7 @@
 - `normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) -> SafeObserverEvent | null`.
 - Raw WhatsApp objects exist only inside the callback/normalizer call stack.
 
-- [ ] **Step 1: Pin exact Node dependencies**
+- [x] **Step 1: Pin exact Node dependencies**
 
 `package.json`:
 
@@ -66,11 +66,11 @@
 
 Generate/commit lockfile with `npm install --package-lock-only --ignore-scripts`; no ranges/latest.
 
-- [ ] **Step 2: Write HMAC domain-separation tests**
+- [x] **Step 2: Write HMAC domain-separation tests**
 
 Use the same canonical formulas as Plan 1. Prove stable event/contact/body/JID HMACs and distinct domains.
 
-- [ ] **Step 3: Write safe-normalization tests before implementation**
+- [x] **Step 3: Write safe-normalization tests before implementation**
 
 A historical CTWA fixture must produce a record shaped like:
 
@@ -108,15 +108,15 @@ A historical CTWA fixture must produce a record shaped like:
 
 Serialize the safe event and assert it does **not** contain fixture body, raw JID, raw message ID, raw source ID, raw clid, or full URL.
 
-- [ ] **Step 4: Implement only proven text/context paths**
+- [x] **Step 4: Implement only proven text/context paths**
 
 Support the proven `extendedTextMessage.text` and ordinary `conversation` text. Extract only the explicit `contextInfo.externalAdReply` fields required by the spec; never recursively serialize the message tree.
 
-- [ ] **Step 5: Add forbidden-call/source regression and CI**
+- [x] **Step 5: Add forbidden-call/source regression and CI**
 
 Source test scans observer `src/` for explicit forbidden send/read/presence/reaction calls. CI runs Node 20 `npm ci && npm test`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add observers/whatsapp .gitignore .github/workflows/ci.yml
@@ -137,19 +137,19 @@ git commit -m "feat: scaffold privacy-safe WhatsApp observer"
 - `persistLidMapping(sessionDir, evidence)` writes the exact mapping-file semantics Brain already validates.
 - `contactKeyForEvidence(evidence, transportIds) -> string|null`.
 
-- [ ] **Step 1: Write fail-closed identity tests**
+- [x] **Step 1: Write fail-closed identity tests**
 
 Test direct PN JID, LID plus one validated PN-alt field, malformed/group IDs, and conflicting PN alternatives. Accept only numeric `@s.whatsapp.net` and numeric `@lid` patterns.
 
-- [ ] **Step 2: Implement atomic mapping writes**
+- [x] **Step 2: Implement atomic mapping writes**
 
 Use temp file + fsync + rename, 0600. Filenames/values match Brain's mapping resolver semantics (`lid-mapping-{phone}.json`, `lid-mapping-{lid}_reverse.json`). Existing conflicting evidence is never overwritten; event remains unresolved/retryable.
 
-- [ ] **Step 3: Keep raw identity in memory only**
+- [x] **Step 3: Keep raw identity in memory only**
 
 Before returning the safe event, derive `remote_jid_hmac` and, where resolvable, `contact_key`. Remove raw identity/message IDs from the returned object.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```bash
 cd observers/whatsapp && npm test
@@ -172,25 +172,25 @@ git commit -m "feat: persist observer identity evidence safely"
 - `SafeSpool(rootDir)` -> `put`, `list`, `read`, `ack`, `purgeOlderThan`, `expireDisplayNames`.
 - `BrainClient.ingest(safeEvent)` -> `{event_id, duplicate}`.
 
-- [ ] **Step 1: Write outbox privacy tests**
+- [x] **Step 1: Write outbox privacy tests**
 
 Persist a safe event derived from a fixture whose raw body/JID/message ID/source IDs are known to the test. Read every outbox byte and assert none of those raw values occur. Assert only allowlisted JSON keys exist.
 
-- [ ] **Step 2: Implement atomic event files**
+- [x] **Step 2: Implement atomic event files**
 
 File name is HMAC event ID, not raw message ID. Write to `*.tmp` with mode 0600, fsync, rename. Safe event retention maximum 72 hours. On every scan, if `display_name_expires_at <= now`, rewrite the pending record without the display name before retransmission.
 
-- [ ] **Step 3: Write Brain HTTP client tests**
+- [x] **Step 3: Write Brain HTTP client tests**
 
 Local fake server asserts exact route `/internal/transport/events`, bearer observer token, bounded timeout, JSON body equal to safe event, retry on network/5xx, controlled drop/quarantine on permanent 4xx schema rejection.
 
-- [ ] **Step 4: Implement and run tests**
+- [x] **Step 4: Implement and run tests**
 
 ```bash
 cd observers/whatsapp && npm test
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add observers/whatsapp/src/spool.mjs observers/whatsapp/src/brain-client.mjs observers/whatsapp/test
@@ -215,11 +215,11 @@ git commit -m "feat: add privacy-safe observer outbox"
 - Env: `BRAIN_OBSERVER_SESSION_DIR`, `BRAIN_OBSERVER_OUTBOX_DIR`, `BRAIN_OBSERVER_TOKEN`, `BRAIN_OBSERVER_DEVICE_ID`, `BRAIN_TRANSPORT_HMAC_SECRET`, `BRAIN_URL`.
 - Health `127.0.0.1:8775/health`: status, WhatsApp connection, outbox depth/oldest age, unresolved-identity count; no PII.
 
-- [ ] **Step 1: Implement/test connection lifecycle with dependency injection**
+- [x] **Step 1: Implement/test connection lifecycle with dependency injection**
 
 `runObserver({makeSocket, authState, ids, normalize, spool, client})` allows tests without network. QR renders through `qrcode-terminal`. Restart-required reconnects with observer session; never programmatic logout of another device.
 
-- [ ] **Step 2: Wire `messages.upsert` raw-to-safe flow**
+- [x] **Step 2: Wire `messages.upsert` raw-to-safe flow**
 
 Order is strict:
 
@@ -236,15 +236,15 @@ ACK/remove only after Brain durable success
 
 If Brain returns identity-unavailable because mapping is not yet verifiable, keep the safe event and retry after mapping updates. No raw field is reintroduced for retry.
 
-- [ ] **Step 3: Drain safe outbox on startup/reconnect**
+- [x] **Step 3: Drain safe outbox on startup/reconnect**
 
 Oldest-first, bounded exponential backoff; duplicate ACK is success. Expire display names at 24h and events at 72h with non-PII dropped-event counter/alert.
 
-- [ ] **Step 4: Add health/source/deployment tests**
+- [x] **Step 4: Add health/source/deployment tests**
 
 Health contains no chat/message/profile values. Unit requires `UMask=0077`, private writable paths only under `/var/lib/brain/whatsapp-observer`, and no Hermes session/source runtime dependency.
 
-- [ ] **Step 5: Create hardened systemd unit and run full observer suite**
+- [x] **Step 5: Create hardened systemd unit and run full observer suite**
 
 ```bash
 cd observers/whatsapp && npm ci && npm test
@@ -252,14 +252,27 @@ cd /root/brain
 PYTHONPATH=src .venv/bin/python -m unittest tests.test_deployment_contracts tests.test_transport_ingest -v
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add observers/whatsapp/src/main.mjs observers/whatsapp/src/health.mjs observers/whatsapp/test deploy/brain-whatsapp-observer.service deploy/brain-whatsapp-observer.env.example docs/runbook.md tests/test_deployment_contracts.py
 git commit -m "feat: add production WhatsApp observer service"
 ```
 
-## Plan 2 Acceptance Gate
+## Plan 2 ## Bookkeeping
+
+**Audited 2026-09-01.** Every step was unticked while the observer had been
+running in production since 2026-08-30. Ticked now against named evidence, all
+run on `/opt/brain/node` — the runtime the service executes:
+
+| Task | Proven by |
+| --- | --- |
+| 1 · pinned package and pure normalizer | `test/normalize.test.mjs` (11), `test/hmac.test.mjs` (9) |
+| 2 · identity mappings and contact proof | `test/identity.test.mjs` (17) |
+| 3 · atomic outbox and Brain client | `test/spool.test.mjs` (20), `test/brain-client.test.mjs` (15) |
+| 4 · Baileys runtime, retry, health, systemd | `test/runtime.test.mjs` (27), `test/health.test.mjs` (6) |
+
+Acceptance Gate
 
 ```text
 OBSERVER_OWN_BAILEYS_PIN=PASS

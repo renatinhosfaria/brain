@@ -149,8 +149,16 @@ write Hermes' session because the kernel will not let it, not because the code
 declines to. 105 observer tests pass. The envelope carries no `inbound_kind`,
 no turn and nothing else Amendment 2 removed.
 
-The one correction was the expired proof above, and a line in plan 2 that still
-gated on "lifecycle write work" that no longer exists.
+Corrections: the expired proof above, a line in plan 2 that still gated on
+"lifecycle write work" that no longer exists, twenty-one step boxes that had
+never been ticked although the observer has run in production since 2026-08-30,
+and one that mattered more than it looks. The validation line added to the
+runbook the day before ran the observer suite on `/root/.hermes/node`, the
+Hermes-managed runtime the design explicitly forbids the observer to reuse.
+Both runtimes are `v26.7.0` today, so nothing failed and nothing would have —
+until the day one of them moves, which is the entire reason the pin exists. A
+contract test now reads `ExecStart` from the unit and requires every
+production invocation in the runbook to name that same runtime.
 
 ### Stage 4 — Operational Profile contracts and least privilege
 

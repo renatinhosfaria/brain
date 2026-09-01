@@ -280,6 +280,30 @@ class DeploymentContractTests(unittest.TestCase):
         ):
             self.assertIn(required, runbook)
 
+    def test_the_observer_suite_runs_on_the_runtime_the_service_uses(self) -> None:
+        """A pin proves nothing if the tests run on the other side of it."""
+        unit = (ROOT / "deploy/brain-whatsapp-observer.service").read_text(
+            encoding="utf-8"
+        )
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+
+        exec_line = next(
+            line for line in unit.splitlines() if line.startswith("ExecStart=")
+        )
+        runtime = exec_line.split("=", 1)[1].split()[0]
+        self.assertTrue(runtime.startswith("/opt/brain/node"), runtime)
+
+        production_invocations = [
+            line
+            for line in runbook.splitlines()
+            if "node --test" in line and "/bin/node" in line
+        ]
+        self.assertTrue(production_invocations)
+        for line in production_invocations:
+            with self.subTest(line=line):
+                self.assertIn(runtime, line)
+                self.assertNotIn("/root/.hermes/node", line)
+
     def test_the_runbook_documents_how_to_re_establish_the_integrity_gate(
         self,
     ) -> None:

@@ -76,7 +76,7 @@ Production server (the Brain venv is already built; no `uv` required):
 ```sh
 cd /root/brain
 PYTHONPATH=src /root/brain/.venv/bin/python -m unittest discover -s tests -v
-(cd observers/whatsapp && /root/.hermes/node/bin/node --test "test/*.test.mjs")
+(cd observers/whatsapp && /opt/brain/node/bin/node --test "test/*.test.mjs")
 /root/brain/.venv/bin/python scripts/hermes_integration_check.py
 /root/brain/.venv/bin/python scripts/smoke_test.py
 ```
@@ -90,6 +90,11 @@ uv run python -m unittest discover -s tests -v
 uv run python scripts/hermes_integration_check.py
 uv run python scripts/smoke_test.py
 ```
+
+Run it with `/opt/brain/node`, the runtime the service itself executes. The
+Hermes-managed runtime at `/root/.hermes/node` must not be reused: both are
+`v26.7.0` today, and a pin whose two sides are only coincidentally equal proves
+nothing on the day one of them moves.
 
 The observer suite is not optional. It is the only thing that exercises the
 contract between the Node normalizer and the Python resolver, and on
