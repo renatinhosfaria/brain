@@ -304,8 +304,52 @@ have verified.
 Let `BUNDLE=/var/lib/brain/runtime/bundles/candidate`.
 
 1. Check out the candidate's commit in `/root/brain`.
-2. Replace `/root/.hermes/plugins/brain-ceo-bridge/` with `$BUNDLE/plugin`,
-   removing the directory first so no stale source file survives.
+2. Replace `/root/.hermes/plugins/brain-ceo-bridge/` with `$BUNDLE/plugin`.
+   Stage the new copy beside the live one and swap by rename, restoring the
+   old directory if the swap fails — never delete the live plugin before the
+   replacement is fully in place:
+
+   ```sh
+   SOURCE=/var/lib/brain/runtime/bundles/candidate
+   ```
+
+   ```sh
+   set -euo pipefail
+PLUGINS=${PLUGINS:-/root/.hermes/plugins}
+LIVE="$PLUGINS/brain-ceo-bridge"
+
+# A residual .old is the fingerprint of an earlier swap that did not finish.
+# Overwriting it would destroy the only copy of a plugin nobody restored.
+if [ -e "$LIVE.old" ]; then
+    echo "refusing: $LIVE.old exists from an earlier failed swap" >&2
+    exit 1
+fi
+
+# Stage beside the live plugin, and guard every step that could leave a
+# partial copy in place: a half-written bridge loads and fails at runtime
+# rather than at install time.
+rm -rf "$LIVE.new"
+if ! cp -a "$SOURCE/plugin" "$LIVE.new"; then
+    rm -rf "$LIVE.new"
+    echo "copy failed; live plugin untouched" >&2
+    exit 1
+fi
+if ! mv "$LIVE" "$LIVE.old"; then
+    rm -rf "$LIVE.new"
+    echo "could not set aside the live plugin; nothing changed" >&2
+    exit 1
+fi
+if ! mv "$LIVE.new" "$LIVE"; then
+    mv "$LIVE.old" "$LIVE"
+    rm -rf "$LIVE.new"
+    echo "swap failed; previous plugin restored" >&2
+    exit 1
+fi
+rm -rf "$LIVE.old"
+   ```
+
+   The rename also replaces the whole directory at once, so no stale source
+   file survives from the old copy.
 3. Install `$BUNDLE/brain.toml` as `/etc/brain/brain.toml`, mode 0600.
 4. Only once all three are in place, restart `brain.service`, then the Hermes
    gateway so the CEO reloads the plugin.
@@ -362,11 +406,51 @@ restart taken before all three artefacts were in place — the fix is to finish
 applying the same bundle, not to undo anything:
 
 ```sh
-BUNDLE=/var/lib/brain/runtime/bundles/candidate
-git checkout "$(basename "$(readlink -f "$BUNDLE")")"
-rm -rf /root/.hermes/plugins/brain-ceo-bridge
-cp -a "$BUNDLE/plugin" /root/.hermes/plugins/brain-ceo-bridge
-install -m 600 "$BUNDLE/brain.toml" /etc/brain/brain.toml
+SOURCE=/var/lib/brain/runtime/bundles/candidate
+git checkout "$(basename "$(readlink -f "$SOURCE")")"
+```
+
+Swap the plugin without ever deleting the live copy first:
+
+```sh
+set -euo pipefail
+PLUGINS=${PLUGINS:-/root/.hermes/plugins}
+LIVE="$PLUGINS/brain-ceo-bridge"
+
+# A residual .old is the fingerprint of an earlier swap that did not finish.
+# Overwriting it would destroy the only copy of a plugin nobody restored.
+if [ -e "$LIVE.old" ]; then
+    echo "refusing: $LIVE.old exists from an earlier failed swap" >&2
+    exit 1
+fi
+
+# Stage beside the live plugin, and guard every step that could leave a
+# partial copy in place: a half-written bridge loads and fails at runtime
+# rather than at install time.
+rm -rf "$LIVE.new"
+if ! cp -a "$SOURCE/plugin" "$LIVE.new"; then
+    rm -rf "$LIVE.new"
+    echo "copy failed; live plugin untouched" >&2
+    exit 1
+fi
+if ! mv "$LIVE" "$LIVE.old"; then
+    rm -rf "$LIVE.new"
+    echo "could not set aside the live plugin; nothing changed" >&2
+    exit 1
+fi
+if ! mv "$LIVE.new" "$LIVE"; then
+    mv "$LIVE.old" "$LIVE"
+    rm -rf "$LIVE.new"
+    echo "swap failed; previous plugin restored" >&2
+    exit 1
+fi
+rm -rf "$LIVE.old"
+```
+
+Then the config and the restart:
+
+```sh
+install -m 600 "$SOURCE/brain.toml" /etc/brain/brain.toml
 systemctl restart brain.service
 ```
 
@@ -412,11 +496,51 @@ one bundle while `slots.json` named another.
 Install the bundle it named:
 
 ```sh
-PREVIOUS=/var/lib/brain/runtime/bundles/previous
-git checkout "$(basename "$(readlink -f "$PREVIOUS")")"
-rm -rf /root/.hermes/plugins/brain-ceo-bridge
-cp -a "$PREVIOUS/plugin" /root/.hermes/plugins/brain-ceo-bridge
-install -m 600 "$PREVIOUS/brain.toml" /etc/brain/brain.toml
+SOURCE=/var/lib/brain/runtime/bundles/previous
+git checkout "$(basename "$(readlink -f "$SOURCE")")"
+```
+
+Swap the plugin without ever deleting the live copy first:
+
+```sh
+set -euo pipefail
+PLUGINS=${PLUGINS:-/root/.hermes/plugins}
+LIVE="$PLUGINS/brain-ceo-bridge"
+
+# A residual .old is the fingerprint of an earlier swap that did not finish.
+# Overwriting it would destroy the only copy of a plugin nobody restored.
+if [ -e "$LIVE.old" ]; then
+    echo "refusing: $LIVE.old exists from an earlier failed swap" >&2
+    exit 1
+fi
+
+# Stage beside the live plugin, and guard every step that could leave a
+# partial copy in place: a half-written bridge loads and fails at runtime
+# rather than at install time.
+rm -rf "$LIVE.new"
+if ! cp -a "$SOURCE/plugin" "$LIVE.new"; then
+    rm -rf "$LIVE.new"
+    echo "copy failed; live plugin untouched" >&2
+    exit 1
+fi
+if ! mv "$LIVE" "$LIVE.old"; then
+    rm -rf "$LIVE.new"
+    echo "could not set aside the live plugin; nothing changed" >&2
+    exit 1
+fi
+if ! mv "$LIVE.new" "$LIVE"; then
+    mv "$LIVE.old" "$LIVE"
+    rm -rf "$LIVE.new"
+    echo "swap failed; previous plugin restored" >&2
+    exit 1
+fi
+rm -rf "$LIVE.old"
+```
+
+Then the config and the restart:
+
+```sh
+install -m 600 "$SOURCE/brain.toml" /etc/brain/brain.toml
 systemctl restart brain.service
 ```
 

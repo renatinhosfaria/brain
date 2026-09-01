@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -689,12 +691,27 @@ class CommandLineTests(_Fixture, unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("--plan is required", result.stderr)
 
+    def assert_clean_failure(self, result, expected: str) -> None:
+        """A refusal is a message, not a stack trace.
+
+        An operator reading a traceback mid-incident has to decide whether the
+        tool broke or the input did, which is exactly the wrong question to be
+        asking at that moment.
+        """
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("FAIL:", result.stderr)
+        self.assertIn(expected, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn("Traceback", result.stdout)
+
     def test_a_missing_plan_file_fails_cleanly(self) -> None:
         self.two_releases()
+        missing = self.base / "gone.json"
 
-        result = self.run_cli("record-rollback", "--plan", str(self.base / "gone.json"))
+        result = self.run_cli("record-rollback", "--plan", str(missing))
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_clean_failure(result, "cannot read the plan")
+        self.assertIn(str(missing), result.stderr)
 
     def test_a_malformed_plan_file_fails_cleanly(self) -> None:
         self.two_releases()
@@ -703,7 +720,25 @@ class CommandLineTests(_Fixture, unittest.TestCase):
 
         result = self.run_cli("record-rollback", "--plan", str(broken))
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_clean_failure(result, "cannot read the plan")
+
+    def test_a_plan_that_is_not_an_object_fails_cleanly(self) -> None:
+        self.two_releases()
+        wrong = self.base / "list.json"
+        wrong.write_text("[1, 2, 3]", encoding="utf-8")
+
+        result = self.run_cli("record-rollback", "--plan", str(wrong))
+
+        self.assert_clean_failure(result, "not a plan")
+
+    def test_an_unwritable_out_path_fails_cleanly(self) -> None:
+        self.two_releases()
+
+        result = self.run_cli(
+            "plan-rollback", "--out", str(self.base / "no-such-dir" / "plan.json")
+        )
+
+        self.assert_clean_failure(result, "cannot write the plan")
 
     def test_a_plan_missing_a_field_is_refused(self) -> None:
         first, _ = self.two_releases()
@@ -712,8 +747,7 @@ class CommandLineTests(_Fixture, unittest.TestCase):
 
         result = self.run_cli("record-rollback", "--plan", str(partial))
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("missing", result.stderr)
+        self.assert_clean_failure(result, "missing")
 
     def test_an_unknown_flag_is_still_rejected(self) -> None:
         result = self.run_cli("status", "--nonsense")
@@ -727,6 +761,165 @@ class CommandLineTests(_Fixture, unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("candidate", result.stdout)
+
+
+class PluginSwapSnippetTests(unittest.TestCase):
+    """Run the runbook's own swap snippet, with cp and mv made to fail.
+
+    Reading the order out of the document with grep proves the lines are in
+    sequence, not that a failure at any of them leaves the CEO with a working
+    plugin. These execute it.
+    """
+
+    RUNBOOK = Path(__file__).resolve().parents[1] / "docs/runbook.md"
+
+    @classmethod
+    def snippet(cls) -> str:
+        text = cls.RUNBOOK.read_text(encoding="utf-8")
+        blocks = re.findall(r"```sh\n(.*?)```", text, re.DOTALL)
+        found = [b for b in blocks if "$LIVE.new" in b]
+        if not found:
+            raise AssertionError("the runbook has no plugin swap snippet")
+        return found[0]
+
+    def test_the_snippet_touches_no_absolute_path_it_was_not_given(self) -> None:
+        """A hardcoded production path inside a snippet under test writes there.
+
+        On 2026-08-31 an earlier version of this block carried
+        SOURCE=/var/lib/brain/runtime/bundles/candidate, and running it with a
+        deliberately failing cp created that directory on the real machine.
+        Every path the snippet uses must come from the environment.
+        """
+        snippet = self.snippet()
+
+        for line in snippet.splitlines():
+            bare = line.split("#", 1)[0]
+            if "${" in bare:
+                continue
+            for root in ("/root/", "/var/lib/", "/etc/"):
+                self.assertNotIn(
+                    root, bare, f"absolute path in a testable snippet: {line!r}"
+                )
+
+    def test_every_copy_of_the_snippet_is_identical(self) -> None:
+        text = self.RUNBOOK.read_text(encoding="utf-8")
+        blocks = [
+            re.sub(r"^ {3}", "", b, flags=re.MULTILINE)
+            for b in re.findall(r"```sh\n(.*?)```", text, re.DOTALL)
+            if "$LIVE.new" in b
+        ]
+
+        self.assertGreater(len(blocks), 1)
+        self.assertEqual(len(set(blocks)), 1, "the copies have drifted apart")
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.plugins = base / "plugins"
+        self.live = self.plugins / "brain-ceo-bridge"
+        self.live.mkdir(parents=True)
+        (self.live / "tools.py").write_text("# live\n", encoding="utf-8")
+        self.source = base / "bundle"
+        (self.source / "plugin").mkdir(parents=True)
+        (self.source / "plugin" / "tools.py").write_text("# new\n", encoding="utf-8")
+        self.fakebin = base / "bin"
+        self.fakebin.mkdir()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def break_command(self, name: str, *, after_partial: bool = False) -> None:
+        body = "#!/bin/sh\n"
+        if after_partial:
+            # Mimic a copy that dies partway: the destination exists, wrongly.
+            body += 'mkdir -p "$2" 2>/dev/null; echo partial > "$2/tools.py"\n'
+        body += "exit 1\n"
+        script = self.fakebin / name
+        script.write_text(body, encoding="utf-8")
+        script.chmod(0o755)
+
+    def run_snippet(self):
+        env = {
+            **os.environ,
+            "PATH": f"{self.fakebin}:{os.environ['PATH']}",
+            "PLUGINS": str(self.plugins),
+            "SOURCE": str(self.source),
+        }
+        return subprocess.run(
+            ["bash", "-c", self.snippet()],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+    def live_contents(self) -> str:
+        return (self.live / "tools.py").read_text(encoding="utf-8")
+
+    def assert_live_plugin_is_usable(self, expected: str) -> None:
+        self.assertTrue(self.live.is_dir(), "the live plugin directory is gone")
+        self.assertEqual(self.live_contents(), expected)
+        for leftover in (".new", ".old"):
+            self.assertFalse(
+                (self.plugins / f"brain-ceo-bridge{leftover}").exists(),
+                f"a {leftover} directory was left behind",
+            )
+
+    # ------------------------------------------------------------------
+
+    def test_the_happy_path_swaps_the_plugin(self) -> None:
+        result = self.run_snippet()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_live_plugin_is_usable("# new\n")
+
+    def test_a_failing_copy_leaves_the_live_plugin_untouched(self) -> None:
+        self.break_command("cp", after_partial=True)
+
+        result = self.run_snippet()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("copy failed", result.stderr)
+        self.assert_live_plugin_is_usable("# live\n")
+
+    def test_a_failing_move_restores_the_previous_plugin(self) -> None:
+        """The set-aside works, the promotion fails, the old plugin comes back."""
+        real_mv = shutil.which("mv")
+        script = self.fakebin / "mv"
+        script.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in *brain-ceo-bridge.new) exit 1 ;; esac\n'
+            f'exec {real_mv} "$@"\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+        result = self.run_snippet()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("previous plugin restored", result.stderr)
+        self.assert_live_plugin_is_usable("# live\n")
+
+    def test_a_failing_setaside_changes_nothing(self) -> None:
+        self.break_command("mv")
+
+        result = self.run_snippet()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nothing changed", result.stderr)
+        self.assert_live_plugin_is_usable("# live\n")
+
+    def test_a_residual_old_directory_is_refused(self) -> None:
+        residual = self.plugins / "brain-ceo-bridge.old"
+        residual.mkdir()
+        (residual / "tools.py").write_text("# stranded\n", encoding="utf-8")
+
+        result = self.run_snippet()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("earlier failed swap", result.stderr)
+        self.assertEqual(self.live_contents(), "# live\n")
+        self.assertTrue(residual.is_dir(), "the stranded plugin was destroyed")
 
 
 class RunbookContractTests(unittest.TestCase):

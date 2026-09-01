@@ -472,9 +472,16 @@ def main() -> int:
                     "describe whatever the state had become, which is exactly "
                     "the check this design exists to make."
                 )
-            args.out.write_text(
-                json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
+            try:
+                args.out.write_text(
+                    json.dumps(plan, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                raise BundleError(
+                    f"cannot write the plan to {args.out}: {exc}. Nothing was "
+                    "recorded; choose a writable path and plan again."
+                ) from exc
             print(f"target bundle:    {plan['target']}")
             print(f"currently active: {plan['expected_active']}")
             print(f"state revision:   {plan['revision']}")
@@ -486,9 +493,17 @@ def main() -> int:
         elif args.action == "record-rollback":
             if args.plan is None:
                 raise BundleError("--plan is required: replay the captured plan")
-            restored, displaced = record_rollback(
-                args.root, json.loads(args.plan.read_text(encoding="utf-8"))
-            )
+            try:
+                plan = json.loads(args.plan.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise BundleError(
+                    f"cannot read the plan at {args.plan}: {exc}. Replay the "
+                    "file written by plan-rollback before this installation; "
+                    "planning again now would describe a different state."
+                ) from exc
+            if not isinstance(plan, dict):
+                raise BundleError(f"{args.plan} is not a plan: expected an object")
+            restored, displaced = record_rollback(args.root, plan)
             print(f"active   -> {restored} (restored)")
             print(f"previous -> {displaced} (rolled back from)")
         elif args.action == "promote":
