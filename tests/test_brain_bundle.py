@@ -4,6 +4,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -561,13 +562,15 @@ class LockingTests(_Fixture, unittest.TestCase):
 
     def assert_write_inside_lock(self, action) -> None:
         events, watched_lock, watched_write = self.spy()
+        original_lock = bundle.exclusive_lock
+        original_write = bundle.write_state
         bundle.exclusive_lock = watched_lock
         bundle.write_state = watched_write
         try:
             action()
         finally:
-            bundle.exclusive_lock = getattr(bundle, "_real_lock", bundle.exclusive_lock)
-            bundle.write_state = getattr(bundle, "_real_write", bundle.write_state)
+            bundle.exclusive_lock = original_lock
+            bundle.write_state = original_write
         self.assertIn("lock", events)
         self.assertIn("write", events)
         self.assertLess(events.index("lock"), events.index("write"))
@@ -580,6 +583,41 @@ class LockingTests(_Fixture, unittest.TestCase):
         self.create()
         self.assert_write_inside_lock(lambda: bundle.promote(self.root))
 
+    def test_the_real_lock_takes_and_releases_an_exclusive_flock(self) -> None:
+        """Prove the lock is a lock, not a context manager shaped like one."""
+        calls = []
+        original = bundle.fcntl.flock
+
+        def watched(fileno, operation):
+            calls.append(operation)
+            return original(fileno, operation)
+
+        bundle.fcntl.flock = watched
+        try:
+            with bundle.exclusive_lock(self.root):
+                self.assertEqual(calls, [bundle.fcntl.LOCK_EX])
+        finally:
+            bundle.fcntl.flock = original
+
+        self.assertEqual(calls, [bundle.fcntl.LOCK_EX, bundle.fcntl.LOCK_UN])
+
+    def test_the_lock_is_released_even_when_the_body_raises(self) -> None:
+        calls = []
+        original = bundle.fcntl.flock
+
+        def watched(fileno, operation):
+            calls.append(operation)
+            return original(fileno, operation)
+
+        bundle.fcntl.flock = watched
+        try:
+            with self.assertRaises(RuntimeError), bundle.exclusive_lock(self.root):
+                raise RuntimeError("boom")
+        finally:
+            bundle.fcntl.flock = original
+
+        self.assertEqual(calls, [bundle.fcntl.LOCK_EX, bundle.fcntl.LOCK_UN])
+
     def test_record_rollback_writes_under_the_lock(self) -> None:
         self.create()
         bundle.promote(self.root)
@@ -589,6 +627,106 @@ class LockingTests(_Fixture, unittest.TestCase):
         bundle.promote(self.root)
         plan = bundle.plan_rollback(self.root)
         self.assert_write_inside_lock(lambda: bundle.record_rollback(self.root, plan))
+
+
+class CommandLineTests(_Fixture, unittest.TestCase):
+    """Exercise the real CLI, because a runbook prescribes commands, not calls.
+
+    The parser once lacked --out and --plan while the runbook used both, so
+    every documented rollback command exited 2 on unrecognized arguments and
+    no unit test noticed.
+    """
+
+    SCRIPT = SCRIPTS / "brain_bundle.py"
+
+    def run_cli(self, *args: str):
+        return subprocess.run(
+            [sys.executable, str(self.SCRIPT), *args, "--root", str(self.root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def two_releases(self) -> tuple[str, str]:
+        first = self.create()
+        bundle.promote(self.root)
+        (self.repo / "file.txt").write_text("two", encoding="utf-8")
+        self.commit("second")
+        second = self.create()
+        bundle.promote(self.root)
+        return first.name, second.name
+
+    def test_every_runbook_flag_is_accepted(self) -> None:
+        first, second = self.two_releases()
+        plan_file = self.base / "rollback-plan.json"
+
+        planned = self.run_cli("plan-rollback", "--out", str(plan_file))
+
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self.assertIn(first, planned.stdout)
+        plan = json.loads(plan_file.read_text(encoding="utf-8"))
+        self.assertEqual(plan["target"], first)
+        self.assertEqual(plan["expected_active"], second)
+
+        recorded = self.run_cli("record-rollback", "--plan", str(plan_file))
+
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertEqual(bundle.read_state(self.root)["active"], first)
+
+    def test_plan_rollback_without_out_is_refused(self) -> None:
+        self.two_releases()
+
+        result = self.run_cli("plan-rollback")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--out is required", result.stderr)
+
+    def test_record_rollback_without_plan_is_refused(self) -> None:
+        self.two_releases()
+
+        result = self.run_cli("record-rollback")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--plan is required", result.stderr)
+
+    def test_a_missing_plan_file_fails_cleanly(self) -> None:
+        self.two_releases()
+
+        result = self.run_cli("record-rollback", "--plan", str(self.base / "gone.json"))
+
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_a_malformed_plan_file_fails_cleanly(self) -> None:
+        self.two_releases()
+        broken = self.base / "broken.json"
+        broken.write_text("not json", encoding="utf-8")
+
+        result = self.run_cli("record-rollback", "--plan", str(broken))
+
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_a_plan_missing_a_field_is_refused(self) -> None:
+        first, _ = self.two_releases()
+        partial = self.base / "partial.json"
+        partial.write_text(json.dumps({"target": first}), encoding="utf-8")
+
+        result = self.run_cli("record-rollback", "--plan", str(partial))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing", result.stderr)
+
+    def test_an_unknown_flag_is_still_rejected(self) -> None:
+        result = self.run_cli("status", "--nonsense")
+
+        self.assertEqual(result.returncode, 2)
+
+    def test_status_runs(self) -> None:
+        self.create()
+
+        result = self.run_cli("status")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("candidate", result.stdout)
 
 
 class RunbookContractTests(unittest.TestCase):

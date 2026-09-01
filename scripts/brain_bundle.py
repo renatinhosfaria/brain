@@ -443,6 +443,16 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--config", type=Path, default=Path("/etc/brain/brain.toml"))
+    parser.add_argument(
+        "--out",
+        type=Path,
+        help="plan-rollback: file to write the plan to, for record-rollback to replay",
+    )
+    parser.add_argument(
+        "--plan",
+        type=Path,
+        help="record-rollback: the plan file emitted before installation",
+    )
     args = parser.parse_args()
 
     try:
