@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -400,25 +401,29 @@ class AuthoritativeStateTests(_Fixture, unittest.TestCase):
 
 
 class RollbackTransactionTests(_Fixture, unittest.TestCase):
-    """Planning a rollback must not record one."""
+    """A plan is a promise about a specific state, not a suggestion."""
+
+    def release(self, name: str) -> Path:
+        (self.repo / "file.txt").write_text(name, encoding="utf-8")
+        self.commit(name)
+        created = self.create()
+        bundle.promote(self.root)
+        return created
 
     def two_releases(self) -> tuple[Path, Path]:
         first = self.create()
         bundle.promote(self.root)
-        (self.repo / "file.txt").write_text("two", encoding="utf-8")
-        self.commit("second")
-        second = self.create()
-        bundle.promote(self.root)
-        return first, second
+        return first, self.release("second")
 
     def test_planning_verifies_previous_and_changes_nothing(self) -> None:
         first, second = self.two_releases()
         before = bundle.read_state(self.root)
 
-        target, outgoing = bundle.plan_rollback(self.root)
+        plan = bundle.plan_rollback(self.root)
 
-        self.assertEqual(target, first.name)
-        self.assertEqual(outgoing, second.name)
+        self.assertEqual(plan["target"], first.name)
+        self.assertEqual(plan["expected_active"], second.name)
+        self.assertEqual(plan["revision"], before["revision"])
         self.assertEqual(bundle.read_state(self.root), before)
 
     def test_planning_refuses_an_unverifiable_previous(self) -> None:
@@ -429,31 +434,161 @@ class RollbackTransactionTests(_Fixture, unittest.TestCase):
             bundle.plan_rollback(self.root)
 
     def test_a_failed_validation_leaves_the_last_validated_deployment(self) -> None:
-        """Planning then abandoning must not move the authoritative state."""
         _, second = self.two_releases()
 
         bundle.plan_rollback(self.root)
-        # Validation fails here, so record_rollback is never reached.
 
         self.assertEqual(bundle.read_state(self.root)["active"], second.name)
 
-    def test_recording_swaps_active_and_previous(self) -> None:
+    def test_recording_the_plan_swaps_active_and_previous(self) -> None:
         first, second = self.two_releases()
 
-        bundle.plan_rollback(self.root)
-        restored, displaced = bundle.record_rollback(self.root)
+        plan = bundle.plan_rollback(self.root)
+        restored, displaced = bundle.record_rollback(self.root, plan)
 
         self.assertEqual((restored, displaced), (first.name, second.name))
         state = bundle.read_state(self.root)
         self.assertEqual(state["active"], first.name)
         self.assertEqual(state["previous"], second.name)
 
+    def test_a_promote_between_plan_and_record_invalidates_the_plan(self) -> None:
+        """The reported scenario: the plan describes a state that has moved.
+
+        Recording it anyway would leave slots.json naming B while the machine
+        actually runs A, and nothing would say so.
+        """
+        first, second = self.two_releases()
+        plan = bundle.plan_rollback(self.root)
+        self.assertEqual((plan["target"], plan["expected_active"]),
+                         (first.name, second.name))
+
+        third = self.release("third")
+        before = bundle.read_state(self.root)
+        self.assertEqual((before["active"], before["previous"]),
+                         (third.name, second.name))
+
+        with self.assertRaisesRegex(bundle.BundleError, "changed since"):
+            bundle.record_rollback(self.root, plan)
+
+        self.assertEqual(bundle.read_state(self.root), before)
+
+    def test_a_stale_revision_alone_is_enough_to_refuse(self) -> None:
+        self.two_releases()
+        plan = bundle.plan_rollback(self.root)
+        stale = {**plan, "revision": plan["revision"] - 1}
+
+        with self.assertRaisesRegex(bundle.BundleError, "changed since"):
+            bundle.record_rollback(self.root, stale)
+
+    def test_a_forged_expected_active_is_refused(self) -> None:
+        first, _ = self.two_releases()
+        plan = bundle.plan_rollback(self.root)
+
+        with self.assertRaises(bundle.BundleError):
+            bundle.record_rollback(self.root, {**plan, "expected_active": first.name})
+
+    def test_a_forged_target_is_refused(self) -> None:
+        _, second = self.two_releases()
+        plan = bundle.plan_rollback(self.root)
+
+        with self.assertRaises(bundle.BundleError):
+            bundle.record_rollback(self.root, {**plan, "target": second.name})
+
     def test_recording_without_a_previous_bundle_is_refused(self) -> None:
         self.create()
         bundle.promote(self.root)
 
         with self.assertRaisesRegex(bundle.BundleError, "no previous"):
-            bundle.record_rollback(self.root)
+            bundle.plan_rollback(self.root)
+
+
+class StateInvariantTests(_Fixture, unittest.TestCase):
+    def test_active_and_previous_may_never_be_equal(self) -> None:
+        first = self.create()
+        bundle.promote(self.root)
+
+        with self.assertRaisesRegex(bundle.BundleError, "same bundle"):
+            bundle.write_state(
+                self.root,
+                {"candidate": first.name, "active": first.name,
+                 "previous": first.name, "revision": 9},
+            )
+
+    def test_a_short_sha_is_refused(self) -> None:
+        first = self.create()
+
+        with self.assertRaisesRegex(bundle.BundleError, "full"):
+            bundle.write_state(
+                self.root,
+                {"candidate": first.name, "active": first.name[:12],
+                 "previous": None, "revision": 9},
+            )
+
+    def test_a_slot_naming_an_unverifiable_bundle_is_refused(self) -> None:
+        first = self.create()
+        (first / "brain.toml").write_text("tampered", encoding="utf-8")
+
+        with self.assertRaises(bundle.BundleError):
+            bundle.write_state(
+                self.root,
+                {"candidate": first.name, "active": first.name,
+                 "previous": None, "revision": 9},
+            )
+
+
+class LockingTests(_Fixture, unittest.TestCase):
+    """Atomic replace stops a torn file, not a lost update."""
+
+    def spy(self):
+        events = []
+        real_lock = bundle.exclusive_lock
+        real_write = bundle.write_state
+
+        import contextlib as _ctx
+
+        @_ctx.contextmanager
+        def watched_lock(root):
+            events.append("lock")
+            with real_lock(root):
+                yield
+            events.append("unlock")
+
+        def watched_write(root, state):
+            events.append("write")
+            return real_write(root, state)
+
+        return events, watched_lock, watched_write
+
+    def assert_write_inside_lock(self, action) -> None:
+        events, watched_lock, watched_write = self.spy()
+        bundle.exclusive_lock = watched_lock
+        bundle.write_state = watched_write
+        try:
+            action()
+        finally:
+            bundle.exclusive_lock = getattr(bundle, "_real_lock", bundle.exclusive_lock)
+            bundle.write_state = getattr(bundle, "_real_write", bundle.write_state)
+        self.assertIn("lock", events)
+        self.assertIn("write", events)
+        self.assertLess(events.index("lock"), events.index("write"))
+        self.assertGreater(events.index("unlock"), events.index("write"))
+
+    def test_create_writes_under_the_lock(self) -> None:
+        self.assert_write_inside_lock(self.create)
+
+    def test_promote_writes_under_the_lock(self) -> None:
+        self.create()
+        self.assert_write_inside_lock(lambda: bundle.promote(self.root))
+
+    def test_record_rollback_writes_under_the_lock(self) -> None:
+        self.create()
+        bundle.promote(self.root)
+        (self.repo / "file.txt").write_text("two", encoding="utf-8")
+        self.commit("second")
+        self.create()
+        bundle.promote(self.root)
+        plan = bundle.plan_rollback(self.root)
+        self.assert_write_inside_lock(lambda: bundle.record_rollback(self.root, plan))
 
 
 class RunbookContractTests(unittest.TestCase):
@@ -461,10 +596,15 @@ class RunbookContractTests(unittest.TestCase):
 
     RUNBOOK = Path(__file__).resolve().parents[1] / "docs/runbook.md"
 
+    @staticmethod
+    def _joined(text: str) -> str:
+        """Collapse shell line continuations so a command reads as one line."""
+        return re.sub(r"\s*\\\n\s*", " ", text)
+
     def rollback_section(self) -> str:
         text = self.RUNBOOK.read_text(encoding="utf-8")
         start = text.index("### Rollback")
-        return text[start : text.index("### Architectural reversion")]
+        return self._joined(text[start : text.index("### Architectural reversion")])
 
     def test_rollback_is_recorded_after_the_whole_validation_block(self) -> None:
         section = self.rollback_section()
@@ -482,6 +622,14 @@ class RunbookContractTests(unittest.TestCase):
                     record,
                     f"{gate} must be validated before the rollback is recorded",
                 )
+
+    def test_the_plan_is_captured_and_reused(self) -> None:
+        """Re-planning after validation would defeat the compare-and-swap."""
+        section = self.rollback_section()
+
+        self.assertIn("plan-rollback --out", section)
+        self.assertIn("record-rollback --plan", section)
+        self.assertEqual(section.count("brain_bundle.py plan-rollback"), 1)
 
     def test_rollback_plans_before_it_installs(self) -> None:
         """Match the invocation, not the prose that describes it."""

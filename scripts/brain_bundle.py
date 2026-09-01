@@ -37,6 +37,8 @@ prescribes.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -181,13 +183,54 @@ def create(root: Path, repo: Path, config: Path) -> Path:
         if staging.exists():
             shutil.rmtree(staging)
 
-    state = read_state(root)
-    state["candidate"] = head
-    write_state(root, state)
+    with exclusive_lock(root):
+        state = read_state(root)
+        state["candidate"] = head
+        state["revision"] = state["revision"] + 1
+        write_state(root, state)
     return target
 
 
 STATE_FILE = "slots.json"
+LOCK_FILE = ".slots.lock"
+SHA_LENGTH = 40
+
+
+@contextlib.contextmanager
+def exclusive_lock(root: Path):
+    """Serialise every read-modify-write on the state.
+
+    `os.replace` makes a write atomic, which prevents a torn file. It does
+    nothing about a lost update: two processes can each read the same state,
+    each decide a new one, and the second silently discard the first's
+    decision. Every mutating path takes this lock around the whole
+    read-decide-write, not just the write.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    handle = (root / LOCK_FILE).open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _validate_state(root: Path, state: dict) -> None:
+    """Refuse a state that cannot describe a real deployment."""
+    active, previous = state.get("active"), state.get("previous")
+    if active is not None and active == previous:
+        raise BundleError(
+            "active and previous cannot be the same bundle: that would leave "
+            "no way back from a rollback"
+        )
+    for slot in SLOTS:
+        sha = state.get(slot)
+        if sha is None:
+            continue
+        if not isinstance(sha, str) or len(sha) != SHA_LENGTH:
+            raise BundleError(f"{slot}: expected a full {SHA_LENGTH}-character SHA")
+        verify(root, sha)
 
 
 def read_state(root: Path) -> dict[str, str | None]:
@@ -197,14 +240,16 @@ def read_state(root: Path) -> dict[str, str | None]:
     the truth: a tampered or stale link changes nothing the tool believes.
     """
     path = root / STATE_FILE
-    empty: dict[str, str | None] = dict.fromkeys(SLOTS)
+    empty: dict = {**dict.fromkeys(SLOTS), "revision": 0}
     if not path.is_file():
         return empty
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as exc:
         raise BundleError(f"{path} is not readable state: {exc}") from exc
-    return {slot: stored.get(slot) for slot in SLOTS}
+    state = {slot: stored.get(slot) for slot in SLOTS}
+    state["revision"] = int(stored.get("revision", 0))
+    return state
 
 
 def write_state(root: Path, state: dict[str, str | None]) -> None:
@@ -214,6 +259,7 @@ def write_state(root: Path, state: dict[str, str | None]) -> None:
     symlinks left a window in which an interruption could leave them
     inconsistent, or equal, with no way to tell which had landed.
     """
+    _validate_state(root, state)
     staging = root / f".{STATE_FILE}.tmp"
     staging.write_text(
         json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -282,28 +328,36 @@ def promote(root: Path) -> tuple[str, str | None]:
     actually installed and validated, so promoting before the checks would
     make it describe something nobody proved.
     """
-    state = read_state(root)
-    candidate = state.get("candidate")
-    if candidate is None:
-        raise BundleError("no candidate bundle to promote")
-    verify(root, candidate)
-    if state.get("active") == candidate:
-        raise BundleError("candidate is already active; nothing to promote")
+    with exclusive_lock(root):
+        state = read_state(root)
+        candidate = state.get("candidate")
+        if candidate is None:
+            raise BundleError("no candidate bundle to promote")
+        verify(root, candidate)
+        if state.get("active") == candidate:
+            raise BundleError("candidate is already active; nothing to promote")
 
-    outgoing = state.get("active")
-    write_state(
-        root, {"candidate": candidate, "active": candidate, "previous": outgoing}
-    )
+        outgoing = state.get("active")
+        write_state(
+            root,
+            {
+                "candidate": candidate,
+                "active": candidate,
+                "previous": outgoing,
+                "revision": state["revision"] + 1,
+            },
+        )
     return candidate, outgoing
 
 
-def plan_rollback(root: Path) -> tuple[str, str]:
-    """Verify the previous bundle and report it. Changes nothing.
+def plan_rollback(root: Path) -> dict:
+    """Verify the previous bundle and describe the swap. Changes nothing.
 
-    Deliberately separate from recording. Between planning and recording the
-    operator installs artefacts, restarts services and runs every gate; any of
-    those can fail, and until they all pass the authoritative state must keep
-    naming the last release that was actually validated.
+    The returned plan names the exact state it was computed against. Recording
+    it later compares that description to what is on disk, so a plan made
+    before some other change cannot be applied after it — the machine would
+    then be running one bundle while the state named another, with nothing to
+    say so.
     """
     state = read_state(root)
     previous = state.get("previous")
@@ -317,17 +371,42 @@ def plan_rollback(root: Path) -> tuple[str, str]:
     if active is None:
         raise BundleError("no active bundle to roll back from")
     verify(root, previous)
-    return previous, active
+    return {
+        "revision": state["revision"],
+        "expected_active": active,
+        "target": previous,
+    }
 
 
-def record_rollback(root: Path) -> tuple[str, str]:
-    """Record a rollback that has already been installed and validated."""
-    previous, active = plan_rollback(root)
-    state = read_state(root)
-    write_state(
-        root, {"candidate": state.get("candidate"), "active": previous, "previous": active}
-    )
-    return previous, active
+def record_rollback(root: Path, plan: dict) -> tuple[str, str]:
+    """Record a rollback that was installed and validated, if nothing moved."""
+    for field in ("revision", "expected_active", "target"):
+        if field not in plan:
+            raise BundleError(f"plan is missing {field}")
+
+    with exclusive_lock(root):
+        state = read_state(root)
+        observed = (state["revision"], state.get("active"), state.get("previous"))
+        promised = (plan["revision"], plan["expected_active"], plan["target"])
+        if observed != promised:
+            raise BundleError(
+                "deployment state changed since the plan was made "
+                f"(planned revision {promised[0]} active {promised[1]} previous "
+                f"{promised[2]}; found revision {observed[0]} active {observed[1]} "
+                f"previous {observed[2]}). The installed bundle and the state "
+                "would disagree, so nothing was recorded: re-plan and re-validate."
+            )
+        verify(root, plan["target"])
+        write_state(
+            root,
+            {
+                "candidate": state.get("candidate"),
+                "active": plan["target"],
+                "previous": plan["expected_active"],
+                "revision": state["revision"] + 1,
+            },
+        )
+    return plan["target"], plan["expected_active"]
 
 
 def status(root: Path) -> list[tuple[str, str, str]]:
@@ -375,15 +454,31 @@ def main() -> int:
         elif args.action == "verify":
             print(f"{args.ref} verified: {verify(args.root, args.ref)}")
         elif args.action == "plan-rollback":
-            target, outgoing = plan_rollback(args.root)
-            print(f"verified previous bundle: {target}")
-            print(f"currently active:         {outgoing}")
-            print("install this bundle's artefacts, restart Brain and the Hermes")
-            print("gateway, run every validation gate, and only then record it with")
-            print("  brain_bundle.py record-rollback")
+            plan = plan_rollback(args.root)
+            if args.out is None:
+                raise BundleError(
+                    "--out is required: the plan must be captured now and "
+                    "replayed after validation. Planning again afterwards would "
+                    "describe whatever the state had become, which is exactly "
+                    "the check this design exists to make."
+                )
+            args.out.write_text(
+                json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            print(f"target bundle:    {plan['target']}")
+            print(f"currently active: {plan['expected_active']}")
+            print(f"state revision:   {plan['revision']}")
+            print(f"plan written to:  {args.out}")
+            print("install this bundle, restart Brain and the Hermes gateway, run")
+            print("every validation gate, then replay this exact plan with")
+            print(f"  brain_bundle.py record-rollback --plan {args.out}")
             print("nothing has changed yet")
         elif args.action == "record-rollback":
-            restored, displaced = record_rollback(args.root)
+            if args.plan is None:
+                raise BundleError("--plan is required: replay the captured plan")
+            restored, displaced = record_rollback(
+                args.root, json.loads(args.plan.read_text(encoding="utf-8"))
+            )
             print(f"active   -> {restored} (restored)")
             print(f"previous -> {displaced} (rolled back from)")
         elif args.action == "promote":

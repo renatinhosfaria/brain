@@ -393,14 +393,21 @@ architecture and rollback becomes ordinary:
 
 ```sh
 cd /root/brain
-PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py plan-rollback
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py plan-rollback \
+    --out /var/lib/brain/runtime/staging/rollback-plan.json
 ```
 
-`plan-rollback` verifies the previous bundle and reports it. It changes
-nothing: between planning and recording you will install artefacts, restart
-services and run every gate, and any of those can fail. Until they all pass,
-the authoritative state must keep naming the last release that was actually
-validated.
+`plan-rollback` verifies the previous bundle and writes a plan naming the exact
+state it was computed against: the target SHA, the SHA it expects to be active,
+and the state revision. It changes nothing.
+
+**Capture this plan and replay it.** Between planning and recording you will
+install artefacts, restart services and run every gate, and any of those can
+fail. Until they all pass, the authoritative state must keep naming the last
+release that was actually validated. Planning again after validation would
+describe whatever the state had become by then — including a promotion someone
+else made in the meantime — and recording that would leave the machine running
+one bundle while `slots.json` named another.
 
 Install the bundle it named:
 
@@ -418,14 +425,20 @@ Restart the Hermes gateway, then run the **full validation block** above:
 controlled CTWA. Only after every one of them passes:
 
 ```sh
-PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py record-rollback
+PYTHONPATH=src .venv/bin/python scripts/brain_bundle.py record-rollback \
+    --plan /var/lib/brain/runtime/staging/rollback-plan.json
 ```
 
-`record-rollback` makes `previous` active and files the outgoing bundle as the
-new `previous`, in a single atomic write, so there is a way back from the way
-back. Recording it earlier would leave the state naming a release nobody
-proved; skipping it entirely leaves `active` naming a deployment that no longer
-exists, and the next operator to read it is told the wrong thing.
+`record-rollback` takes the exclusive state lock, re-reads `slots.json`, and
+compares the revision and both SHAs against the captured plan. If anything
+moved it refuses and records nothing, so the plan can only ever be applied to
+the state it was made for. Otherwise it makes `previous` active and files the
+outgoing bundle as the new `previous`, in one atomic write, so there is a way
+back from the way back.
+
+Recording earlier would leave the state naming a release nobody proved;
+skipping it leaves `active` naming a deployment that no longer exists, and the
+next operator to read it is told the wrong thing.
 
 `active` and `previous` are one fact recorded in `slots.json`, not two
 symlinks. The symlinks are a view redrawn from that file, so a stale or
