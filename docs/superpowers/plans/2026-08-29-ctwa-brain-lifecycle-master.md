@@ -59,12 +59,31 @@ been deleted.
 
 ### Stage 1 — Brain transport/context foundation
 
-- [ ] Execute all tasks in `2026-08-29-ctwa-brain-transport-context.md` using TDD.
-- [ ] Validate the context contract with `transport_kind` present and `inbound_kind=null`.
-- [ ] Prove retention actually runs: an expired display name is deleted from storage, not merely hidden from reads.
-- [ ] Brain deploys no status writer and holds no FamaChat credential.
+- [x] Execute all tasks in `2026-08-29-ctwa-brain-transport-context.md` using TDD.
+- [x] Validate the context contract with `transport_kind` present and `inbound_kind=null`.
+- [x] Prove retention actually runs: an expired display name is deleted from storage, not merely hidden from reads.
+- [x] Brain deploys no status writer and holds no FamaChat credential.
+- [ ] **Not closed:** the code has never run in production. Per the Completion
+  Definition below, a stage is complete when its component has processed a real
+  case end to end, and Stage 1's code sits in a branch while the machine runs
+  the previous release.
 
 **Gate:** component plan 1 all PASS, upstream Hermes untouched.
+
+**Audited 2026-09-01.** Twelve of the thirteen acceptance gates pass against
+tests; `HERMES_COMPATIBILITY_CHECK` fails against the deployed principal and
+passes against the post-deploy bundle, which is the correct reading of a change
+that has not been installed. Three defects were found and fixed:
+
+- The observer's own suite had never been run after the Python refactor, and it
+  was the only thing exercising the Node-to-Python contract. `RuntimeIds` had
+  lost an argument and the cross-language probe had been failing for a day
+  while all 386 Python tests stayed green. The runbook now requires that suite.
+- `phone_for_contact_key` survived in `whatsapp_identity.py`: it existed only
+  for the writer's claim contact proof, had no caller left outside its own
+  tests, and was the last FamaChat reference anywhere in `src/`.
+- Both were invisible to every gate, because a gate only ever checks what
+  someone thought to point it at.
 
 ### Stage 2 — Integrity checker before first production deployment
 

@@ -251,36 +251,3 @@ def verify_transport_identity(
         contact_key=derived_contact_key,
         reason="resolved",
     )
-
-
-def phone_for_contact_key(
-    contact_key: str, mapping_dir: Path, transport_ids: object
-) -> str | None:
-    """Recover the canonical phone behind a contact key, transiently.
-
-    A caller must compare its expectation against the live FamaChat
-    record, and a HMAC cannot be compared to a phone number. So the phone is
-    resolved at claim time from mapping evidence Brain already trusts, handed
-    over for that one comparison, and never stored by either service
-    (spec sections 6.1 and 13).
-
-    Exactly one mapped phone may match. Zero means the evidence is gone;
-    several would mean the key is ambiguous, and guessing which lead a status
-    belongs to is the one mistake this design exists to prevent.
-    """
-    if not isinstance(contact_key, str) or not contact_key:
-        return None
-    try:
-        pairs = _transport_mapping_pairs(Path(mapping_dir))
-    except ValueError:
-        return None
-
-    matches = {
-        phone
-        for _lid, phone in pairs
-        if _PHONE_RE.fullmatch(phone)
-        and hmac.compare_digest(transport_ids.contact_key(phone), contact_key)
-    }
-    if len(matches) != 1:
-        return None
-    return matches.pop()

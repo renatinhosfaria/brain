@@ -8,7 +8,6 @@ from pathlib import Path
 from brain.transport_models import RuntimeIds
 from brain.whatsapp_identity import (
     PhoneResolution,
-    phone_for_contact_key,
     resolve_phone,
     verify_transport_identity,
 )
@@ -255,36 +254,3 @@ class PhoneForContactKeyTests(unittest.TestCase):
             json.dumps(lid), encoding="utf-8"
         )
 
-    def test_exactly_one_mapped_phone_resolves(self) -> None:
-        self.write_mapping(self.PHONE, self.LID)
-        key = self.ids.contact_key(self.PHONE)
-
-        self.assertEqual(
-            phone_for_contact_key(key, self.mapping_dir, self.ids), self.PHONE
-        )
-
-    def test_missing_evidence_resolves_to_nothing(self) -> None:
-        key = self.ids.contact_key(self.PHONE)
-        self.assertIsNone(phone_for_contact_key(key, self.mapping_dir, self.ids))
-
-    def test_an_unrelated_mapping_does_not_resolve(self) -> None:
-        self.write_mapping("5534999000000", self.LID)
-        key = self.ids.contact_key(self.PHONE)
-
-        self.assertIsNone(phone_for_contact_key(key, self.mapping_dir, self.ids))
-
-    def test_invalid_evidence_resolves_to_nothing(self) -> None:
-        (self.mapping_dir / "lid-mapping-not-a-phone.json").write_text(
-            '"x"', encoding="utf-8"
-        )
-        key = self.ids.contact_key(self.PHONE)
-
-        self.assertIsNone(phone_for_contact_key(key, self.mapping_dir, self.ids))
-
-    def test_a_malformed_key_resolves_to_nothing(self) -> None:
-        self.write_mapping(self.PHONE, self.LID)
-        for bad in ("", None, "not-a-key"):
-            with self.subTest(key=bad):
-                self.assertIsNone(
-                    phone_for_contact_key(bad, self.mapping_dir, self.ids)
-                )

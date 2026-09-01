@@ -76,6 +76,7 @@ Production server (the Brain venv is already built; no `uv` required):
 ```sh
 cd /root/brain
 PYTHONPATH=src /root/brain/.venv/bin/python -m unittest discover -s tests -v
+(cd observers/whatsapp && /root/.hermes/node/bin/node --test "test/*.test.mjs")
 /root/brain/.venv/bin/python scripts/hermes_integration_check.py
 /root/brain/.venv/bin/python scripts/smoke_test.py
 ```
@@ -85,9 +86,16 @@ Development alternative (with `uv` available):
 ```sh
 cd /root/brain
 uv run python -m unittest discover -s tests -v
+(cd observers/whatsapp && node --test "test/*.test.mjs")
 uv run python scripts/hermes_integration_check.py
 uv run python scripts/smoke_test.py
 ```
+
+The observer suite is not optional. It is the only thing that exercises the
+contract between the Node normalizer and the Python resolver, and on
+2026-09-01 it was the only suite that noticed `RuntimeIds` had lost an
+argument — the 386 Python tests were all green while the cross-language probe
+had been broken for a day.
 
 Confirm `curl -fsS http://127.0.0.1:8765/health` returns the exact eight-field
 compatible payload:

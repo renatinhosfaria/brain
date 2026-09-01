@@ -259,7 +259,7 @@ test('Node-created mappings are readable by the existing Brain Python resolver',
       path.join(REPO_ROOT, '.venv/bin/python'),
       [
         '-c',
-        'import json,sys; from pathlib import Path; from brain.transport_models import RuntimeIds; from brain.whatsapp_identity import resolve_phone,verify_transport_identity; ids=RuntimeIds(b"r"*32,b"t"*32); r=resolve_phone(sys.argv[1],Path(sys.argv[2])); v=verify_transport_identity(remote_jid_hmac=ids.jid_hmac(sys.argv[1]),contact_key=None,mapping_dir=Path(sys.argv[2]),transport_ids=ids); print(json.dumps({"resolve":{"status":r.status,"phone":r.phone,"reason":r.reason},"verify":{"status":v.status,"phone":v.phone,"contact_key":v.contact_key,"reason":v.reason}},sort_keys=True))',
+        'import json,sys; from pathlib import Path; from brain.transport_models import RuntimeIds; from brain.whatsapp_identity import resolve_phone,verify_transport_identity; ids=RuntimeIds(b"t"*32); r=resolve_phone(sys.argv[1],Path(sys.argv[2])); v=verify_transport_identity(remote_jid_hmac=ids.jid_hmac(sys.argv[1]),contact_key=None,mapping_dir=Path(sys.argv[2]),transport_ids=ids); print(json.dumps({"resolve":{"status":r.status,"phone":r.phone,"reason":r.reason},"verify":{"status":v.status,"phone":v.phone,"contact_key":v.contact_key,"reason":v.reason}},sort_keys=True))',
         LID_JID,
         sessionDir,
       ],
