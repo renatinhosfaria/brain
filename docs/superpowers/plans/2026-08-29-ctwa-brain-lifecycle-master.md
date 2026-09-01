@@ -6,7 +6,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-29-ctwa-brain-lifecycle-design.md`
 
-**Amended 2026-08-31 (Amendment 2).** Automated CRM lifecycle writing is out of scope. Reno owns the status transitions through its own MCP surface. This plan lost Stage 5 and Stage 7 and two component plans; what remains is capture, context, least privilege and integrity. Section 2.5 and Amendment 2 of the spec record why.
+**Amended 2026-08-31 (Amendment 2).** Automated CRM lifecycle writing is out of scope. Reno owns the status transitions through its own MCP surface. The lifecycle shadow engine and the write-activation stages are gone, along with two component plans; the stages below were renumbered so there is one unambiguous sequence. What remains is capture, context, least privilege and integrity. Section 2.5 and Amendment 2 of the spec record why.
 
 ## Component Plans
 
@@ -80,8 +80,9 @@ Removed by Amendment 2: the lifecycle engine plan and the writer/rollout plan. T
 
 **Gate:** component plan 3 acceptance gate, upstream untouched.
 
-### Stage 5 — Deploy the reduced CEO plugin
+### Stage 5 — Deploy the hook-free CEO plugin
 
+- [ ] Update `/etc/brain/brain.toml` so the `default` principal grants only `conversation_context`, together with the code that stops accepting `turn_register`. Doing this before the deploy breaks the running service; doing it after leaves `hermes_integration_check.py` failing.
 - [ ] Replace the installed `/root/.hermes/plugins/brain-ceo-bridge` with the hook-free version.
 - [ ] Confirm the gateway loads it and registers exactly one tool and zero hooks.
 - [ ] Run one controlled CTWA and confirm the CEO receives contact-scoped context.
@@ -130,4 +131,4 @@ Implementation is complete only when:
 - all unit/integration/operational verification suites pass;
 - observer secrets/session paths have correct permissions;
 - upstream Hermes integrity is unchanged from pre-deployment baseline;
-- each component has processed at least one real production case end to end. A stage is not complete because its tests pass: Stage 5 of the previous plan was marked done with an engine that had never created a single lifecycle.
+- each component has processed at least one real production case end to end. A stage is not complete because its tests pass: the lifecycle shadow stage of the previous plan was marked done with an engine that had never created a single lifecycle.

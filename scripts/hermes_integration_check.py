@@ -86,16 +86,20 @@ def check_sqlite_schema(path: Path, requirements: dict[str, set[str]]) -> None:
 
 
 def check_upstream_contracts(hermes_root: Path) -> None:
-    from gateway.session_context import _VAR_MAP, get_session_env
-    from hermes_cli.plugins import VALID_HOOKS, PluginContext, invoke_hook
+    """Verify only the upstream surface Brain actually depends on.
 
-    if (
-        not callable(invoke_hook)
-        or "hook_name" not in inspect.signature(PluginContext.register_hook).parameters
-    ):
-        fail("Hermes public plugin hook API changed")
-    if not {"pre_llm_call", "pre_tool_call"}.issubset(VALID_HOOKS):
-        fail("Hermes required hooks are unavailable")
+    Amendment 2 left the CEO plugin with one tool and no hooks, so the hook
+    machinery is no longer ours to depend on: `invoke_hook`, the `pre_llm_call`
+    `turn_id` keyword, and the `pre_tool_call` modify/merge contract were all
+    dropped from this check. A compatibility gate that fails on an upstream
+    change which cannot affect us is noise, and noise is how a real signal gets
+    ignored.
+    """
+    from gateway.session_context import _VAR_MAP, get_session_env
+    from hermes_cli.plugins import PluginContext
+
+    if "name" not in inspect.signature(PluginContext.register_tool).parameters:
+        fail("Hermes public plugin tool registration API changed")
 
     required_context_fields = {
         "HERMES_SESSION_PLATFORM",
@@ -108,46 +112,11 @@ def check_upstream_contracts(hermes_root: Path) -> None:
     if not callable(get_session_env) or not required_context_fields.issubset(_VAR_MAP):
         fail("Hermes gateway session ContextVar API changed")
 
-    turn_tree = parsed_source(hermes_root / "agent/turn_context.py")
-    pre_llm_calls = [
-        call
-        for call in calls(turn_tree, "_invoke_hook")
-        if call.args
-        and isinstance(call.args[0], ast.Constant)
-        and call.args[0].value == "pre_llm_call"
-    ]
-    if not pre_llm_calls or "turn_id" not in {
-        keyword.arg for keyword in pre_llm_calls[0].keywords
-    }:
-        fail("Hermes pre_llm_call no longer supplies turn_id")
-
-    plugins_tree = parsed_source(hermes_root / "hermes_cli/plugins.py")
-    plugin_literals = literal_strings(plugins_tree)
-    if not {"pre_tool_call", "modify", "args"}.issubset(plugin_literals):
-        fail("Hermes pre_tool_call modification contract changed")
-    if not calls(plugins_tree, "update"):
-        fail("Hermes pre_tool_call no longer merges modified arguments")
-
-    adapter_tree = parsed_source(hermes_root / "plugins/platforms/whatsapp/adapter.py")
-    adapter_literals = literal_strings(adapter_tree)
-    if "\n" not in adapter_literals:
-        fail('Hermes WhatsApp batching separator is not exact "\\n"')
-    if not calls(adapter_tree, "cancel") or not calls(adapter_tree, "create_task"):
-        fail("Hermes WhatsApp debounce timer reset contract changed")
-    adapter_classes = {
-        node.name for node in ast.walk(adapter_tree) if isinstance(node, ast.ClassDef)
-    }
-    adapter_methods = {
-        node.name
-        for node in ast.walk(adapter_tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    if "WhatsAppAdapter" not in adapter_classes or not {
-        "_enqueue_text_event",
-        "_flush_text_batch",
-    }.issubset(adapter_methods):
-        fail("Hermes WhatsApp adapter contract changed")
-
+    # The WhatsApp batching separator and debounce-timer contracts were
+    # checked because turn correlation had to reason about which messages
+    # Hermes folded into one turn. Amendment 2 removed that reasoning, so the
+    # contracts are no longer ours. Identity mapping below still is: phone
+    # resolution depends on it.
     bridge = hermes_root / "scripts/whatsapp-bridge/bridge.js"
     bridge_source = bridge.read_text(encoding="utf-8")
     identity_source = (hermes_root / "gateway/whatsapp_identity.py").read_text(
@@ -161,33 +130,8 @@ def check_upstream_contracts(hermes_root: Path) -> None:
     ):
         fail("Hermes WhatsApp bridge/identity adapter contract changed")
 
-    ledger_path = hermes_root / "gateway/delivery_ledger.py"
-    ledger_tree = parsed_source(ledger_path)
-    ledger_source = ledger_path.read_text(encoding="utf-8")
-    ledger_functions = {
-        node.name
-        for node in ast.walk(ledger_tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    required_ledger = {
-        "record_obligation",
-        "mark_attempting",
-        "mark_delivered",
-        "mark_failed",
-        "sweep_recoverable",
-        "ledger_enabled",
-    }
-    if not required_ledger.issubset(ledger_functions) or not all(
-        fragment in ledger_source
-        for fragment in (
-            "state='pending'",
-            "state='attempting'",
-            "state='delivered'",
-            "state='failed'",
-            "delivery_obligations",
-        )
-    ):
-        fail("Hermes delivery ledger semantics changed")
+    # The delivery ledger was checked because proving the first successful T1
+    # send read its states. Nothing derives that fact any more.
 
 
 def fail(message: str) -> None:
@@ -398,7 +342,9 @@ def main() -> int:
     if (
         not report.ok
         or set(report.registered_tools) != {"conversation_context"}
-        or set(report.registered_hooks) != {"pre_llm_call", "pre_tool_call"}
+        # Amendment 2: zero hooks. A hook reappearing here would put network
+        # I/O back on the turn path, which is the failure of 2026-08-31.
+        or set(report.registered_hooks) != set()
     ):
         fail("CEO: versioned Brain bridge failed Hermes Plugin Doctor")
     plugin_source = plugin_path / "tools.py"
@@ -457,8 +403,8 @@ def main() -> int:
         fail("Hermes trusted auto-subscription derivation changed")
 
     print(
-        "OK: Hermes plugin hooks, schemas, WhatsApp batching, delivery ledger, "
-        "resolver and trusted subscription are compatible"
+        "OK: Hermes plugin tool registration, session context, identity mapping, "
+        "schemas, resolver and trusted subscription are compatible"
     )
     return 0
 

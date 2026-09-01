@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
+import time
 from typing import Any
 
 from mcp.server.lowlevel import Server
@@ -21,6 +24,10 @@ from starlette.routing import Route
 from .errors import BrainError
 from .gateway_api import GatewayAPI
 from .service import BrainService
+
+# One pass an hour, matching the ingestion-path throttle. Far finer than the
+# 24-hour and 90-day limits it enforces.
+RETENTION_LOOP_SECONDS = 3_600.0
 from .transport_api import TransportAPI
 
 RECENT_SCHEMA = {
@@ -121,8 +128,31 @@ class BrainMCPServer:
             status_code=200 if health.status == "ok" else 503,
         )
 
+    async def _retention_loop(self) -> None:
+        """Enforce section 19 while nothing is arriving.
+
+        The ingestion path already runs a pass whenever an event lands, which
+        covers a busy contact. This covers the opposite case: a quiet week
+        would otherwise leave an expired display name and out-of-window
+        transport sitting on disk, because the only trigger had stopped.
+
+        Bound to the app lifespan so it starts with the service and needs no
+        separate unit anyone could forget to install — the failure mode that
+        left this policy unenforced until 2026-08-31.
+        """
+        while True:
+            try:
+                await asyncio.sleep(RETENTION_LOOP_SECONDS)
+                await asyncio.to_thread(
+                    self.service.transport_service.apply_retention, time.time()
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - housekeeping never kills the app
+                logging.getLogger("brain").warning("periodic retention pass failed")
+
     def app(self):
-        return self.server.streamable_http_app(
+        application = self.server.streamable_http_app(
             streamable_http_path="/mcp",
             json_response=True,
             stateless_http=False,
@@ -146,3 +176,20 @@ class BrainMCPServer:
                 ),
             ],
         )
+        # Wrap, never replace: the MCP app owns a lifespan of its own for
+        # session management, and dropping it would break streamable HTTP.
+        inner_lifespan = application.router.lifespan_context
+
+        @contextlib.asynccontextmanager
+        async def lifespan(app):
+            task = asyncio.create_task(self._retention_loop())
+            try:
+                async with inner_lifespan(app):
+                    yield
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        application.router.lifespan_context = lifespan
+        return application

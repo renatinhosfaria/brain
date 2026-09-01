@@ -214,14 +214,21 @@ class DeploymentContractTests(unittest.TestCase):
             "HERMES_SESSION_CHAT_ID",
             "HERMES_SESSION_KEY",
             "HERMES_SESSION_ID",
-            "pre_llm_call",
-            "pre_tool_call",
-            "turn_id",
-            "delivery_obligations",
-            "_enqueue_text_event",
-            "create_task",
+            "register_tool",
+            "lid-mapping-",
         ):
             self.assertIn(required, source)
+
+        # Amendment 2: the checker must not depend on hook contracts we no
+        # longer use. A gate that fails on an upstream change which cannot
+        # affect us teaches the operator to ignore it.
+        for retired in (
+            "pre_llm_call",
+            "pre_tool_call",
+            "delivery_obligations",
+            "_enqueue_text_event",
+        ):
+            self.assertNotIn(f'"{retired}"', source)
 
     def test_hermes_check_validates_principal_modes_and_tool_acl(self) -> None:
         source = (ROOT / "scripts/hermes_integration_check.py").read_text(

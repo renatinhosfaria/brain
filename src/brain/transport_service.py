@@ -359,10 +359,10 @@ class TransportService:
             raise
         except sqlite3.Error as exc:
             raise DatabaseUnavailable() from exc
-        self._apply_retention(ingestion_now)
+        self.apply_retention(ingestion_now)
         return {"status": "ok", "event_id": envelope.event_id, "duplicate": duplicate}
 
-    def _apply_retention(self, now: float) -> None:
+    def apply_retention(self, now: float) -> None:
         """Enforce section 19 on the path that creates the data it governs.
 
         Deliberately not a scheduled job. Until 2026-08-31 this policy lived in
@@ -376,7 +376,6 @@ class TransportService:
         """
         if now - self._retention_ran_at < RETENTION_INTERVAL_SECONDS:
             return
-        self._retention_ran_at = now
         transport_cutoff = now - self.settings.transport_retention_days * 86_400
 
         def purge(conn: sqlite3.Connection) -> tuple[int, int]:
@@ -394,8 +393,11 @@ class TransportService:
         try:
             names, events = self.runtime.write(purge)
         except sqlite3.Error:
+            # The throttle is deliberately not advanced here: a failed pass
+            # must be retried by the next event, not suppressed for an hour.
             logger.warning("retention pass failed after transport ingestion")
             return
+        self._retention_ran_at = now
         if names or events:
             logger.info(
                 "retention removed %d display names and %d transport events",

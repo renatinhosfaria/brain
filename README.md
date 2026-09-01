@@ -16,9 +16,9 @@ The MCP surface has exactly three tools:
 
 The CEO does not receive the worker MCP server. The external
 `integrations/hermes/brain-ceo-bridge/` plugin reads the current gateway
-`ContextVar` session and uses official `pre_llm_call`/`pre_tool_call` hooks. It
-obtains bounded `conversation_context` for the contact on the other side of
-the current WhatsApp DM. This keeps identity authority in Brain while allowing
+`ContextVar` session through the public accessor and registers no hooks. It
+obtains bounded `conversation_context` for the contact on the other side of the
+current WhatsApp DM. This keeps identity authority in Brain while allowing
 `hermes update` without a core fork.
 
 ## Scope

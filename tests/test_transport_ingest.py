@@ -559,3 +559,69 @@ class RetentionTests(TransportIngestTests):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.rows("transport_events")), 1)
+
+
+class RetentionRetryTests(TransportIngestTests):
+    def test_a_failed_pass_is_retried_by_the_next_event(self) -> None:
+        """A failure must not suppress the policy for a whole hour."""
+        service = self.service.transport_service
+        service._retention_ran_at = 0.0
+        original = self.service.runtime.write
+        fail_next = {"on": False}
+
+        def flaky(callback):
+            if fail_next["on"]:
+                fail_next["on"] = False
+                raise sqlite3.OperationalError("retention exploded")
+            return original(callback)
+
+        # First ingestion: the purge fails, so the throttle must not advance.
+        self.service.runtime.write = flaky  # type: ignore[method-assign]
+        fail_next["on"] = True
+        self.post(self.envelope(message_id="one", body="um"))
+        self.assertEqual(service._retention_ran_at, 0.0)
+
+        # Second ingestion: the pass runs and now the throttle advances.
+        self.post(self.envelope(message_id="two", body="dois"))
+        self.assertGreater(service._retention_ran_at, 0.0)
+
+
+class RetentionLoopTests(TransportIngestTests):
+    def test_the_app_runs_retention_without_any_ingestion(self) -> None:
+        """A quiet week must not leave expired data on disk."""
+        import asyncio
+
+        from brain.mcp_server import BrainMCPServer
+
+        self.post(self.envelope(display_name="Maria Silva"))
+        self.service.runtime.write(
+            lambda conn: conn.execute("UPDATE contact_ephemera SET expires_at = 1.0")
+        )
+        self.service.transport_service._retention_ran_at = 0.0
+
+        server = BrainMCPServer(self.service)
+
+        app = server.app()
+
+        async def one_pass() -> None:
+            async with app.router.lifespan_context(app):
+                await asyncio.to_thread(
+                    self.service.transport_service.apply_retention, time.time()
+                )
+
+        asyncio.run(one_pass())
+
+        stored = self.service.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT display_name FROM contact_ephemera"
+            ).fetchone()[0]
+        )
+        self.assertIsNone(stored)
+
+    def test_the_loop_is_bound_to_the_app_lifespan(self) -> None:
+        from brain.mcp_server import BrainMCPServer
+
+        app = BrainMCPServer(self.service).app()
+        source = app.router.lifespan_context.__wrapped__.__code__
+
+        self.assertIn("_retention_loop", source.co_names)
