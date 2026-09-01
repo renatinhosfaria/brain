@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import sqlite3
@@ -9,6 +10,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from starlette.requests import Request
 
@@ -611,36 +613,58 @@ class RetentionRetryTests(TransportIngestTests):
 
 
 class RetentionLoopTests(TransportIngestTests):
-    def test_the_app_runs_retention_without_any_ingestion(self) -> None:
-        """A quiet week must not leave expired data on disk."""
-        import asyncio
+    """The periodic pass must do the work, not merely exist."""
 
-        from brain.mcp_server import BrainMCPServer
-
+    def expire_the_display_name(self) -> None:
         self.post(self.envelope(display_name="Maria Silva"))
         self.service.runtime.write(
             lambda conn: conn.execute("UPDATE contact_ephemera SET expires_at = 1.0")
         )
         self.service.transport_service._retention_ran_at = 0.0
 
-        server = BrainMCPServer(self.service)
-
-        app = server.app()
-
-        async def one_pass() -> None:
-            async with app.router.lifespan_context(app):
-                await asyncio.to_thread(
-                    self.service.transport_service.apply_retention, time.time()
-                )
-
-        asyncio.run(one_pass())
-
-        stored = self.service.runtime.read(
+    def stored_display_name(self):
+        return self.service.runtime.read(
             lambda conn: conn.execute(
                 "SELECT display_name FROM contact_ephemera"
             ).fetchone()[0]
         )
-        self.assertIsNone(stored)
+
+    def run_lifespan(self, seconds: float = 1.5) -> None:
+        """Drive the real app lifespan with a short interval and wait.
+
+        Nothing here calls apply_retention. If the periodic task is not
+        started, or does not reach the purge, the display name survives and
+        the assertion fails — which is the only way this proves anything.
+        """
+        from brain import mcp_server
+
+        app = mcp_server.BrainMCPServer(self.service).app()
+
+        async def window() -> None:
+            async with app.router.lifespan_context(app):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    if self.stored_display_name() is None:
+                        return
+                    await asyncio.sleep(0.02)
+
+        with patch.object(mcp_server, "RETENTION_LOOP_SECONDS", 0.01):
+            asyncio.run(window())
+
+    def test_the_periodic_pass_purges_without_any_ingestion(self) -> None:
+        self.expire_the_display_name()
+
+        self.run_lifespan()
+
+        self.assertIsNone(self.stored_display_name())
+
+    def test_a_live_display_name_survives_the_periodic_pass(self) -> None:
+        self.post(self.envelope(display_name="Maria Silva"))
+        self.service.transport_service._retention_ran_at = 0.0
+
+        self.run_lifespan(seconds=0.3)
+
+        self.assertEqual(self.stored_display_name(), "Maria Silva")
 
     def test_the_loop_is_bound_to_the_app_lifespan(self) -> None:
         from brain.mcp_server import BrainMCPServer
@@ -649,3 +673,40 @@ class RetentionLoopTests(TransportIngestTests):
         source = app.router.lifespan_context.__wrapped__.__code__
 
         self.assertIn("_retention_loop", source.co_names)
+
+    def test_the_wrapped_mcp_lifespan_still_runs(self) -> None:
+        """Wrapping must not swallow the lifespan the MCP app owns.
+
+        The spy is installed on the app the MCP library builds, before our
+        wrapper captures it. Spying on the wrapper instead would only prove
+        the wrapper calls itself.
+        """
+        from brain import mcp_server
+
+        server = mcp_server.BrainMCPServer(self.service)
+        build = server.server.streamable_http_app
+        entered = {"mcp": False}
+
+        def instrumented(**kwargs):
+            application = build(**kwargs)
+            mcp_lifespan = application.router.lifespan_context
+
+            @contextlib.asynccontextmanager
+            async def spy(app):
+                entered["mcp"] = True
+                async with mcp_lifespan(app):
+                    yield
+
+            application.router.lifespan_context = spy
+            return application
+
+        server.server.streamable_http_app = instrumented
+        app = server.app()
+
+        async def window() -> None:
+            async with app.router.lifespan_context(app):
+                await asyncio.sleep(0)
+
+        asyncio.run(window())
+
+        self.assertTrue(entered["mcp"])

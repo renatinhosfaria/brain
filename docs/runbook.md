@@ -222,39 +222,68 @@ Never put tokens, Authorization headers, transcript text, phone numbers,
 
 ## Amendment 2 deploy window
 
-Brain's code, the installed CEO plugin, and `/etc/brain/brain.toml` must move
-together in one authorized window. They are coupled in both directions:
+Brain's code, the installed CEO plugin, and `/etc/brain/brain.toml` form one
+bundle and must move together in a single authorized window.
 
-- changing the config first removes `turn_register` from a running service that
-  still requires it;
-- changing it last leaves `hermes_integration_check.py` failing on a principal
-  the new code no longer accepts.
+The config is read at startup, so editing the TOML does not disturb the process
+already running. The risk is the restart: whichever artefact is stale when the
+service comes back is the one that breaks it.
+
+- restarting with the new config but the old code leaves the CEO without
+  `turn_register`, which the old code still requires;
+- restarting with the new code but the old config leaves a principal granting a
+  capability the new code rejects, and `hermes_integration_check.py` red;
+- restarting Brain with the new code while the gateway still holds the hooked
+  plugin leaves those hooks calling a route that no longer exists.
 
 `git checkout` alone is a deployment here: `brain.service` runs
 `/root/brain/.venv/bin/brain` directly from the working tree, so switching
-branches changes what the next restart executes.
+branches changes what the next restart executes. Treat a branch switch on this
+machine as an artefact change, not an editing convenience.
 
-### Before the window
+### The bundle
 
-Capture what rollback restores:
+A bundle is three artefacts derived from one reviewed commit, and it is the
+only unit that is ever deployed or restored:
+
+| Artefact | Post-Amendment-2 content |
+| --- | --- |
+| `/root/brain` working tree | no writer, no FamaChat client, no correlation |
+| `/root/.hermes/plugins/brain-ceo-bridge` | one tool, zero hooks |
+| `/etc/brain/brain.toml` | `default` principal grants only `conversation_context` |
+
+Never restore one of these without the other two. A mixed set is what the
+failure modes above describe, and every one of them is silent until a restart.
+
+### Staging the rollback bundle
+
+Build the restore target from the reviewed commit **before** touching anything,
+so rollback never depends on hand-editing under pressure:
 
 ```sh
-git rev-parse HEAD > /var/lib/brain/runtime/rollback-brain-head
-cp -a /root/.hermes/plugins/brain-ceo-bridge \
-      /var/lib/brain/runtime/rollback-plugin
-cp -a /etc/brain/brain.toml /var/lib/brain/runtime/rollback-brain.toml
+SHA=$(git -C /root/brain rev-parse --short HEAD)
+BUNDLE=/var/lib/brain/runtime/bundle-$SHA
+install -d -m 700 "$BUNDLE"
+echo "$SHA" > "$BUNDLE/commit"
+cp -a /root/brain/integrations/hermes/brain-ceo-bridge "$BUNDLE/plugin"
+sed 's/tools = \["conversation_context", "turn_register"\]/tools = ["conversation_context"]/' \
+    /etc/brain/brain.toml > "$BUNDLE/brain.toml"
+chmod 600 "$BUNDLE/brain.toml"
+grep -A3 '\[principals.default\]' "$BUNDLE/brain.toml"
 ```
+
+Confirm the generated TOML grants only `conversation_context` and that its
+token digests are unchanged. This file is the config for both the deploy and
+any rollback within this architecture.
 
 ### The window
 
 1. Check out the reviewed commit in `/root/brain`.
-2. Copy `integrations/hermes/brain-ceo-bridge/` over
-   `/root/.hermes/plugins/brain-ceo-bridge/`, replacing every file. A stale
-   `__pycache__` is harmless; a stale source file is not.
-3. Edit `/etc/brain/brain.toml` so `[principals.default]` has
-   `tools = ["conversation_context"]`.
-4. Restart `brain.service`, then the Hermes gateway so the CEO reloads the
-   plugin.
+2. Replace `/root/.hermes/plugins/brain-ceo-bridge/` with `$BUNDLE/plugin`,
+   removing the directory first so no stale source file survives.
+3. Install `$BUNDLE/brain.toml` as `/etc/brain/brain.toml`, mode 0600.
+4. Only once all three are in place, restart `brain.service`, then the Hermes
+   gateway so the CEO reloads the plugin.
 
 ### Validate in the real environment
 
@@ -275,30 +304,41 @@ PYTHONPATH=src .venv/bin/python scripts/hermes_integrity.py verify \
   --baseline /var/lib/brain/runtime/hermes-integrity-baseline.json
 ```
 
-The plugin doctor must report zero hooks. `hermes_integration_check.py` now
-doctors the **installed** plugin as well as the versioned source and fails on
-any byte difference between them, because a plugin that passes in the
-repository while the gateway loads something else is exactly the drift that
-went unnoticed on 2026-08-31.
+The plugin doctor must report zero hooks. `hermes_integration_check.py` doctors
+the **installed** plugin as well as the versioned source and fails on any byte
+difference between them, because a plugin that passes in the repository while
+the gateway loads something else is exactly the drift that went unnoticed on
+2026-08-31.
 
 Finish with one controlled CTWA and confirm the CEO receives contact-scoped
 context from a real inbound.
 
 ### Rollback
 
+Rollback restores a coherent bundle. It does **not** revert the architecture.
+
 ```sh
-cd /root/brain && git checkout "$(cat /var/lib/brain/runtime/rollback-brain-head)"
+BUNDLE=/var/lib/brain/runtime/bundle-$(cat /var/lib/brain/runtime/bundle-current)
+git checkout "$(cat "$BUNDLE/commit")"
 rm -rf /root/.hermes/plugins/brain-ceo-bridge
-cp -a /var/lib/brain/runtime/rollback-plugin \
-      /root/.hermes/plugins/brain-ceo-bridge
-cp -a /var/lib/brain/runtime/rollback-brain.toml /etc/brain/brain.toml
+cp -a "$BUNDLE/plugin" /root/.hermes/plugins/brain-ceo-bridge
+install -m 600 "$BUNDLE/brain.toml" /etc/brain/brain.toml
 systemctl restart brain.service
 ```
 
-Then restart the Hermes gateway. Rollback restores the previous Brain and
-plugin; it never touches `/usr/local/lib/hermes-agent`, which is not a
-deployment target.
+Then restart the Hermes gateway and re-run the validation block. Rollback never
+touches `/usr/local/lib/hermes-agent`, which is not a deployment target.
 
-Do not reintroduce the lifecycle writer, a FamaChat credential in Brain, or any
-hook in the CEO plugin as part of a rollback. The rollback target is the commit
-before this window, not the architecture before Amendment 2.
+On the first window there is no earlier post-Amendment-2 bundle, so rollback
+here means re-applying the same bundle correctly — the realistic failure is a
+partial application, such as the plugin copied but the config missed, or a
+restart taken before all three were in place.
+
+### Architectural revert
+
+Returning to the pre-Amendment-2 code, the hooked plugin and a `turn_register`
+principal is not a rollback. It reinstates the turn-correlation spine, the
+lifecycle writer and a FamaChat credential in Brain, and it requires explicit
+authorization. If it is ever done, all three artefacts move together as one
+bundle; restoring the old plugin under the new code, or the reverse, produces a
+system neither version was tested as.

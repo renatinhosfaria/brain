@@ -82,7 +82,7 @@ Removed by Amendment 2: the lifecycle engine plan and the writer/rollout plan. T
 
 ### Stage 5 — Deploy the hook-free CEO plugin
 
-- [ ] Update `/etc/brain/brain.toml` so the `default` principal grants only `conversation_context`, together with the code that stops accepting `turn_register`. Doing this before the deploy breaks the running service; doing it after leaves `hermes_integration_check.py` failing.
+- [ ] Update `/etc/brain/brain.toml` so the `default` principal grants only `conversation_context`. The file is read at startup, so the edit itself changes nothing; the constraint is that code, plugin and config must all be in place before the restart, because whichever is stale at that moment is what fails.
 - [ ] Replace the installed `/root/.hermes/plugins/brain-ceo-bridge` with the hook-free version.
 - [ ] Confirm the gateway loads it and registers exactly one tool and zero hooks.
 - [ ] Run one controlled CTWA and confirm the CEO receives contact-scoped context.

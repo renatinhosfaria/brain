@@ -363,16 +363,20 @@ class TransportService:
         return {"status": "ok", "event_id": envelope.event_id, "duplicate": duplicate}
 
     def apply_retention(self, now: float) -> None:
-        """Enforce section 19 on the path that creates the data it governs.
+        """Enforce section 19: the 24-hour display name and 90-day transport.
 
-        Deliberately not a scheduled job. Until 2026-08-31 this policy lived in
-        a reconciliation loop nothing ever called, so neither limit had ever
-        been applied to production data. Ingestion is the only source of
-        display names and transport events, which makes it the one place the
-        enforcement cannot be silently absent while the data keeps growing.
+        Called from two places, because either alone leaves a gap. Ingestion
+        covers a busy contact and guarantees a pass whenever there is new data
+        to govern; the periodic task in `BrainMCPServer` covers a quiet week,
+        when no event would arrive to trigger anything. Both start on their
+        own, which is the point: until 2026-08-31 this policy lived in a
+        reconciliation loop nothing ever called, so neither limit had ever
+        been applied to production data.
 
         Best-effort and after the durable write: the observer's acknowledgement
-        must never depend on housekeeping, and the next event retries it.
+        must never depend on housekeeping. The throttle advances only after a
+        successful purge, so a failed pass is retried by the next trigger
+        rather than suppressed for an hour.
         """
         if now - self._retention_ran_at < RETENTION_INTERVAL_SECONDS:
             return

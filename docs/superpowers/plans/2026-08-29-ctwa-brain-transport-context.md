@@ -213,6 +213,8 @@ git commit -m "feat: ingest privacy-safe WhatsApp transport events"
 - [x] A display name still inside its 24h window survives.
 - [x] Transport events older than `transport_retention_days` are deleted; newer ones are not.
 - [x] The first ingestion after start runs a pass, so policy is never waiting on a scheduler.
+- [x] The periodic pass purges with no ingestion at all, driven by the real app lifespan.
+- [x] A failed pass does not advance the throttle and is retried by the next trigger.
 - [x] Passes are throttled, so ingestion cost stays bounded.
 - [x] A failing retention pass never fails the ingestion that triggered it.
 
@@ -224,7 +226,7 @@ git commit -m "feat: ingest privacy-safe WhatsApp transport events"
 - [x] `uv run ruff check src tests`
 - [x] `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests`
 
-**Why not a scheduled job:** ingestion is the only source of the data these limits govern, which makes it the one place enforcement cannot be silently absent while the data keeps growing. A cron or startup task can be forgotten, mis-wired, or silently dead — and that is precisely what happened to the previous implementation.
+**Why two triggers:** ingestion is the only source of the data these limits govern, so a pass there can never be absent while the data grows — but it also stops when messages stop, and a quiet week would leave expired data on disk. A periodic pass bound to the app lifespan covers that, and being bound to the lifespan it starts with the service rather than needing a unit somebody must remember to install. A cron or a separate timer can be forgotten, mis-wired, or silently dead, which is precisely what happened to the previous implementation.
 
 ### Task 5: Serve `conversation_context()` scoped to the contact
 
