@@ -53,9 +53,10 @@ Generate each digest interactively with `/root/brain/scripts/brain-token-hash`.
 BRAIN_CONFIG=/etc/brain/brain.toml /root/brain/.venv/bin/brain
 ```
 
-The service listens on `127.0.0.1:8765`, exposes MCP at `/mcp`, private gateway
-routes at `/internal/gateway/conversation-context` and
-`/internal/gateway/turn-register`, and the schema-guarded health endpoint at
+The service listens on `127.0.0.1:8765`, exposes MCP at `/mcp`, the private
+gateway routes `/internal/gateway/conversation-phone` and
+`/internal/gateway/conversation-context`, the private ingestion route
+`/internal/transport/events`, and the schema-guarded health endpoint at
 `/health`.
 
 For an LID, Brain scans only the configured WhatsApp session directory and

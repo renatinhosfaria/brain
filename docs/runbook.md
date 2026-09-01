@@ -219,3 +219,86 @@ Hermes-core rollback do not require reverting the same artifacts.
 
 Never put tokens, Authorization headers, transcript text, phone numbers,
 `chat_id`, `session_key` or database paths in incident notes or logs.
+
+## Amendment 2 deploy window
+
+Brain's code, the installed CEO plugin, and `/etc/brain/brain.toml` must move
+together in one authorized window. They are coupled in both directions:
+
+- changing the config first removes `turn_register` from a running service that
+  still requires it;
+- changing it last leaves `hermes_integration_check.py` failing on a principal
+  the new code no longer accepts.
+
+`git checkout` alone is a deployment here: `brain.service` runs
+`/root/brain/.venv/bin/brain` directly from the working tree, so switching
+branches changes what the next restart executes.
+
+### Before the window
+
+Capture what rollback restores:
+
+```sh
+git rev-parse HEAD > /var/lib/brain/runtime/rollback-brain-head
+cp -a /root/.hermes/plugins/brain-ceo-bridge \
+      /var/lib/brain/runtime/rollback-plugin
+cp -a /etc/brain/brain.toml /var/lib/brain/runtime/rollback-brain.toml
+```
+
+### The window
+
+1. Check out the reviewed commit in `/root/brain`.
+2. Copy `integrations/hermes/brain-ceo-bridge/` over
+   `/root/.hermes/plugins/brain-ceo-bridge/`, replacing every file. A stale
+   `__pycache__` is harmless; a stale source file is not.
+3. Edit `/etc/brain/brain.toml` so `[principals.default]` has
+   `tools = ["conversation_context"]`.
+4. Restart `brain.service`, then the Hermes gateway so the CEO reloads the
+   plugin.
+
+### Validate in the real environment
+
+Every check below must pass against the live system, not a copy:
+
+```sh
+/usr/local/lib/hermes-agent/venv/bin/python -c "import sys; \
+  sys.path.insert(0, '/usr/local/lib/hermes-agent'); \
+  from hermes_cli.plugin_dev import doctor_plugin; \
+  r = doctor_plugin('/root/.hermes/plugins/brain-ceo-bridge'); \
+  print(r.ok, sorted(r.registered_tools), sorted(r.registered_hooks))"
+
+cd /root/brain
+.venv/bin/python scripts/hermes_integration_check.py
+.venv/bin/python scripts/smoke_test.py
+PYTHONPATH=src .venv/bin/python scripts/hermes_integrity.py verify \
+  --repo /usr/local/lib/hermes-agent \
+  --baseline /var/lib/brain/runtime/hermes-integrity-baseline.json
+```
+
+The plugin doctor must report zero hooks. `hermes_integration_check.py` now
+doctors the **installed** plugin as well as the versioned source and fails on
+any byte difference between them, because a plugin that passes in the
+repository while the gateway loads something else is exactly the drift that
+went unnoticed on 2026-08-31.
+
+Finish with one controlled CTWA and confirm the CEO receives contact-scoped
+context from a real inbound.
+
+### Rollback
+
+```sh
+cd /root/brain && git checkout "$(cat /var/lib/brain/runtime/rollback-brain-head)"
+rm -rf /root/.hermes/plugins/brain-ceo-bridge
+cp -a /var/lib/brain/runtime/rollback-plugin \
+      /root/.hermes/plugins/brain-ceo-bridge
+cp -a /var/lib/brain/runtime/rollback-brain.toml /etc/brain/brain.toml
+systemctl restart brain.service
+```
+
+Then restart the Hermes gateway. Rollback restores the previous Brain and
+plugin; it never touches `/usr/local/lib/hermes-agent`, which is not a
+deployment target.
+
+Do not reintroduce the lifecycle writer, a FamaChat credential in Brain, or any
+hook in the CEO plugin as part of a rollback. The rollback target is the commit
+before this window, not the architecture before Amendment 2.

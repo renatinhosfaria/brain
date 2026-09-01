@@ -174,6 +174,11 @@ def main() -> int:
     parser.add_argument(
         "--server-config", type=Path, default=Path("/etc/brain/brain.toml")
     )
+    parser.add_argument(
+        "--installed-plugin",
+        type=Path,
+        default=Path("/root/.hermes/plugins/brain-ceo-bridge"),
+    )
     args = parser.parse_args()
 
     if not args.hermes_root.is_dir():
@@ -338,15 +343,34 @@ def main() -> int:
     plugin_path = Path(__file__).parents[1] / "integrations/hermes/brain-ceo-bridge"
     if not plugin_path.is_dir():
         fail(f"CEO: versioned Brain bridge is missing: {plugin_path}")
-    report = doctor_plugin(plugin_path)
-    if (
-        not report.ok
-        or set(report.registered_tools) != {"conversation_context"}
-        # Amendment 2: zero hooks. A hook reappearing here would put network
-        # I/O back on the turn path, which is the failure of 2026-08-31.
-        or set(report.registered_hooks) != set()
+    # Both copies are checked. Doctoring only the versioned source proves the
+    # repository is correct while the gateway may still be loading something
+    # else entirely: on 2026-08-31 the installed plugin was a version behind
+    # and nothing reported it.
+    for label, path in (
+        ("versioned", plugin_path),
+        ("installed", args.installed_plugin),
     ):
-        fail("CEO: versioned Brain bridge failed Hermes Plugin Doctor")
+        if not path.is_dir():
+            fail(f"CEO: {label} Brain bridge is missing: {path}")
+        report = doctor_plugin(path)
+        if (
+            not report.ok
+            or set(report.registered_tools) != {"conversation_context"}
+            # Amendment 2: zero hooks. A hook reappearing here would put
+            # network I/O back on the turn path, which is the failure of
+            # 2026-08-31.
+            or set(report.registered_hooks) != set()
+        ):
+            fail(f"CEO: {label} Brain bridge failed Hermes Plugin Doctor")
+
+    # A plugin that passes the doctor may still differ from the source that was
+    # reviewed. Drift here is silent and survives restarts, so it is a failure.
+    for name in ("tools.py", "__init__.py", "schemas.py", "plugin.yaml"):
+        versioned = (plugin_path / name).read_bytes()
+        installed_file = args.installed_plugin / name
+        if not installed_file.is_file() or installed_file.read_bytes() != versioned:
+            fail(f"CEO: installed Brain bridge differs from the versioned {name}")
     plugin_source = plugin_path / "tools.py"
     if not plugin_source.is_file() or "get_session_env" not in plugin_source.read_text(
         encoding="utf-8"

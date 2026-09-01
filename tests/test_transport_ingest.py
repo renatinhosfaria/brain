@@ -546,15 +546,13 @@ class RetentionTests(TransportIngestTests):
     def test_a_failing_retention_pass_does_not_fail_ingestion(self) -> None:
         self.service.transport_service._retention_ran_at = 0.0
         original = self.service.runtime.write
-        calls = {"n": 0}
 
-        def flaky(callback):
-            calls["n"] += 1
-            if calls["n"] > 1:
+        def write(callback):
+            if callback.__name__ == "purge":
                 raise sqlite3.OperationalError("retention exploded")
             return original(callback)
 
-        self.service.runtime.write = flaky  # type: ignore[method-assign]
+        self.service.runtime.write = write  # type: ignore[method-assign]
         response = self.post(self.envelope(message_id="durable", body="fica"))
 
         self.assertEqual(response.status_code, 200)
@@ -562,28 +560,54 @@ class RetentionTests(TransportIngestTests):
 
 
 class RetentionRetryTests(TransportIngestTests):
-    def test_a_failed_pass_is_retried_by_the_next_event(self) -> None:
-        """A failure must not suppress the policy for a whole hour."""
-        service = self.service.transport_service
-        service._retention_ran_at = 0.0
-        original = self.service.runtime.write
-        fail_next = {"on": False}
+    """The retention pass must fail alone, and be retried alone."""
 
-        def flaky(callback):
-            if fail_next["on"]:
-                fail_next["on"] = False
+    @staticmethod
+    def _fail_only_the_purge(original, should_fail):
+        """Break the purge without touching the durable write beside it.
+
+        Failing whichever write comes first would break ingestion instead, and
+        the assertions below would then pass for entirely the wrong reason.
+        """
+
+        def write(callback):
+            if callback.__name__ == "purge" and should_fail():
                 raise sqlite3.OperationalError("retention exploded")
             return original(callback)
 
-        # First ingestion: the purge fails, so the throttle must not advance.
-        self.service.runtime.write = flaky  # type: ignore[method-assign]
-        fail_next["on"] = True
-        self.post(self.envelope(message_id="one", body="um"))
+        return write
+
+    def test_a_failed_pass_is_retried_by_the_next_event(self) -> None:
+        service = self.service.transport_service
+        service._retention_ran_at = 0.0
+        broken = {"on": True}
+        self.service.runtime.write = self._fail_only_the_purge(  # type: ignore[method-assign]
+            self.service.runtime.write, lambda: broken["on"]
+        )
+
+        first = self.post(self.envelope(message_id="one", body="um"))
+
+        # The ingestion itself must be untouched, or this proves nothing.
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(len(self.rows("transport_events")), 1)
         self.assertEqual(service._retention_ran_at, 0.0)
 
-        # Second ingestion: the pass runs and now the throttle advances.
-        self.post(self.envelope(message_id="two", body="dois"))
+        broken["on"] = False
+        second = self.post(self.envelope(message_id="two", body="dois"))
+
+        self.assertEqual(second.status_code, 200)
         self.assertGreater(service._retention_ran_at, 0.0)
+
+    def test_a_failed_purge_still_leaves_the_event_durable(self) -> None:
+        self.service.transport_service._retention_ran_at = 0.0
+        self.service.runtime.write = self._fail_only_the_purge(  # type: ignore[method-assign]
+            self.service.runtime.write, lambda: True
+        )
+
+        response = self.post(self.envelope(message_id="durable", body="fica"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.rows("transport_events")), 1)
 
 
 class RetentionLoopTests(TransportIngestTests):

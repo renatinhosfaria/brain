@@ -216,6 +216,8 @@ class DeploymentContractTests(unittest.TestCase):
             "HERMES_SESSION_ID",
             "register_tool",
             "lid-mapping-",
+            "installed_plugin",
+            "differs from the versioned",
         ):
             self.assertIn(required, source)
 
