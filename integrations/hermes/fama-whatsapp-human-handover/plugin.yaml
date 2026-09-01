@@ -1,0 +1,10 @@
+name: fama-whatsapp-human-handover
+version: 1.0.0
+description: "Pause one WhatsApp contact when the owner replies manually and resume only from the CEO admin Telegram."
+author: Fama Negócios Imobiliários
+provides_hooks:
+  - pre_gateway_dispatch
+requires_env:
+  - FAMA_HANDOVER_TELEGRAM_CHAT_ID
+  - FAMA_HANDOVER_TELEGRAM_THREAD_ID
+  - FAMA_HANDOVER_TELEGRAM_USER_ID

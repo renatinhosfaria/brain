@@ -41,9 +41,25 @@
    Do not add it to CEO CLI/Telegram and do not configure the worker Brain MCP
    server in the CEO. Ensure only the CEO has `BRAIN_GATEWAY_TOKEN`. These
    production paths are not modified by this repository task.
-7. Add `docs/worker-history-invariant.md` and
+7. Install `integrations/hermes/fama-whatsapp-human-handover/` as
+   `/root/.hermes/plugins/fama-whatsapp-human-handover`, add the plugin name to
+   the CEO `plugins.enabled` list, and set these values in the CEO `.env`:
+
+   ```dotenv
+   WHATSAPP_FORWARD_OWNER_MESSAGES=true
+   FAMA_HANDOVER_TELEGRAM_CHAT_ID=-1004374717222
+   FAMA_HANDOVER_TELEGRAM_THREAD_ID=1
+   FAMA_HANDOVER_TELEGRAM_USER_ID=8564576789
+   ```
+
+   A manual WhatsApp Business/Web reply pauses only that contact and keeps both
+   sides flowing into the canonical Hermes transcript without an LLM turn.
+   The pause survives restarts. Only the configured administrator, chat and
+   topic may run `/retomar <telefone>`. Resume does not send a WhatsApp message
+   and waits for the customer's next inbound message before the CEO responds.
+8. Add `docs/worker-history-invariant.md` and
    `docs/conversation-identity-invariant.md` to both worker `SOUL.md` files.
-8. Install `deploy/brain.service` as `/etc/systemd/system/brain.service`, run
+9. Install `deploy/brain.service` as `/etc/systemd/system/brain.service`, run
    `systemctl daemon-reload`, then enable and start it.
 
 ## Deployment
@@ -199,7 +215,7 @@ proof of MCP containment; only the resolver check is authoritative.
 
 The checker is read-only: it inspects the public plugin registration API,
 session ContextVars, the state/Kanban schemas, WhatsApp identity mapping, the
-resolver, and both copies of the CEO plugin. It never repairs Hermes or writes
+resolver, and both copies of each CEO plugin. It never repairs Hermes or writes
 its databases. It no longer inspects bridge batching, adapter debounce or
 delivery-ledger states: those contracts belonged to turn correlation and to
 proving the first T1 send, and Amendment 2 removed both.
@@ -223,8 +239,8 @@ hermes update
     --snapshot /var/lib/brain/runtime/staging/pre-update.json
 ```
 
-It watches the CEO plugin's four source files, every Profile's `config.yaml`
-and `SOUL.md`, the CEO's own SOUL and skill, `verify_team.py`, Reno's FamaChat
+It watches both CEO plugins' source files, every Profile's `config.yaml` and
+`SOUL.md`, the CEO's own SOUL and skill, `verify_team.py`, Reno's FamaChat
 allowlist and `/etc/brain/brain.toml`. A moved upstream HEAD is reported as
 expected, together with the reminder that the integrity baseline no longer
 applies; an upstream that did **not** move is reported as a finding, because

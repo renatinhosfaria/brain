@@ -96,6 +96,13 @@ class WatchListTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(f"/root/.hermes/plugins/brain-ceo-bridge/{name}", watched)
 
+        for name in ("__init__.py", "plugin.yaml", "README.md"):
+            with self.subTest(plugin="fama-whatsapp-human-handover", name=name):
+                self.assertIn(
+                    f"/root/.hermes/plugins/fama-whatsapp-human-handover/{name}",
+                    watched,
+                )
+
     def test_brain_config_is_watched(self) -> None:
         self.assertIn(Path("/etc/brain/brain.toml"), guard.WATCHED)
 

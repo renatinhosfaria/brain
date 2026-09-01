@@ -2,7 +2,7 @@
 """Bracket a `hermes update` and say what it moved.
 
 An update is expected to move exactly one thing: the upstream installation at
-`/usr/local/lib/hermes-agent`. Everything Fama owns — the CEO plugin, the
+`/usr/local/lib/hermes-agent`. Everything Fama owns — the CEO plugins, the
 Profile configs and prompts, Brain's own config — must come out the other side
 byte-identical, and the update restarts the gateway on its own, so a change
 there takes effect before anyone looks.
@@ -44,6 +44,10 @@ WATCHED = [
     *[
         HERMES_HOME / "plugins/brain-ceo-bridge" / name
         for name in ("__init__.py", "tools.py", "schemas.py", "plugin.yaml")
+    ],
+    *[
+        HERMES_HOME / "plugins/fama-whatsapp-human-handover" / name
+        for name in ("__init__.py", "plugin.yaml", "README.md")
     ],
     Path("/etc/brain/brain.toml"),
 ]

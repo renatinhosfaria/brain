@@ -28,3 +28,4 @@ where = ["src"]
 # Hermes plugin directories use their manifest slug, which intentionally keeps
 # the hyphen required by native plugin discovery.
 "integrations/hermes/brain-ceo-bridge/*.py" = ["N999"]
+"integrations/hermes/fama-whatsapp-human-handover/*.py" = ["N999"]

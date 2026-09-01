@@ -218,6 +218,11 @@ class DeploymentContractTests(unittest.TestCase):
             "lid-mapping-",
             "installed_plugin",
             "differs from the versioned",
+            "fama-whatsapp-human-handover",
+            "WHATSAPP_FORWARD_OWNER_MESSAGES",
+            "FAMA_HANDOVER_TELEGRAM_CHAT_ID",
+            "installed_handover_plugin",
+            "whatsapp_from_owner",
         ):
             self.assertIn(required, source)
 
@@ -279,6 +284,21 @@ class DeploymentContractTests(unittest.TestCase):
             "do not require reverting",
         ):
             self.assertIn(required, runbook)
+
+    def test_runbook_documents_durable_whatsapp_human_handover(self) -> None:
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+
+        for required in (
+            "fama-whatsapp-human-handover",
+            "WHATSAPP_FORWARD_OWNER_MESSAGES=true",
+            "FAMA_HANDOVER_TELEGRAM_CHAT_ID=-1004374717222",
+            "FAMA_HANDOVER_TELEGRAM_THREAD_ID=1",
+            "FAMA_HANDOVER_TELEGRAM_USER_ID=8564576789",
+            "/retomar <telefone>",
+            "does not send",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, runbook)
 
     def test_the_window_stage_and_the_runbook_agree(self) -> None:
         """A plan and a procedure that disagree let a step fall between them."""

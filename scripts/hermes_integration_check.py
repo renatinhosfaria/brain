@@ -88,18 +88,32 @@ def check_sqlite_schema(path: Path, requirements: dict[str, set[str]]) -> None:
 def check_upstream_contracts(hermes_root: Path) -> None:
     """Verify only the upstream surface Brain actually depends on.
 
-    Amendment 2 left the CEO plugin with one tool and no hooks, so the hook
-    machinery is no longer ours to depend on: `invoke_hook`, the `pre_llm_call`
-    `turn_id` keyword, and the `pre_tool_call` modify/merge contract were all
-    dropped from this check. A compatibility gate that fails on an upstream
-    change which cannot affect us is noise, and noise is how a real signal gets
-    ignored.
+    Amendment 2 left the Brain context plugin with one tool and no hooks. The
+    handover plugin now uses only the public pre-dispatch hook and slash command
+    registrations; the retired turn-correlation hooks remain out of scope.
     """
+    from gateway.run import GatewayRunner
     from gateway.session_context import _VAR_MAP, get_session_env
     from hermes_cli.plugins import PluginContext
 
     if "name" not in inspect.signature(PluginContext.register_tool).parameters:
         fail("Hermes public plugin tool registration API changed")
+    if not {"hook_name", "callback"}.issubset(
+        inspect.signature(PluginContext.register_hook).parameters
+    ) or not {"name", "handler"}.issubset(
+        inspect.signature(PluginContext.register_command).parameters
+    ):
+        fail("Hermes public plugin hook/command registration API changed")
+    interrupt_parameters = inspect.signature(
+        GatewayRunner._interrupt_and_clear_session
+    ).parameters
+    if not {
+        "session_key",
+        "source",
+        "interrupt_reason",
+        "invalidation_reason",
+    }.issubset(interrupt_parameters):
+        fail("Hermes hard-interrupt API changed")
 
     required_context_fields = {
         "HERMES_SESSION_PLATFORM",
@@ -119,6 +133,10 @@ def check_upstream_contracts(hermes_root: Path) -> None:
     # resolution depends on it.
     bridge = hermes_root / "scripts/whatsapp-bridge/bridge.js"
     bridge_source = bridge.read_text(encoding="utf-8")
+    adapter_source = (hermes_root / "plugins/platforms/whatsapp/adapter.py").read_text(
+        encoding="utf-8"
+    )
+    gateway_source = (hermes_root / "gateway/run.py").read_text(encoding="utf-8")
     identity_source = (hermes_root / "gateway/whatsapp_identity.py").read_text(
         encoding="utf-8"
     )
@@ -129,6 +147,27 @@ def check_upstream_contracts(hermes_root: Path) -> None:
         fragment in identity_source for fragment in ("lid-mapping-", "_reverse")
     ):
         fail("Hermes WhatsApp bridge/identity adapter contract changed")
+    if not all(
+        fragment in bridge_source
+        for fragment in (
+            "WHATSAPP_FORWARD_OWNER_MESSAGES",
+            "recentlySentIds",
+            "fromOwner",
+        )
+    ) or not all(
+        fragment in adapter_source
+        for fragment in ("whatsapp_from_owner", "[owner reply] ")
+    ):
+        fail("Hermes WhatsApp owner-message forwarding contract changed")
+    if not all(
+        fragment in gateway_source
+        for fragment in (
+            '"pre_gateway_dispatch"',
+            "gateway=self",
+            'session_store=getattr(self, "session_store", None)',
+        )
+    ):
+        fail("Hermes pre-dispatch handover context changed")
 
     # The delivery ledger was checked because proving the first successful T1
     # send read its states. Nothing derives that fact any more.
@@ -178,6 +217,11 @@ def main() -> int:
         "--installed-plugin",
         type=Path,
         default=Path("/root/.hermes/plugins/brain-ceo-bridge"),
+    )
+    parser.add_argument(
+        "--installed-handover-plugin",
+        type=Path,
+        default=Path("/root/.hermes/plugins/fama-whatsapp-human-handover"),
     )
     args = parser.parse_args()
 
@@ -306,9 +350,10 @@ def main() -> int:
     if len(set(token_digests.values())) != len(workers):
         fail("Brain worker principals must use distinct credentials")
 
-    gateway_token = os.environ.get("BRAIN_GATEWAY_TOKEN") or load_env_file(
-        hermes_home / ".env"
-    ).get("BRAIN_GATEWAY_TOKEN")
+    ceo_env = load_env_file(hermes_home / ".env")
+    gateway_token = os.environ.get("BRAIN_GATEWAY_TOKEN") or ceo_env.get(
+        "BRAIN_GATEWAY_TOKEN"
+    )
     gateway_principal = configured_principals.get("default") or {}
     gateway_tools = set(gateway_principal.get("tools") or [])
     supported_gateway_tools = {
@@ -340,6 +385,22 @@ def main() -> int:
     enabled_plugins = (ceo.get("plugins") or {}).get("enabled") or []
     if "brain-ceo-bridge" not in enabled_plugins:
         fail("CEO: brain-ceo-bridge is not enabled")
+    if "fama-whatsapp-human-handover" not in enabled_plugins:
+        fail("CEO: fama-whatsapp-human-handover is not enabled")
+    if ceo_env.get("WHATSAPP_FORWARD_OWNER_MESSAGES", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        fail("CEO: WHATSAPP_FORWARD_OWNER_MESSAGES is not enabled")
+    for env_name in (
+        "FAMA_HANDOVER_TELEGRAM_CHAT_ID",
+        "FAMA_HANDOVER_TELEGRAM_THREAD_ID",
+        "FAMA_HANDOVER_TELEGRAM_USER_ID",
+    ):
+        if not ceo_env.get(env_name, "").strip():
+            fail(f"CEO: {env_name} is missing")
     plugin_path = Path(__file__).parents[1] / "integrations/hermes/brain-ceo-bridge"
     if not plugin_path.is_dir():
         fail(f"CEO: versioned Brain bridge is missing: {plugin_path}")
@@ -376,6 +437,28 @@ def main() -> int:
         encoding="utf-8"
     ):
         fail("CEO: versioned Brain bridge does not use gateway session context")
+
+    handover_path = (
+        Path(__file__).parents[1] / "integrations/hermes/fama-whatsapp-human-handover"
+    )
+    for label, path in (
+        ("versioned", handover_path),
+        ("installed", args.installed_handover_plugin),
+    ):
+        if not path.is_dir():
+            fail(f"CEO: {label} WhatsApp handover plugin is missing: {path}")
+        report = doctor_plugin(path)
+        if (
+            not report.ok
+            or set(report.registered_tools)
+            or set(report.registered_hooks) != {"pre_gateway_dispatch"}
+        ):
+            fail(f"CEO: {label} WhatsApp handover failed Hermes Plugin Doctor")
+    for name in ("__init__.py", "plugin.yaml", "README.md"):
+        versioned = (handover_path / name).read_bytes()
+        installed_file = args.installed_handover_plugin / name
+        if not installed_file.is_file() or installed_file.read_bytes() != versioned:
+            fail(f"CEO: installed WhatsApp handover differs from versioned {name}")
 
     cli = _get_platform_tools(ceo, "cli", include_default_mcp_servers=True)
     telegram = _get_platform_tools(ceo, "telegram", include_default_mcp_servers=True)
