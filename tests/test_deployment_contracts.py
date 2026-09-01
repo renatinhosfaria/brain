@@ -223,6 +223,7 @@ class DeploymentContractTests(unittest.TestCase):
             "FAMA_HANDOVER_TELEGRAM_CHAT_ID",
             "installed_handover_plugin",
             "whatsapp_from_owner",
+            '"observed"',
         ):
             self.assertIn(required, source)
 

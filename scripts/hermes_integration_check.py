@@ -28,6 +28,8 @@ STATE_SCHEMA = {
         "_compressed_summary",
         "tool_calls",
         "tool_name",
+        "platform_message_id",
+        "observed",
     },
 }
 KANBAN_SCHEMA = {
