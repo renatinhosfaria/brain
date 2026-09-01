@@ -287,20 +287,42 @@ architecture, so `previous` is unset and the artefacts on the machine are not a
 bundle of it. A failure is answered by rolling forward, or by an explicitly
 authorized architectural reversion.
 
-## Required controlled E2E matrix
+## Controlled E2E matrix
 
-```text
-CTWA_ONLY_T0=PASS
-SECOND_CTWA_ATTRIBUTED_NOT_HUMAN=PASS
-JA_E_CLIENTE_CONTRACT=PASS
-CORRETOR_ATIVO_CONTRACT=PASS
-CADASTRO_READBACK_FAIL_STOPS_HANDOFF=PASS
-OBSERVER_REPLAY_DEDUP=PASS
-RETENTION_ACTUALLY_PURGES=PASS
-MANUAL_CRM_STATE_NEVER_DOWNGRADED=PASS
-```
+A list written entirely as `=PASS` reads as a record of results when it is only
+a list of requirements, and this project has been bitten by that shape more
+than once. Each row therefore names its evidence or says plainly that it has
+none.
 
-The last one changed subject with Amendment 2: it now proves that Reno's write carries `expectedStatus` and that FamaChat rejects a stale predicate, which is the whole protection standing between a model and a human's edit. Seven scenarios were dropped because they described lifecycle-engine semantics that no longer exist.
+**Proven in production, 2026-09-01, by one controlled CTWA lead (client 12802)**
+
+| Scenario | Evidence |
+| --- | --- |
+| `CTWA_ONLY_T0` | CTWA captured 09:10:08 (`ctwa_candidate`, instagram); Cadastro created the client 09:13:16, and Reno's later write carried `expectedStatus: "Sem Atendimento"`, which is what proves the state it was created in |
+| `CONVERSATION_CONTEXT_E2E` | 09:10:43, `status: ok`, contact-scoped, no `turn` object, `inbound_kind` null on every event |
+| `CADASTRO_READBACK` | 09:13:10–18: `fc_get_clientes` → `fc_post_clientes` once → `fc_get_clientes_by_id` readback → complete |
+| `RENO_FIRST_HISTORY` | `conversation_recent` called exactly once, 09:14:52, on the first card for the lead |
+| `RENO_CONDITIONAL_STATUS_WRITE` | 09:16:32, `expectedStatus` matching, HTTP 200 — carried unprompted on Reno's first real status write |
+| `MANUAL_CRM_STATE_NEVER_DOWNGRADED` | deliberately stale `expectedStatus` refused with HTTP 409 and `currentStatus: "Em Atendimento"` |
+| `HERMES_ORIGINAL_INTEGRITY` | `BASELINE_VERIFIED` before and after the window |
+| `HERMES_COMPATIBILITY` | checker, smoke test and `verify_team full` all pass against the deployed system |
+| `OBSERVER_COEXISTENCE` | observer connected with an empty outbox across the gateway restart |
+| `RAW_CTWA_CAPTURE` | six `ctwa_candidate` events stored, the newest from this lead |
+
+**Required, and not proven in production**
+
+| Scenario | What it still needs |
+| --- | --- |
+| `RETENTION_ACTUALLY_PURGES` | unit-tested only. Cheap to close: client 12802's `display_name` expires 24h after 09:13, so reading `contact_ephemera` after 2026-09-02 09:13 settles it without staging anything |
+| `OBSERVER_REPLAY_DEDUP` | unit-tested only. Closed by restarting the observer with a non-empty spool and confirming no event duplicates |
+| `SECOND_CTWA_ATTRIBUTED_NOT_HUMAN` | a second ad click from the same contact, which must stay transport evidence and never read as a reply |
+| `JA_E_CLIENTE_CONTRACT` | a contact already registered in FamaChat |
+| `CORRETOR_ATIVO_CONTRACT` | a lead already assigned to an active broker |
+| `CADASTRO_READBACK_FAIL_STOPS_HANDOFF` | a failed readback, which must stop the handoff to Reno rather than pass an unverified client id |
+
+The four contract scenarios need staged leads and are the expensive half. Until
+they are run they are open requirements, not passing gates, and writing them any
+other way would repeat the failure this table was rewritten to avoid.
 
 ## Final Gate
 
