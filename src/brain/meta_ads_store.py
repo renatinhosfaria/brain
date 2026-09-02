@@ -122,12 +122,25 @@ class MetaAdsStore:
                     now,
                 ),
             )
+            deferred_until = conn.execute(
+                "SELECT MAX(next_attempt_at) FROM meta_attribution_jobs "
+                "WHERE account_id = ? AND last_error_code = 'meta_auth_unavailable' "
+                "AND next_attempt_at > ?",
+                (self.account_id, now),
+            ).fetchone()[0]
+            next_attempt_at = max(now, float(deferred_until or now))
             conn.execute(
                 "INSERT INTO meta_attribution_jobs "
                 "(account_id, source_id, attempt_count, next_attempt_at, created_at, updated_at) "
                 "VALUES (?, ?, 0, ?, ?, ?) "
                 "ON CONFLICT(account_id, source_id) DO NOTHING",
-                (self.account_id, observed.source_id, now, now, now),
+                (
+                    self.account_id,
+                    observed.source_id,
+                    next_attempt_at,
+                    now,
+                    now,
+                ),
             )
         view = self.context_for_event(conn, event_id)
         assert view is not None
@@ -205,9 +218,25 @@ class MetaAdsStore:
         if job is None:
             return False
         attempt_count = int(job["attempt_count"])
-        delay = RETRY_DELAYS_SECONDS[min(attempt_count, len(RETRY_DELAYS_SECONDS) - 1)]
         if error_code == "meta_auth_unavailable":
-            delay = max(delay, AUTH_CIRCUIT_SECONDS)
+            updated = conn.execute(
+                "UPDATE meta_attribution_jobs SET attempt_count = ?, updated_at = ? "
+                "WHERE account_id = ? AND source_id = ? AND lease_token = ? "
+                "AND lease_until > ?",
+                (
+                    attempt_count + 1,
+                    now,
+                    self.account_id,
+                    source_id,
+                    lease_token,
+                    now,
+                ),
+            ).rowcount
+            if updated != 1:
+                return False
+            self.defer_auth_circuit(conn, now, retry_after_seconds=retry_after_seconds)
+            return True
+        delay = RETRY_DELAYS_SECONDS[min(attempt_count, len(RETRY_DELAYS_SECONDS) - 1)]
         normal_delay = min(86_400.0, max(0.0, delay + jitter_seconds))
         delay = (
             retry_after_seconds
@@ -239,18 +268,88 @@ class MetaAdsStore:
         )
         return True
 
+    def defer_auth_circuit(
+        self,
+        conn: sqlite3.Connection,
+        now: float,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> float:
+        """Durably defer every account job after authentication becomes unavailable."""
+        now = _finite(now, "now")
+        if retry_after_seconds is not None:
+            retry_after_seconds = _finite(retry_after_seconds, "retry_after_seconds")
+            if retry_after_seconds < 0:
+                raise ValueError("retry_after_seconds must not be negative")
+        requested_until = now + max(AUTH_CIRCUIT_SECONDS, retry_after_seconds or 0.0)
+        existing_until = conn.execute(
+            "SELECT MAX(next_attempt_at) FROM meta_attribution_jobs "
+            "WHERE account_id = ? AND last_error_code = 'meta_auth_unavailable' "
+            "AND next_attempt_at > ?",
+            (self.account_id, now),
+        ).fetchone()[0]
+        circuit_until = max(requested_until, float(existing_until or requested_until))
+        conn.execute(
+            "UPDATE meta_attribution_jobs SET next_attempt_at = CASE "
+            "WHEN next_attempt_at > ? THEN next_attempt_at ELSE ? END, "
+            "lease_until = NULL, lease_token = NULL, "
+            "last_error_code = 'meta_auth_unavailable', updated_at = ? "
+            "WHERE account_id = ?",
+            (circuit_until, circuit_until, now, self.account_id),
+        )
+        conn.execute(
+            "UPDATE ctwa_meta_attributions SET last_error_code = 'meta_auth_unavailable', "
+            "updated_at = ? WHERE account_id = ? AND status = 'pending'",
+            (now, self.account_id),
+        )
+        return circuit_until
+
+    def close_auth_circuit(self, conn: sqlite3.Connection, now: float) -> int:
+        """Make auth-deferred jobs eligible after an explicit successful probe."""
+        now = _finite(now, "now")
+        return int(
+            conn.execute(
+                "UPDATE meta_attribution_jobs SET next_attempt_at = ?, updated_at = ? "
+                "WHERE account_id = ? AND last_error_code = 'meta_auth_unavailable' "
+                "AND next_attempt_at > ? AND (lease_until IS NULL OR lease_until <= ?)",
+                (now, now, self.account_id, now, now),
+            ).rowcount
+        )
+
+    def auth_circuit_until(self, conn: sqlite3.Connection, now: float) -> float:
+        """Return the active durable account circuit horizon, or ``now``."""
+        now = _finite(now, "now")
+        deferred_until = conn.execute(
+            "SELECT MAX(next_attempt_at) FROM meta_attribution_jobs "
+            "WHERE account_id = ? AND last_error_code = 'meta_auth_unavailable' "
+            "AND next_attempt_at > ?",
+            (self.account_id, now),
+        ).fetchone()[0]
+        return max(now, float(deferred_until or now))
+
     def upsert_record_and_confirm(
         self,
         conn: sqlite3.Connection,
         record: MetaAdRecord,
         *,
         confirmed_at: float,
+        lease_token: str | None = None,
     ) -> int:
         if not isinstance(record, MetaAdRecord):
             raise TypeError("record must be MetaAdRecord")
         if canonical_account_id(record.account_id) != self.account_id:
             raise ValueError("record belongs to another Meta Ads account")
         confirmed_at = _finite(confirmed_at, "confirmed_at")
+        if lease_token is not None:
+            if not isinstance(lease_token, str) or not lease_token:
+                raise ValueError("lease_token is required when provided")
+            owned = conn.execute(
+                "SELECT 1 FROM meta_attribution_jobs WHERE account_id = ? "
+                "AND source_id = ? AND lease_token = ? AND lease_until > ?",
+                (self.account_id, record.ad_id, lease_token, confirmed_at),
+            ).fetchone()
+            if owned is None:
+                return 0
         conn.execute(
             "INSERT INTO meta_ads_catalog "
             "(account_id, ad_id, ad_name, ad_status, ad_effective_status, adset_id, "
@@ -285,11 +384,39 @@ class MetaAdsStore:
                 record.fetched_at,
             ),
         )
+        if lease_token is None:
+            confirmed = conn.execute(
+                "UPDATE ctwa_meta_attributions SET status = 'confirmed', matched_ad_id = ?, "
+                "match_method = 'source_id_exact', metadata_complete = ?, confirmed_at = ?, "
+                "last_error_code = NULL, updated_at = ? "
+                "WHERE account_id = ? AND source_id = ? AND status = 'pending' "
+                "AND NOT EXISTS (SELECT 1 FROM meta_attribution_jobs WHERE account_id = ? "
+                "AND source_id = ? AND lease_until > ?)",
+                (
+                    record.ad_id,
+                    int(record.metadata_complete),
+                    confirmed_at,
+                    confirmed_at,
+                    self.account_id,
+                    record.ad_id,
+                    self.account_id,
+                    record.ad_id,
+                    confirmed_at,
+                ),
+            ).rowcount
+            conn.execute(
+                "DELETE FROM meta_attribution_jobs WHERE account_id = ? AND source_id = ? "
+                "AND (lease_until IS NULL OR lease_until <= ?)",
+                (self.account_id, record.ad_id, confirmed_at),
+            )
+            return int(confirmed)
         confirmed = conn.execute(
             "UPDATE ctwa_meta_attributions SET status = 'confirmed', matched_ad_id = ?, "
             "match_method = 'source_id_exact', metadata_complete = ?, confirmed_at = ?, "
             "last_error_code = NULL, updated_at = ? "
-            "WHERE account_id = ? AND source_id = ? AND status = 'pending'",
+            "WHERE account_id = ? AND source_id = ? AND status = 'pending' "
+            "AND EXISTS (SELECT 1 FROM meta_attribution_jobs WHERE account_id = ? "
+            "AND source_id = ? AND lease_token = ? AND lease_until > ?)",
             (
                 record.ad_id,
                 int(record.metadata_complete),
@@ -297,12 +424,18 @@ class MetaAdsStore:
                 confirmed_at,
                 self.account_id,
                 record.ad_id,
+                self.account_id,
+                record.ad_id,
+                lease_token,
+                confirmed_at,
             ),
         ).rowcount
-        conn.execute(
-            "DELETE FROM meta_attribution_jobs WHERE account_id = ? AND source_id = ?",
-            (self.account_id, record.ad_id),
-        )
+        if confirmed:
+            conn.execute(
+                "DELETE FROM meta_attribution_jobs WHERE account_id = ? AND source_id = ? "
+                "AND lease_token = ? AND lease_until > ?",
+                (self.account_id, record.ad_id, lease_token, confirmed_at),
+            )
         return int(confirmed)
 
     def context_for_event(

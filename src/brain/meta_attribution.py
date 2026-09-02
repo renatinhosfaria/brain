@@ -8,6 +8,8 @@ short transaction stores its outcome.
 from __future__ import annotations
 
 import sqlite3
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .config import BrainSettings
@@ -51,11 +53,14 @@ class MetaAttributionService:
         runtime: RuntimeDatabase,
         store: MetaAdsStore,
         client: MetaAdsClient,
+        *,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._runtime = runtime
         self._store = store
         self._client = client
+        self._monotonic_clock = monotonic_clock
         self._account_id = (
             canonical_account_id(settings.meta_ad_account_id)
             if settings.meta_attribution_enabled
@@ -106,6 +111,7 @@ class MetaAttributionService:
                 lease_token,
                 retry_after_seconds=AUTH_CIRCUIT_SECONDS,
             )
+            self._refresh_auth_circuit(now)
             return False
         if now < self._auth_circuit_until:
             self._fail_claimed_job(
@@ -115,36 +121,50 @@ class MetaAttributionService:
                 lease_token,
                 retry_after_seconds=self._auth_circuit_until - now,
             )
+            self._refresh_auth_circuit(now)
             return False
 
+        request_started = self._monotonic_clock()
         try:
             record = self._client.get_ad(source_id, now)
             if record is None:
                 raise MetaAdsError("meta_not_found")
             self._validate_confirmation(source_id, record)
         except MetaAdsError as exc:
+            completed_at = self._completed_at(now, request_started)
             if exc.code == "meta_auth_unavailable":
                 self._auth_circuit_until = max(
-                    self._auth_circuit_until, now + AUTH_CIRCUIT_SECONDS
+                    self._auth_circuit_until, completed_at + AUTH_CIRCUIT_SECONDS
                 )
             self._fail_claimed_job(
                 source_id,
-                now,
+                completed_at,
                 exc.code,
                 lease_token,
                 retry_after_seconds=exc.retry_after_seconds,
             )
+            if exc.code == "meta_auth_unavailable":
+                self._refresh_auth_circuit(completed_at)
             return False
         except (TypeError, ValueError):
-            self._fail_claimed_job(source_id, now, "meta_invalid_response", lease_token)
+            self._fail_claimed_job(
+                source_id,
+                self._completed_at(now, request_started),
+                "meta_invalid_response",
+                lease_token,
+            )
             return False
 
-        self._runtime.write(
+        completed_at = self._completed_at(now, request_started)
+        confirmed = self._runtime.write(
             lambda conn: self._store.upsert_record_and_confirm(
-                conn, record, confirmed_at=now
+                conn,
+                record,
+                confirmed_at=completed_at,
+                lease_token=lease_token,
             )
         )
-        return True
+        return bool(confirmed)
 
     def resolve_contact_pending(self, event_id: str, now: float) -> bool:
         """Attempt the shared job for a single pending context event."""
@@ -176,11 +196,10 @@ class MetaAttributionService:
             capabilities = self._client.probe()
         except MetaAdsError as exc:
             if exc.code == "meta_auth_unavailable":
-                self._auth_circuit_until = max(
-                    self._auth_circuit_until, now + AUTH_CIRCUIT_SECONDS
-                )
+                self._open_auth_circuit(now, exc.retry_after_seconds)
             self._probe_succeeded = False
             return None
+        self._runtime.write(lambda conn: self._store.close_auth_circuit(conn, now))
         self._probe_succeeded = True
         self._auth_circuit_until = 0.0
         return capabilities
@@ -199,9 +218,7 @@ class MetaAttributionService:
                 self._validate_confirmation(record.ad_id, record)
         except MetaAdsError as exc:
             if exc.code == "meta_auth_unavailable":
-                self._auth_circuit_until = max(
-                    self._auth_circuit_until, now + AUTH_CIRCUIT_SECONDS
-                )
+                self._open_auth_circuit(now, exc.retry_after_seconds)
             return 0
         except (TypeError, ValueError):
             return 0
@@ -273,6 +290,25 @@ class MetaAttributionService:
         if expiry is not None and expiry - now <= _EXPIRING_CREDENTIAL_SECONDS:
             return "expiring"
         return "valid"
+
+    def _completed_at(self, started_at: float, request_started: float) -> float:
+        return started_at + max(0.0, self._monotonic_clock() - request_started)
+
+    def _open_auth_circuit(
+        self, now: float, retry_after_seconds: float | None = None
+    ) -> None:
+        circuit_until = self._runtime.write(
+            lambda conn: self._store.defer_auth_circuit(
+                conn, now, retry_after_seconds=retry_after_seconds
+            )
+        )
+        self._auth_circuit_until = max(self._auth_circuit_until, circuit_until)
+
+    def _refresh_auth_circuit(self, now: float) -> None:
+        self._auth_circuit_until = max(
+            self._auth_circuit_until,
+            self._runtime.read(lambda conn: self._store.auth_circuit_until(conn, now)),
+        )
 
     def _fail_claimed_job(
         self,

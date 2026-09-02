@@ -316,7 +316,8 @@ class MetaAttributionServiceTests(unittest.TestCase):
         assert view is not None
         self.assertEqual(view.record.ad_id, SOURCE_ID)
         self.assertEqual(view.record.ad_name, "Renamed ad")
-        self.assertEqual(view.confirmed_at, 101.0)
+        self.assertGreaterEqual(view.confirmed_at, 101.0)
+        self.assertLess(view.confirmed_at, 102.0)
 
     def test_concurrent_resolvers_make_one_network_call_for_one_lease(self) -> None:
         """Removing the durable claim would duplicate a remote lookup under contention."""
@@ -358,6 +359,95 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertFalse(second.is_alive())
         self.assertEqual(sorted(results), [False, True])
         self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
+
+    def test_late_lookup_loses_the_expired_lease_without_confirmation(self) -> None:
+        """A response after the lease expiry must not defeat a newer resolver."""
+        self.runtime.write(lambda conn: self._event(conn, "waevt_late"))
+        clock_values = iter((0.0, 31.0))
+        service = MetaAttributionService(
+            self._settings(),
+            self.runtime,
+            self.store,
+            self.client,
+            monotonic_clock=lambda: next(clock_values),
+        )
+        self.runtime.write(
+            lambda conn: service.stage_event(
+                conn,
+                event_id="waevt_late",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+
+        def late_lookup(source_id: str, now: float) -> MetaAdRecord:
+            self.client.calls.append(("get_ad", source_id))
+            replacement = self.runtime.write(
+                lambda conn: self.store.claim_job(
+                    conn, source_id, now=131.0, lease_seconds=30.0
+                )
+            )
+            self.assertIsInstance(replacement, str)
+            return self.record
+
+        self.client.get_ad = late_lookup  # type: ignore[method-assign]
+
+        self.assertFalse(service.resolve_source(SOURCE_ID, now=100.0))
+
+        state = self.runtime.read(
+            lambda conn: (
+                self.store.context_for_event(conn, "waevt_late").status,
+                conn.execute("SELECT COUNT(*) FROM meta_ads_catalog").fetchone()[0],
+                conn.execute(
+                    "SELECT lease_until FROM meta_attribution_jobs WHERE source_id = ?",
+                    (SOURCE_ID,),
+                ).fetchone()[0],
+            )
+        )
+        self.assertEqual(state, ("pending", 0, 161.0))
+
+    def test_restart_preserves_auth_circuit_for_pending_jobs(self) -> None:
+        """Restarting during auth backoff must not immediately call Meta again."""
+        self.client.get_error = MetaAdsError("meta_auth_unavailable")
+        self.runtime.write(lambda conn: self._event(conn, "waevt_circuit_restart"))
+        self.runtime.write(
+            lambda conn: self.service.stage_event(
+                conn,
+                event_id="waevt_circuit_restart",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+        self.assertFalse(self.service.resolve_source(SOURCE_ID, now=100.0))
+        restarted = MetaAttributionService(
+            self._settings(), self.runtime, self.store, self.client
+        )
+
+        self.assertEqual(restarted.run_due_jobs(now=101.0), 0)
+
+        self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
+
+    def test_successful_probe_closes_the_durable_auth_circuit(self) -> None:
+        """A rotated credential must release pending jobs, even for a later worker."""
+        self.client.get_error = MetaAdsError("meta_auth_unavailable")
+        self.runtime.write(lambda conn: self._event(conn, "waevt_circuit_closed"))
+        self.runtime.write(
+            lambda conn: self.service.stage_event(
+                conn,
+                event_id="waevt_circuit_closed",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+        self.assertFalse(self.service.resolve_source(SOURCE_ID, now=100.0))
+        self.client.get_error = None
+
+        self.assertIsNotNone(self.service.probe(now=101.0))
+        restarted = MetaAttributionService(
+            self._settings(), self.runtime, self.store, self.client
+        )
+
+        self.assertEqual(restarted.run_due_jobs(now=101.0), 1)
 
     def test_restart_recovers_an_expired_lease_and_runs_the_due_job(self) -> None:
         """A process restart must not strand attribution behind an old worker lease."""
@@ -436,7 +526,9 @@ class MetaAttributionServiceTests(unittest.TestCase):
 
     def test_every_bounded_meta_error_keeps_the_event_pending(self) -> None:
         """Changing any remote error into confirmation would invent lead provenance."""
-        for index, code in enumerate(sorted(META_ERROR_CODES), start=10):
+        error_codes = sorted(META_ERROR_CODES - {"meta_auth_unavailable"})
+        error_codes.append("meta_auth_unavailable")
+        for index, code in enumerate(error_codes, start=10):
             with self.subTest(code=code):
                 source_id = f"1202000000000{index:02d}"
                 client = _FakeMetaAdsClient(self.record)
@@ -481,7 +573,8 @@ class MetaAttributionServiceTests(unittest.TestCase):
                             (ACCOUNT_ID, source_id),
                         ).fetchone()[0]
                     )
-                    self.assertEqual(scheduled, 700.0)
+                    self.assertGreaterEqual(scheduled, 700.0)
+                    self.assertLess(scheduled, 701.0)
 
     def test_wrong_ad_id_from_client_never_confirms_a_source(self) -> None:
         """A client regression that returns a neighbouring ad ID must remain pending."""
