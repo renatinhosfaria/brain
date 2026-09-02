@@ -485,6 +485,22 @@ class TransportIngestTests(unittest.TestCase):
     def test_invalid_json_is_rejected(self) -> None:
         self.assertEqual(self.post(b"{not-json").status_code, 400)
 
+    def test_deeply_nested_json_is_rejected_at_the_http_boundary(self) -> None:
+        body = b"[" * 1_100 + b"0" + b"]" * 1_100
+
+        response = self.post(body)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rows("transport_events"), [])
+
+    def test_json_integer_past_python_limit_is_rejected_at_the_http_boundary(self) -> None:
+        body = b'{"value":' + b"1" * 5_000 + b"}"
+
+        response = self.post(body)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rows("transport_events"), [])
+
     def test_non_dict_json_is_rejected(self) -> None:
         self.assertEqual(self.post(["not", "an", "object"]).status_code, 400)
 
