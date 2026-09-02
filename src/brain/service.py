@@ -11,7 +11,7 @@ import os
 import sqlite3
 import time
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -75,6 +75,8 @@ class Health:
     gateway_bridge: str
     schema: str
     hermes_compatibility: str
+    meta_ads_attribution: str = "disabled"
+    meta_ads_credential: str = "missing"
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -86,12 +88,17 @@ class Health:
             "gateway_bridge": self.gateway_bridge,
             "schema": self.schema,
             "hermes_compatibility": self.hermes_compatibility,
+            "meta_ads_attribution": self.meta_ads_attribution,
+            "meta_ads_credential": self.meta_ads_credential,
         }
 
 
 class BrainService:
-    def __init__(self, settings: BrainSettings) -> None:
+    def __init__(
+        self, settings: BrainSettings, *, clock: Callable[[], float] = time.time
+    ) -> None:
         self.settings = settings
+        self._clock = clock
         self.state = ReadOnlyDatabase(
             settings.state_db,
             retries=settings.busy_retries,
@@ -137,6 +144,11 @@ class BrainService:
         gateway_ok = self._gateway_bridge_configured()
         runtime_ok = self._runtime_compatible()
         compatibility_ok = schema_ok and gateway_ok
+        meta_health = (
+            self.meta_attribution.health(self._clock())
+            if self.meta_attribution is not None
+            else None
+        )
         return Health(
             status=(
                 "ok"
@@ -150,6 +162,12 @@ class BrainService:
             gateway_bridge="configured" if gateway_ok else "unconfigured",
             schema="compatible" if schema_ok else "incompatible",
             hermes_compatibility=("compatible" if compatibility_ok else "incompatible"),
+            meta_ads_attribution=(
+                meta_health.status if meta_health is not None else "disabled"
+            ),
+            meta_ads_credential=(
+                meta_health.credential_status if meta_health is not None else "missing"
+            ),
         )
 
     def _identity_directory_compatible(self) -> bool:

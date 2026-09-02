@@ -560,19 +560,21 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self,
     ) -> None:
         """Health must warn about credential lifecycle without exposing a lead or ad."""
-        expiring = MetaAttributionService(
-            self._settings(meta_ads_mcp_token_expires_at=100.0 + 14 * 86_400),
-            self.runtime,
-            self.store,
-            self.client,
-        )
+        for days in (14, 7, 3):
+            with self.subTest(days=days):
+                expiring = MetaAttributionService(
+                    self._settings(meta_ads_mcp_token_expires_at=100.0 + days * 86_400),
+                    self.runtime,
+                    self.store,
+                    self.client,
+                )
 
-        health = expiring.health(100.0)
+                health = expiring.health(100.0)
 
-        self.assertEqual(health.status, "degraded")
-        self.assertEqual(health.credential_status, "expiring")
-        self.assertNotIn(SOURCE_ID, repr(health))
-        self.assertNotIn("Lead ad", repr(health))
+                self.assertEqual(health.status, "degraded")
+                self.assertEqual(health.credential_status, "expiring")
+                self.assertNotIn(SOURCE_ID, repr(health))
+                self.assertNotIn("Lead ad", repr(health))
 
     def test_missing_credential_reschedules_without_a_meta_call(self) -> None:
         """A known missing token must leave the lead pending without calling Meta."""
