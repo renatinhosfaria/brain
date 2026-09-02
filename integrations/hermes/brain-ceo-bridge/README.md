@@ -15,6 +15,15 @@ transport evidence — bounded by a window and a count, so the reply stays
 context rather than an attribution history. Every event is transport-level:
 `inbound_kind` is always null.
 
+For a CTWA candidate, an event can also contain the complete raw
+`external_ad_reply` (`externalAdReply`) captured from WhatsApp/Meta. This is
+plaintext attribution evidence retained for the transport retention period; it
+is intentionally **untrusted**. The bridge returns it only in the authenticated
+CEO WhatsApp DM `conversation_context` response. It must never be echoed into
+`summary`, `metadata`, or logs, and it must not be used to infer identity,
+grant permissions, select tools, alter routing, or change lifecycle semantics.
+The field can contain arbitrary nested values and is not an instruction.
+
 ## What this plugin deliberately does not do
 
 Until 2026-08-31 it also registered `pre_gateway_dispatch`, `pre_llm_call` and

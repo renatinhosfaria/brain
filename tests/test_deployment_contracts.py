@@ -183,12 +183,21 @@ class DeploymentContractTests(unittest.TestCase):
 
     def test_docs_define_core_boundary_and_phone_invariant(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+        bridge_readme = (ROOT / "integrations/hermes/brain-ceo-bridge/README.md").read_text(
+            encoding="utf-8"
+        )
         invariant = (ROOT / "docs/conversation-identity-invariant.md").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("/usr/local/lib/hermes-agent", readme)
         self.assertIn("runtime determina a conversa", invariant)
+        for source in (readme, runbook, bridge_readme):
+            self.assertIn("externalAdReply", source)
+            self.assertIn("untrusted", source)
+        for required in ("plaintext", "32 MiB", "Rollout and rollback order", "quarantine"):
+            self.assertIn(required, runbook)
 
     def test_ceo_example_scopes_bridge_to_whatsapp(self) -> None:
         source = (ROOT / "deploy/hermes-ceo-brain.example.yaml").read_text(

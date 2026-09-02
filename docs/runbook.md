@@ -62,6 +62,73 @@
 9. Install `deploy/brain.service` as `/etc/systemd/system/brain.service`, run
    `systemctl daemon-reload`, then enable and start it.
 
+## Amendment 3: raw CTWA attribution rollout (2026-09-02)
+
+Raw `externalAdReply` is retained as plaintext attribution evidence for the
+transport retention period and is returned only through the authenticated CEO
+WhatsApp DM context. It remains untrusted data and never changes transport or
+lifecycle semantics by itself. This supersedes only earlier privacy language
+that prohibited storing the complete `externalAdReply`; it does not revise
+historical evidence, the identity boundary, or the observer's receive-only
+role.
+
+The raw field is captured only for CTWA candidates and is exposed as
+`events[].external_ad_reply` by `conversation_context`. It is not a Meta Ads
+Manager integration: campaign lookup, reporting, enrichment, and any control
+plane action in Meta Ads remain out of scope.
+
+### Settings and storage handling
+
+Set the observer limits in `/etc/brain/whatsapp-observer.env`, owned by root
+and mode `0600`:
+
+```dotenv
+BRAIN_CTWA_RAW_MAX_BYTES=4194304
+BRAIN_CTWA_RAW_MAX_DEPTH=32
+BRAIN_CTWA_RAW_MAX_NODES=10000
+BRAIN_CTWA_QUARANTINE_MAX_BYTES=33554432
+```
+
+The runtime database and observer spool now hold plaintext attribution
+evidence. Keep `/var/lib/brain/runtime` and
+`/var/lib/brain/whatsapp-observer` private (`0700` directories, database and
+environment files `0600`), do not copy their contents into tickets, command
+output, or logs, and do not use a filesystem backup that broadens access
+without an approved retention and access-control review. Raw attribution ages
+out with its containing transport event under `transport_retention_days` (90
+days by default).
+
+### Quarantine and complete-response failures
+
+If raw capture violates a byte, depth, node, or canonical-JSON bound, the
+observer must quarantine a content-free failure record (`event_id`, capture
+time, and reason). It may retain the encoded raw object only when the complete
+quarantine record fits the 32 MiB ceiling. Inspect quarantine by event ID,
+timestamp, and reason only; never print, decode, or paste raw content into an
+incident. If quarantine persistence itself fails, record only the fixed reason
+`quarantine_persistence_failed` and alert on the observer health counter.
+
+Do not send a partial CTWA attribution event after a capture failure. A context
+response that exceeds the bridge's 32 MiB complete-response limit, or fails
+raw validation, is `status=unavailable`; do not trim individual raw fields,
+retry with a weakened boundary, or reconstruct attribution from logs.
+
+### Rollout and rollback order
+
+Roll out in this order in one authorized window: (1) validate the reviewed
+Brain source and observer tests, (2) install the matching observer environment
+and Brain configuration, (3) install the matching CEO bridge, (4) restart
+Brain, then the observer, then the Hermes gateway, and (5) verify one
+controlled CTWA flow through `conversation_context` without displaying raw
+content. Ensure the CEO SOUL rule is present before the gateway restart.
+
+For rollback, stop exposure first: remove `brain-context` from the CEO
+WhatsApp toolset or disable `brain-ceo-bridge`, then restart the Hermes gateway.
+Next stop the observer and Brain only if operationally required. Preserve the
+runtime database and quarantine for the normal transport retention period;
+never delete them merely to hide a failure. Re-enable only with a reviewed,
+compatible Brain/observer/bridge bundle and the CEO trust-boundary rule.
+
 ## Deployment
 
 If no cursor secret is configured (`BRAIN_CURSOR_SECRET` or
