@@ -387,6 +387,59 @@ class MetaAdsOAuthTests(unittest.TestCase):
         with self.assertRaisesRegex(OAuthError, "^oauth_credentials_invalid$"):
             self.oauth.load_registration()
 
+    def test_v2_credentials_version_must_be_exactly_one(self) -> None:
+        payload = {
+            "version": 2,
+            "dynamic_client": {
+                "version": 1,
+                "client_id": "dynamic-client-id",
+                "client_secret": None,
+                "registration_access_token": None,
+                "registered_at": 1_700_000_000.0,
+                "expires_at": None,
+                "issuer": META_ADS_MCP_RESOURCE,
+                "resource": META_ADS_MCP_RESOURCE,
+                "redirect_uri": DEFAULT_REDIRECT_URI,
+                "scopes": ["ads_read"],
+            },
+            "credentials": {
+                "version": 99,
+                "client_id": "dynamic-client-id",
+                "client_secret": None,
+                "access_token": "access-token-value",
+                "refresh_token": "refresh-token-value",
+                "access_expires_at": 1_700_003_600.0,
+                "refresh_expires_at": None,
+                "scopes": ["ads_read"],
+                "issuer": META_ADS_MCP_RESOURCE,
+                "resource": META_ADS_MCP_RESOURCE,
+                "created_at": 1_700_000_000.0,
+                "updated_at": 1_700_000_000.0,
+            },
+        }
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(self.key.read_bytes()).encrypt(
+            nonce,
+            json.dumps(payload).encode(),
+            b"brain-meta-ads-oauth-v1",
+        )
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.store.parent, 0o700)
+        self.store.write_bytes(
+            json.dumps(
+                {
+                    "version": 2,
+                    "nonce": base64.urlsafe_b64encode(nonce).decode(),
+                    "ciphertext": base64.urlsafe_b64encode(ciphertext).decode(),
+                }
+            ).encode()
+        )
+        os.chmod(self.store, 0o600)
+        with self.assertRaisesRegex(OAuthError, "^oauth_credentials_invalid$"):
+            self.oauth.load_credentials()
+
     def test_legacy_pre_registered_store_is_rejected(self) -> None:
         self.oauth.save_client_configuration()
         with self.assertRaisesRegex(OAuthError, "^oauth_legacy_store$"):

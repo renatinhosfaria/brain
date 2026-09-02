@@ -804,7 +804,12 @@ class MetaAdsOAuth:
         ciphertext = self._read_private_file(self._store_path, _MAX_ENVELOPE_BYTES)
         outer = _strict_json_object(ciphertext)
         outer_version = outer.get("version")
-        if set(outer) != _ENVELOPE_FIELDS or outer_version not in {1, 2}:
+        if (
+            set(outer) != _ENVELOPE_FIELDS
+            or not isinstance(outer_version, int)
+            or isinstance(outer_version, bool)
+            or outer_version not in {1, 2}
+        ):
             raise TypeError
         nonce = _decode_base64(outer["nonce"])
         encrypted = _decode_base64(outer["ciphertext"])
@@ -818,7 +823,11 @@ class MetaAdsOAuth:
             if payload.get("kind") != "client_configuration":
                 raise ValueError("OAuth legacy envelope payload is invalid")
             return payload
-        if payload.get("version") != 2:
+        if (
+            not isinstance(payload.get("version"), int)
+            or isinstance(payload.get("version"), bool)
+            or payload.get("version") != 2
+        ):
             if payload.get("kind") == "client_configuration":
                 return payload
             raise ValueError("OAuth envelope payload version is invalid")
@@ -1221,7 +1230,11 @@ def _client_configuration_from_mapping(
 def _dynamic_client_from_mapping(payload: object) -> OAuthDynamicClient:
     if not isinstance(payload, Mapping) or set(payload) != _DYNAMIC_CLIENT_FIELDS:
         raise ValueError("OAuth dynamic client fields are invalid")
-    if payload.get("version") != 1:
+    if (
+        not isinstance(payload.get("version"), int)
+        or isinstance(payload.get("version"), bool)
+        or payload.get("version") != 1
+    ):
         raise ValueError("OAuth dynamic client version is invalid")
     scopes_raw = payload.get("scopes")
     if not isinstance(scopes_raw, list) or not all(
@@ -1262,6 +1275,9 @@ def _validate_dynamic_client(client: OAuthDynamicClient) -> None:
 def _credentials_from_mapping(payload: Mapping[str, object]) -> OAuthCredentials:
     if set(payload) != _CREDENTIAL_FIELDS:
         raise ValueError("OAuth credential fields are invalid")
+    version = payload.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        raise ValueError("OAuth credential version is invalid")
     scopes_raw = payload.get("scopes")
     if not isinstance(scopes_raw, list) or not all(
         isinstance(item, str) for item in scopes_raw
