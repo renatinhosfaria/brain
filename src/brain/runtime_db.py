@@ -145,6 +145,13 @@ _SCHEMA = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS meta_attribution_state (
+        account_id TEXT PRIMARY KEY,
+        auth_circuit_until REAL NOT NULL CHECK (auth_circuit_until >= 0),
+        updated_at REAL NOT NULL
+    )
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_meta_attribution_jobs_due
     ON meta_attribution_jobs(next_attempt_at, lease_until)
     """,

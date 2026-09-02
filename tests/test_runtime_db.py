@@ -17,6 +17,7 @@ BUSINESS_TABLES = {
     "meta_ads_catalog",
     "ctwa_meta_attributions",
     "meta_attribution_jobs",
+    "meta_attribution_state",
 }
 
 
@@ -128,6 +129,28 @@ class RuntimeDatabaseTests(unittest.TestCase):
                 "idx_meta_ads_catalog_gc",
             }.issubset(indexes)
         )
+
+    def test_initialize_creates_account_level_meta_attribution_state(self) -> None:
+        """An auth circuit without jobs still needs durable per-account state."""
+        self.initialize()
+
+        columns, sql = self.runtime.read(
+            lambda conn: (
+                {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(meta_attribution_state)")
+                },
+                str(
+                    conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                        "AND name = 'meta_attribution_state'"
+                    ).fetchone()[0]
+                ),
+            )
+        )
+
+        self.assertEqual(columns, {"account_id", "auth_circuit_until", "updated_at"})
+        self.assertIn("PRIMARY KEY", sql)
 
     def test_meta_attribution_schema_rejects_unknown_error_codes(self) -> None:
         """A corrupted error code must not become durable retry state."""

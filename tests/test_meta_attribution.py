@@ -474,6 +474,37 @@ class MetaAttributionServiceTests(unittest.TestCase):
 
         self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
 
+    def test_failed_probe_without_jobs_defers_new_work_after_restart(self) -> None:
+        """An account auth failure must survive even when there were no jobs to defer."""
+        self.client.probe_error = MetaAdsError("meta_auth_unavailable")
+
+        self.assertIsNone(self.service.probe(now=100.0))
+        self.assertEqual(self.client.calls, [("probe", "")])
+
+        restarted = MetaAttributionService(
+            self._settings(), self.runtime, self.store, self.client
+        )
+        self.runtime.write(lambda conn: self._event(conn, "waevt_probe_zero_jobs"))
+        self.runtime.write(
+            lambda conn: restarted.stage_event(
+                conn,
+                event_id="waevt_probe_zero_jobs",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=101.0,
+            )
+        )
+
+        self.assertEqual(restarted.tick(now=101.0), 0)
+
+        state = self.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT auth_circuit_until FROM meta_attribution_state WHERE account_id = ?",
+                (ACCOUNT_ID,),
+            ).fetchone()[0]
+        )
+        self.assertGreaterEqual(state, 3700.0)
+        self.assertEqual(self.client.calls, [("probe", "")])
+
     def test_successful_probe_closes_the_durable_auth_circuit(self) -> None:
         """A rotated credential must release pending jobs, even for a later worker."""
         self.client.get_error = MetaAdsError("meta_auth_unavailable")

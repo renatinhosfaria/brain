@@ -122,13 +122,7 @@ class MetaAdsStore:
                     now,
                 ),
             )
-            deferred_until = conn.execute(
-                "SELECT MAX(next_attempt_at) FROM meta_attribution_jobs "
-                "WHERE account_id = ? AND last_error_code = 'meta_auth_unavailable' "
-                "AND next_attempt_at > ?",
-                (self.account_id, now),
-            ).fetchone()[0]
-            next_attempt_at = max(now, float(deferred_until or now))
+            next_attempt_at = self.auth_circuit_until(conn, now)
             conn.execute(
                 "INSERT INTO meta_attribution_jobs "
                 "(account_id, source_id, attempt_count, next_attempt_at, created_at, updated_at) "
@@ -282,13 +276,29 @@ class MetaAdsStore:
             if retry_after_seconds < 0:
                 raise ValueError("retry_after_seconds must not be negative")
         requested_until = now + max(AUTH_CIRCUIT_SECONDS, retry_after_seconds or 0.0)
-        existing_until = conn.execute(
+        job_until = conn.execute(
             "SELECT MAX(next_attempt_at) FROM meta_attribution_jobs "
             "WHERE account_id = ? AND last_error_code = 'meta_auth_unavailable' "
             "AND next_attempt_at > ?",
             (self.account_id, now),
         ).fetchone()[0]
-        circuit_until = max(requested_until, float(existing_until or requested_until))
+        state = conn.execute(
+            "SELECT auth_circuit_until FROM meta_attribution_state "
+            "WHERE account_id = ?",
+            (self.account_id,),
+        ).fetchone()
+        state_until = now if state is None else float(state["auth_circuit_until"])
+        circuit_until = max(
+            requested_until, float(job_until or requested_until), state_until
+        )
+        conn.execute(
+            "INSERT INTO meta_attribution_state "
+            "(account_id, auth_circuit_until, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET "
+            "auth_circuit_until = excluded.auth_circuit_until, "
+            "updated_at = excluded.updated_at",
+            (self.account_id, circuit_until, now),
+        )
         conn.execute(
             "UPDATE meta_attribution_jobs SET next_attempt_at = CASE "
             "WHEN next_attempt_at > ? THEN next_attempt_at ELSE ? END, "
@@ -307,6 +317,14 @@ class MetaAdsStore:
     def close_auth_circuit(self, conn: sqlite3.Connection, now: float) -> int:
         """Make auth-deferred jobs eligible after an explicit successful probe."""
         now = _finite(now, "now")
+        conn.execute(
+            "INSERT INTO meta_attribution_state "
+            "(account_id, auth_circuit_until, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET "
+            "auth_circuit_until = excluded.auth_circuit_until, "
+            "updated_at = excluded.updated_at",
+            (self.account_id, now, now),
+        )
         return int(
             conn.execute(
                 "UPDATE meta_attribution_jobs SET next_attempt_at = ?, updated_at = ? "
@@ -319,13 +337,19 @@ class MetaAdsStore:
     def auth_circuit_until(self, conn: sqlite3.Connection, now: float) -> float:
         """Return the active durable account circuit horizon, or ``now``."""
         now = _finite(now, "now")
-        deferred_until = conn.execute(
+        job_until = conn.execute(
             "SELECT MAX(next_attempt_at) FROM meta_attribution_jobs "
             "WHERE account_id = ? AND last_error_code = 'meta_auth_unavailable' "
             "AND next_attempt_at > ?",
             (self.account_id, now),
         ).fetchone()[0]
-        return max(now, float(deferred_until or now))
+        state = conn.execute(
+            "SELECT auth_circuit_until FROM meta_attribution_state "
+            "WHERE account_id = ?",
+            (self.account_id,),
+        ).fetchone()
+        state_until = now if state is None else float(state["auth_circuit_until"])
+        return max(now, float(job_until or now), state_until)
 
     def upsert_record_and_confirm(
         self,
