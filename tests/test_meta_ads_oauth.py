@@ -146,6 +146,7 @@ class MetaAdsOAuthTests(unittest.TestCase):
                 oauth.discover()
 
     def test_dynamic_client_validation(self) -> None:
+        mutable_scopes = {"ads_read"}
         client = OAuthDynamicClient(
             client_id="dynamic-client-id",
             client_secret=None,
@@ -155,8 +156,10 @@ class MetaAdsOAuthTests(unittest.TestCase):
             issuer=META_ADS_MCP_RESOURCE,
             resource=META_ADS_MCP_RESOURCE,
             redirect_uri=DEFAULT_REDIRECT_URI,
-            scopes=frozenset({"ads_read"}),
+            scopes=mutable_scopes,
         )
+        self.assertEqual(client.scopes, frozenset({"ads_read"}))
+        mutable_scopes.add("ads_management")
         self.assertEqual(client.scopes, frozenset({"ads_read"}))
         for field, value in (
             ("client_id", "x" * 16_385),

@@ -135,6 +135,11 @@ class OAuthDynamicClient:
     scopes: frozenset[str]
 
     def __post_init__(self) -> None:
+        try:
+            normalized_scopes = frozenset(self.scopes)
+        except (TypeError, ValueError):
+            raise ValueError("OAuth dynamic client is invalid") from None
+        object.__setattr__(self, "scopes", normalized_scopes)
         if (
             not _safe_secret_text(self.client_id)
             or (
