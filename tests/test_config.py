@@ -186,6 +186,50 @@ tools = ["conversation_phone"]
                 context_response_max_bytes=100,
             )
 
+    def test_from_env_rejects_non_integer_raw_attribution_limit_values(self) -> None:
+        config_path = self._write_production_config()
+        for value in ("true", "1.5", " 1", "+1"):
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    {
+                        "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                        "BRAIN_CTWA_RAW_MAX_BYTES": value,
+                    },
+                    clear=True,
+                ),
+                self.assertRaisesRegex(ValueError, "BRAIN_CTWA_RAW_MAX_BYTES"),
+            ):
+                BrainSettings.from_env(config_path)
+
+    def test_from_env_rejects_boolean_and_float_toml_raw_limits(self) -> None:
+        for value in ("true", "1.5"):
+            with self.subTest(value=value):
+                config_path = self.root / f"brain-{value}.toml"
+                config_path.write_text(
+                    f'''[server]
+ctwa_raw_max_bytes = {value}
+
+[principals.default]
+mode = "gateway"
+token_sha256 = "{token_digest("gateway")}"
+tools = ["conversation_phone"]
+''',
+                    encoding="utf-8",
+                )
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32},
+                        clear=True,
+                    ),
+                    self.assertRaisesRegex(
+                        (TypeError, ValueError), "ctwa_raw_max_bytes"
+                    ),
+                ):
+                    BrainSettings.from_env(config_path)
+
     def test_observer_device_ids_default_empty_and_normalize(self) -> None:
         principals = {
             "default": self._principal(

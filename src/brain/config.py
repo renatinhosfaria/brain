@@ -34,6 +34,7 @@ VALID_TOOLS = frozenset(
     }
 )
 _PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_DECIMAL_INTEGER_RE = re.compile(r"^-?[0-9]+$")
 logger = logging.getLogger("brain.config")
 
 
@@ -69,6 +70,21 @@ def _observer_device_ids(server: Mapping[str, object]) -> tuple[str, ...]:
     if isinstance(configured, str):
         return tuple(part.strip() for part in configured.split(",") if part.strip())
     return tuple(str(value).strip() for value in configured if str(value).strip())
+
+
+def _raw_attribution_limit(
+    server: Mapping[str, object], key: str, environment_name: str, default: int
+) -> int:
+    """Read an integer raw-attribution limit without coercing TOML types."""
+    environment_value = os.environ.get(environment_name)
+    if environment_value is not None:
+        if not _DECIMAL_INTEGER_RE.fullmatch(environment_value):
+            raise ValueError(f"{environment_name} must be a decimal integer")
+        return int(environment_value)
+    configured = server.get(key, default)
+    if isinstance(configured, bool) or not isinstance(configured, int):
+        raise TypeError(f"{key} must be an integer")
+    return configured
 
 
 @dataclass(frozen=True)
@@ -312,27 +328,23 @@ class BrainSettings:
                     "BRAIN_MESSAGE_MAX_CHARS", server.get("message_max_chars", 2_000)
                 )
             ),
-            ctwa_raw_max_bytes=int(
-                os.environ.get(
-                    "BRAIN_CTWA_RAW_MAX_BYTES",
-                    server.get("ctwa_raw_max_bytes", 4 * 1024 * 1024),
-                )
+            ctwa_raw_max_bytes=_raw_attribution_limit(
+                server,
+                "ctwa_raw_max_bytes",
+                "BRAIN_CTWA_RAW_MAX_BYTES",
+                4 * 1024 * 1024,
             ),
-            ctwa_raw_max_depth=int(
-                os.environ.get(
-                    "BRAIN_CTWA_RAW_MAX_DEPTH", server.get("ctwa_raw_max_depth", 32)
-                )
+            ctwa_raw_max_depth=_raw_attribution_limit(
+                server, "ctwa_raw_max_depth", "BRAIN_CTWA_RAW_MAX_DEPTH", 32
             ),
-            ctwa_raw_max_nodes=int(
-                os.environ.get(
-                    "BRAIN_CTWA_RAW_MAX_NODES", server.get("ctwa_raw_max_nodes", 10_000)
-                )
+            ctwa_raw_max_nodes=_raw_attribution_limit(
+                server, "ctwa_raw_max_nodes", "BRAIN_CTWA_RAW_MAX_NODES", 10_000
             ),
-            context_response_max_bytes=int(
-                os.environ.get(
-                    "BRAIN_CONTEXT_RESPONSE_MAX_BYTES",
-                    server.get("context_response_max_bytes", 32 * 1024 * 1024),
-                )
+            context_response_max_bytes=_raw_attribution_limit(
+                server,
+                "context_response_max_bytes",
+                "BRAIN_CONTEXT_RESPONSE_MAX_BYTES",
+                32 * 1024 * 1024,
             ),
             busy_retries=int(
                 os.environ.get("BRAIN_BUSY_RETRIES", server.get("busy_retries", 2))
