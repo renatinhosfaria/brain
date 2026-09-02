@@ -9,7 +9,6 @@ tunnel when completing the browser authorization.
 from __future__ import annotations
 
 import argparse
-import getpass
 import os
 import sys
 import time
@@ -31,14 +30,8 @@ from brain.meta_ads_oauth import (
 )
 
 
-def _read_secret(prompt: str) -> str:
-    if sys.stdin.isatty():
-        return getpass.getpass(prompt).strip()
-    return sys.stdin.readline().rstrip("\r\n")
-
-
 def _oauth(args: argparse.Namespace) -> MetaAdsOAuth:
-    return MetaAdsOAuth.from_store(
+    return MetaAdsOAuth.from_store_or_new(
         store_path=args.store_path,
         key_path=args.key_path,
         redirect_uri=DEFAULT_REDIRECT_URI,
@@ -54,24 +47,11 @@ def _create_key(path: Path) -> None:
         raise OAuthError("oauth_credentials_unavailable") from exc
 
 
-def _configure(args: argparse.Namespace) -> int:
-    if os.path.lexists(args.store_path):
-        raise OAuthError("oauth_credentials_unavailable")
-    client_id = _read_secret("Meta app client ID: ")
-    client_secret = _read_secret("Meta app secret (optional): ") or None
-    _create_key(args.key_path)
-    oauth = MetaAdsOAuth(
-        client_id=client_id,
-        client_secret=client_secret,
-        store_path=args.store_path,
-        key_path=args.key_path,
-    )
-    oauth.save_client_configuration()
-    print("OK: Meta Ads OAuth app configuration stored")
-    return 0
-
-
 def _login(args: argparse.Namespace) -> int:
+    # DCR is initiated only by this explicit operator action.  The private key
+    # is provisioned locally; no App ID/App Secret is read from stdin, argv, or
+    # the Brain environment.
+    _create_key(args.key_path)
     oauth = _oauth(args)
     request = oauth.authorization_url()
     print("Open this URL after creating the SSH tunnel:")
@@ -124,7 +104,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--store-path", type=Path, default=DEFAULT_STORE_PATH)
     parser.add_argument("--key-path", type=Path, default=DEFAULT_KEY_PATH)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("configure", "login", "status", "clear", "probe"):
+    for command in ("login", "status", "clear", "probe"):
         commands.add_parser(command)
     return parser
 
@@ -133,13 +113,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return {
-            "configure": _configure,
             "login": _login,
             "status": _status,
             "clear": _clear,
             "probe": _probe,
         }[args.command](args)
-    except (OAuthError, MetaAdsError, ValueError, OSError):
+    except OAuthError as error:
+        # OAuthError is a closed, non-secret vocabulary; exposing only its code
+        # makes the required `clear` action for a legacy envelope actionable.
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 1
+    except (MetaAdsError, ValueError, OSError):
         print("FAIL: Meta Ads OAuth operation failed", file=sys.stderr)
         return 1
 

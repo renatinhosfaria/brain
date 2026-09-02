@@ -145,7 +145,7 @@ tools = ["conversation_phone"]
                 "BRAIN_META_AD_ACCOUNT_ID": "act_1598606388477916",
                 "BRAIN_META_ADS_MCP_AUTH_MODE": "oauth",
                 "BRAIN_META_ADS_OAUTH_STORE": "/var/lib/brain/credentials/custom.enc",
-                "BRAIN_META_ADS_OAUTH_KEY": "/etc/brain/custom.key",
+                "BRAIN_META_ADS_OAUTH_KEY_FILE": "/etc/brain/custom.key",
                 "BRAIN_META_ADS_OAUTH_REDIRECT_URI": "http://127.0.0.1:8766/oauth/callback",
                 "BRAIN_META_ADS_MCP_ACCESS_TOKEN": "legacy-token-must-not-be-used",
             },
@@ -166,6 +166,19 @@ tools = ["conversation_phone"]
             "http://127.0.0.1:8766/oauth/callback",
         )
         self.assertEqual(settings.meta_ads_mcp_access_token, "")
+
+    def test_oauth_key_file_name_is_the_configured_secret_path(self) -> None:
+        config_path = self._write_production_config()
+        with patch.dict(
+            os.environ,
+            {
+                "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                "BRAIN_META_ADS_OAUTH_KEY_FILE": "/etc/brain/dcr.key",
+            },
+            clear=True,
+        ):
+            settings = BrainSettings.from_env(config_path)
+        self.assertEqual(settings.meta_ads_oauth_key_path, Path("/etc/brain/dcr.key"))
 
     def test_oauth_mode_rejects_unknown_modes_and_redirects(self) -> None:
         principals = {

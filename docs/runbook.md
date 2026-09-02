@@ -129,29 +129,35 @@ the rollback; it stops Meta work without deleting raw attribution or tables.
 
 ## Amendment 5: direct OAuth lifecycle (2026-09-02)
 
-OAuth is a local operator flow for the fixed Ads MCP resource and account. It
-requests only `ads_read`; the presence of an optional `ads_mcp_management`
-scope in server metadata does not grant permission to request it automatically.
-Any future elevation must be an explicit, reviewed configuration change. A
-response containing `ads_management` is rejected.
-Do not expose a callback publicly or place app credentials in command
-arguments, environment variables, tickets, logs, or the CEO context.
+OAuth uses the same protocol-level flow as managed remote MCP clients: Brain
+discovers Meta's authorization metadata, registers a public client dynamically
+(DCR), then performs Authorization Code + PKCE. It requests only `ads_read`;
+the presence of optional scopes does not grant permission to request them. A
+response containing `ads_management` is rejected. No Meta app ID or secret is
+configured by the operator.
 
-1. Configure the business-owned Meta app with the exact redirect URI
-   `http://127.0.0.1:8766/oauth/callback`.
-2. Create `/var/lib/brain/credentials` as root-owned mode `0700`; install
+1. Create `/var/lib/brain/credentials` as root-owned mode `0700`; install
    `/etc/brain` and its files as root-only. The `brain.service` unit may write
    only that credentials directory plus the runtime directory.
-3. On the Brain host run `scripts/meta_ads_oauth.py configure`; it prompts for
-   the app ID and optional secret without accepting either in argv. It refuses
-   to replace an existing encrypted envelope; use `clear` first for deliberate
-   reconfiguration.
-4. From the operator workstation create `ssh -N -L 8766:127.0.0.1:8766
-   root@brain-host`, then run `scripts/meta_ads_oauth.py login` on the host and
-   open only its printed authorization URL. The callback is one-shot.
-5. Run `scripts/meta_ads_oauth.py status` and `probe`. Keep attribution
-   disabled until the probe passes. Then set
-   `BRAIN_META_ADS_MCP_AUTH_MODE=oauth` and restart Brain.
+2. Before the first DCR login, remove any envelope created by the old
+   pre-registered flow, even if it is corrupt:
+
+   ```sh
+   /root/brain/.venv/bin/python scripts/meta_ads_oauth.py clear
+   ```
+
+   `clear` removes only the private local envelope; it does not revoke a Meta
+   grant. Do not delete or revoke the old Meta app until the new probe passes.
+3. From the operator workstation create
+   `ssh -N -L 8766:127.0.0.1:8766 root@brain-host`, then run
+   `scripts/meta_ads_oauth.py login` on the Brain host. The command performs
+   discovery and registration automatically, prints only the authorization URL
+   and bounded progress messages, and never accepts credentials in argv or
+   stdin. Open the URL through the tunnel; the callback is one-shot and fixed
+   to `http://127.0.0.1:8766/oauth/callback`.
+4. Run `scripts/meta_ads_oauth.py status` and `probe`. The probe is pinned to
+   account `act_1598606388477916`; keep attribution disabled until it passes.
+   Then set `BRAIN_META_ADS_MCP_AUTH_MODE=oauth` and restart Brain.
 
 The running Brain process detects the atomically replaced credential envelope
 before the next token use and also forces that reload after a `401`; no restart

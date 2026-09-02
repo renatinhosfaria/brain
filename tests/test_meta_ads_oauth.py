@@ -15,7 +15,6 @@ from dataclasses import replace
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -448,9 +447,7 @@ class MetaAdsOAuthTests(unittest.TestCase):
             self.oauth.load_registration()
 
     def test_clear_store_removes_valid_v2_envelope_without_decrypting(self) -> None:
-        oauth = MetaAdsOAuth(
-            client_id=None, store_path=self.store, key_path=self.key
-        )
+        oauth = MetaAdsOAuth(client_id=None, store_path=self.store, key_path=self.key)
         oauth.save_registration(self._dynamic_registration())
         with patch.object(
             MetaAdsOAuth, "_read_key", side_effect=AssertionError("must not decrypt")
@@ -1095,34 +1092,11 @@ class MetaAdsOAuthTests(unittest.TestCase):
                 server.shutdown()
                 worker.join(timeout=2)
 
-    def test_configure_refuses_to_replace_existing_credentials(self) -> None:
-        credentials = OAuthCredentials(
-            client_id="app-client-id",
-            client_secret=None,
-            access_token="access-token-value",
-            refresh_token="refresh-token-value",
-            access_expires_at=1_700_003_600.0,
-            refresh_expires_at=None,
-            scopes=frozenset({"ads_read"}),
-            issuer=META_ADS_MCP_RESOURCE,
-            resource=META_ADS_MCP_RESOURCE,
-            created_at=1_700_000_000.0,
-            updated_at=1_700_000_000.0,
-        )
-        self.oauth.save_credentials(credentials)
+    def test_cli_rejects_legacy_configure_command(self) -> None:
         from scripts import meta_ads_oauth as oauth_cli
 
-        with patch.object(
-            oauth_cli,
-            "_read_secret",
-            side_effect=["app-client-id", ""],
-        ) as read_secret:
-            with self.assertRaisesRegex(OAuthError, "^oauth_credentials_unavailable$"):
-                oauth_cli._configure(
-                    SimpleNamespace(store_path=self.store, key_path=self.key)
-                )
-            read_secret.assert_not_called()
-        self.assertEqual(self.oauth.load_credentials(), credentials)
+        with self.assertRaises(SystemExit):
+            oauth_cli._parser().parse_args(["configure"])
 
     def test_client_configuration_requires_version_one(self) -> None:
         valid = {
