@@ -992,6 +992,22 @@ class RetentionTests(TransportIngestTests):
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["external_ad_reply_raw_json"])
 
+    def test_disabled_retention_does_not_prune_meta_jobs(self) -> None:
+        """A disabled feature must not mutate its durable work queue."""
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO meta_attribution_jobs "
+                "(account_id, source_id, attempt_count, next_attempt_at, created_at, updated_at) "
+                "VALUES (?, ?, 0, ?, ?, ?)",
+                ("1598606388477916", "120200000000001", 1.0, 1.0, 1.0),
+            )
+        )
+        self.service.transport_service._retention_ran_at = 0.0
+
+        self.service.transport_service.apply_retention(time.time())
+
+        self.assertEqual(len(self.rows("meta_attribution_jobs")), 1)
+
     def test_transport_retention_cascades_meta_event_and_prunes_orphaned_work(
         self,
     ) -> None:

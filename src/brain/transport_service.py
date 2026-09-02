@@ -453,13 +453,15 @@ class TransportService:
                 "DELETE FROM transport_events WHERE created_at <= ?",
                 (transport_cutoff,),
             ).rowcount
-            jobs = conn.execute(
-                "DELETE FROM meta_attribution_jobs AS job WHERE NOT EXISTS ("
-                "SELECT 1 FROM ctwa_meta_attributions AS attribution "
-                "WHERE attribution.account_id = job.account_id "
-                "AND attribution.source_id = job.source_id"
-                ")"
-            ).rowcount
+            jobs = 0
+            if self.meta_attribution is not None:
+                jobs = conn.execute(
+                    "DELETE FROM meta_attribution_jobs AS job WHERE NOT EXISTS ("
+                    "SELECT 1 FROM ctwa_meta_attributions AS attribution "
+                    "WHERE attribution.account_id = job.account_id "
+                    "AND attribution.source_id = job.source_id"
+                    ")"
+                ).rowcount
             return names or 0, events or 0, jobs or 0
 
         try:
