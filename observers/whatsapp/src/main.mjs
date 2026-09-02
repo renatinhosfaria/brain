@@ -21,6 +21,7 @@ const RETENTION_SECONDS = 72 * 60 * 60;
 const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_RETRY_MAX_MS = 60_000;
 const DEFAULT_RETRY_ATTEMPTS = 6;
+const DEFAULT_MAINTENANCE_INTERVAL_MS = 60 * 60 * 1_000;
 const DEFAULT_QUARANTINE_MAX_BYTES = 32 * 1024 * 1024;
 
 function requiredText(value, name) {
@@ -106,7 +107,13 @@ export function loadObserverConfig(env = process.env) {
       env.BRAIN_CTWA_RAW_MAX_BYTES ??
         String(DEFAULT_RAW_ATTRIBUTION_LIMITS.maxBytes),
       'BRAIN_CTWA_RAW_MAX_BYTES',
-      { minimum: 1, maximum: quarantineMaxBytes },
+      {
+        minimum: 1,
+        maximum: Math.min(
+          DEFAULT_RAW_ATTRIBUTION_LIMITS.maxBytes,
+          quarantineMaxBytes,
+        ),
+      },
     ),
     maxDepth: integerSetting(
       env.BRAIN_CTWA_RAW_MAX_DEPTH ??
@@ -256,6 +263,8 @@ function validateRuntimeOptions(options) {
     'renderQr',
     'now',
     'sleep',
+    'setIntervalFn',
+    'clearIntervalFn',
   ];
   for (const name of functionNames) {
     if (typeof options[name] !== 'function') {
@@ -315,6 +324,9 @@ export async function runObserver({
   retryMaxMs = DEFAULT_RETRY_MAX_MS,
   retryMaxAttempts = DEFAULT_RETRY_ATTEMPTS,
   reconnectMaxAttempts = DEFAULT_RETRY_ATTEMPTS,
+  maintenanceIntervalMs = DEFAULT_MAINTENANCE_INTERVAL_MS,
+  setIntervalFn = globalThis.setInterval,
+  clearIntervalFn = globalThis.clearInterval,
 }) {
   const options = {
     authState,
@@ -328,6 +340,8 @@ export async function runObserver({
     renderQr,
     sleep,
     spool,
+    setIntervalFn,
+    clearIntervalFn,
   };
   validateRuntimeOptions({
     ...options,
@@ -351,6 +365,11 @@ export async function runObserver({
     reconnectMaxAttempts,
     'reconnectMaxAttempts',
     { minimum: 0, maximum: 100 },
+  );
+  const maintenanceInterval = integerSetting(
+    maintenanceIntervalMs,
+    'maintenanceIntervalMs',
+    { minimum: 1, maximum: RETENTION_SECONDS * 1_000 },
   );
   let checkedRawLimits;
   try {
@@ -384,6 +403,7 @@ export async function runObserver({
   let reconnectAttempts = 0;
   let reconnectPromise = null;
   let retryPromise = null;
+  let maintenanceTimer = null;
   let queue = Promise.resolve();
   let activeMessageCallbacks = 0;
   const messageIdleWaiters = new Set();
@@ -438,7 +458,7 @@ export async function runObserver({
     }
   }
 
-  async function maintainAndDrain() {
+  async function maintain() {
     const current = now();
     if (!Number.isFinite(current) || current <= 0) {
       throw new Error('observer runtime clock is invalid');
@@ -446,6 +466,10 @@ export async function runObserver({
     await spool.expireDisplayNames(current);
     const purged = await spool.purgeOlderThan(current - RETENTION_SECONDS);
     healthState.addPurgedEvents(purged.events);
+  }
+
+  async function maintainAndDrain() {
+    await maintain();
     const eventIds = await spool.list();
     const pending = [];
     for (const eventId of eventIds) {
@@ -558,16 +582,21 @@ export async function runObserver({
           throw quarantineError;
         }
       }
-      await spool.quarantine({
-        event_id: eventId,
-        captured_at: capturedAt,
-        reason: error.code,
-        external_ad_reply_raw: externalAdReplyRaw,
-      });
+      let failureReason = error.code;
+      try {
+        await spool.quarantine({
+          event_id: eventId,
+          captured_at: capturedAt,
+          reason: error.code,
+          external_ad_reply_raw: externalAdReplyRaw,
+        });
+      } catch {
+        failureReason = 'quarantine_persistence_failed';
+      }
       healthState.incrementRawCaptureFailure();
       logFailure('raw_attribution_capture_failed', {
         name: 'RawAttributionError',
-        message: error.code,
+        message: failureReason,
       });
       return;
     }
@@ -726,6 +755,20 @@ export async function runObserver({
     startRetryLoop();
   }
   await connect();
+  maintenanceTimer = setIntervalFn(() => {
+    const task = enqueue(maintain);
+    void task.catch(() => {
+      if (!stopped) {
+        logFailure('periodic_maintenance_failed', {
+          name: 'Error',
+          message: 'maintenance_failed',
+        });
+        healthState.setFatal(true);
+      }
+    });
+    return task;
+  }, maintenanceInterval);
+  maintenanceTimer?.unref?.();
 
   return {
     async close() {
@@ -733,6 +776,10 @@ export async function runObserver({
         return;
       }
       stopped = true;
+      if (maintenanceTimer !== null) {
+        clearIntervalFn(maintenanceTimer);
+        maintenanceTimer = null;
+      }
       cancellation.abort();
       detachSocket();
       socket?.end?.(new Error('observer shutdown'));
@@ -782,6 +829,7 @@ export async function bootstrapObserver(env = process.env) {
     baseUrl: config.brainUrl,
     token: config.observerToken,
     timeoutMs: 10_000,
+    rawLimits: config.rawLimits,
   });
   const healthState = new HealthState({ spool });
   const healthServer = createHealthServer({

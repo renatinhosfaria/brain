@@ -174,6 +174,30 @@ test('request maximum is injectable and reports a non-sensitive error', async ()
   });
 });
 
+test('configured raw attribution limits are enforced before HTTP', async () => {
+  const event = rawSafeEvent('client-configured-raw-limit');
+  event.external_ad_reply_raw.unknownFutureField = 'x'.repeat(256);
+  let requests = 0;
+  const client = new BrainClient({
+    baseUrl: 'http://127.0.0.1:7777',
+    token: TOKEN,
+    timeoutMs: 1_000,
+    fetchImpl: async () => {
+      requests += 1;
+      throw new Error('must not make HTTP request');
+    },
+    rawLimits: { maxBytes: 128, maxDepth: 32, maxNodes: 10_000 },
+  });
+
+  await assert.rejects(client.ingest(event), (error) => {
+    assert.equal(error instanceof TypeError, true);
+    assert.match(error.message, /payload/i);
+    assert.equal(error.message.includes('x'.repeat(128)), false);
+    return true;
+  });
+  assert.equal(requests, 0);
+});
+
 test('invalid raw attribution and missing v2 companions are rejected before HTTP', async () => {
   const event = rawSafeEvent('client-invalid-raw');
   let requests = 0;

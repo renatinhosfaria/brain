@@ -1,4 +1,7 @@
-import { validateEncodedRawAttribution } from './raw-attribution.mjs';
+import {
+  DEFAULT_RAW_ATTRIBUTION_LIMITS,
+  validateEncodedRawAttribution,
+} from './raw-attribution.mjs';
 
 const EVENT_ID = /^waevt_[0-9a-f]{64}$/;
 const ROUTE = '/internal/transport/events';
@@ -60,7 +63,7 @@ function invalidPayload() {
   throw new TypeError('Brain event payload is invalid');
 }
 
-function requestPayload(safeEvent, maximumBytes) {
+function requestPayload(safeEvent, maximumBytes, rawLimits) {
   if (
     safeEvent === null ||
     typeof safeEvent !== 'object' ||
@@ -100,7 +103,7 @@ function requestPayload(safeEvent, maximumBytes) {
       if (rawDescriptor === undefined || !('value' in rawDescriptor)) {
         invalidPayload();
       }
-      validateEncodedRawAttribution(rawDescriptor.value);
+      validateEncodedRawAttribution(rawDescriptor.value, rawLimits);
     } catch {
       invalidPayload();
     }
@@ -143,6 +146,7 @@ export class BrainClient {
   #endpoint;
   #fetch;
   #maxRequestBytes;
+  #rawLimits;
   #timeoutMs;
   #token;
 
@@ -152,6 +156,7 @@ export class BrainClient {
     timeoutMs,
     fetchImpl = globalThis.fetch,
     maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
+    rawLimits = DEFAULT_RAW_ATTRIBUTION_LIMITS,
   }) {
     let parsed;
     try {
@@ -190,15 +195,29 @@ export class BrainClient {
     if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes <= 0) {
       throw new TypeError('Brain request size limit is invalid');
     }
+    try {
+      validateEncodedRawAttribution(null, rawLimits);
+    } catch {
+      throw new TypeError('Brain raw attribution limits are invalid');
+    }
     this.#endpoint = new URL(ROUTE, parsed);
     this.#fetch = fetchImpl;
     this.#maxRequestBytes = maxRequestBytes;
+    this.#rawLimits = {
+      maxBytes: rawLimits.maxBytes,
+      maxDepth: rawLimits.maxDepth,
+      maxNodes: rawLimits.maxNodes,
+    };
     this.#timeoutMs = timeoutMs;
     this.#token = token;
   }
 
   async ingest(safeEvent) {
-    const body = requestPayload(safeEvent, this.#maxRequestBytes);
+    const body = requestPayload(
+      safeEvent,
+      this.#maxRequestBytes,
+      this.#rawLimits,
+    );
     const eventId = safeEvent.event_id;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);

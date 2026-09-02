@@ -197,9 +197,12 @@ function dependencies(overrides = {}) {
       renderQr: overrides.renderQr ?? ((_qr) => calls.push('qr')),
       rawLimits: overrides.rawLimits,
       quarantineMaxBytes: overrides.quarantineMaxBytes,
+      clearIntervalFn: overrides.clearIntervalFn,
+      maintenanceIntervalMs: overrides.maintenanceIntervalMs,
       retryBaseMs: overrides.retryBaseMs ?? 10,
       retryMaxAttempts: overrides.retryMaxAttempts ?? 4,
       retryMaxMs: overrides.retryMaxMs ?? 25,
+      setIntervalFn: overrides.setIntervalFn,
       sleep: overrides.sleep ?? abortableSleep(calls),
       spool,
     },
@@ -578,6 +581,57 @@ test('raw attribution failures are quarantined and do not interrupt a subsequent
   await runtime.close();
 });
 
+test('quarantine persistence failure is non-fatal and does not interrupt the message batch', async () => {
+  const persistenceSecret = 'quarantine-write-secret-must-not-leak';
+  const delivered = [];
+  const spool = memorySpool();
+  spool.quarantine = async () => {
+    throw new Error(persistenceSecret);
+  };
+  const fixture = dependencies({
+    client: {
+      async ingest(event) {
+        delivered.push(structuredClone(event));
+        return { event_id: event.event_id, duplicate: false };
+      },
+    },
+    normalize(message) {
+      if (message.key.id === 'raw-capture-failure') {
+        throw new RawAttributionError('raw_size');
+      }
+      return structuredClone(SAFE_TWO);
+    },
+    spool,
+  });
+  const runtime = await runObserver(fixture.options);
+  const written = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    fixture.sockets.sockets[0].ev.emit('messages.upsert', {
+      messages: [
+        rawMessage({ key: { id: 'raw-capture-failure' } }),
+        rawMessage({ key: { id: 'ordinary-after-quarantine-failure' } }),
+      ],
+    });
+    await runtime.idle();
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.deepEqual(delivered, [SAFE_TWO]);
+  const health = await fixture.options.healthState.snapshot();
+  assert.equal(health.raw_capture_failure_count, 1);
+  assert.notEqual(health.status, 'unavailable');
+  assert.equal(written.join('').includes(persistenceSecret), false);
+  assert.equal(written.join('').includes(RAW_BODY), false);
+  assert.equal(written.join('').includes('quarantine_persistence_failed'), true);
+  await runtime.close();
+});
+
 test('raw attribution that makes quarantine exceed its ceiling stores only technical metadata', async () => {
   const quarantined = [];
   const spool = memorySpool();
@@ -756,6 +810,41 @@ test('startup and reconnect drain safe events oldest-first after expiry and purg
   await runtime.close();
 });
 
+test('healthy runtime runs periodic maintenance and cancels it on close', async () => {
+  const calls = [];
+  const timer = { cleared: false };
+  let maintenanceCallback = null;
+  let scheduledMilliseconds = null;
+  const fixture = dependencies({
+    calls,
+    clearIntervalFn(handle) {
+      assert.strictEqual(handle, timer);
+      handle.cleared = true;
+    },
+    setIntervalFn(callback, milliseconds) {
+      maintenanceCallback = callback;
+      scheduledMilliseconds = milliseconds;
+      return timer;
+    },
+  });
+  const runtime = await runObserver(fixture.options);
+  calls.length = 0;
+
+  assert.equal(typeof maintenanceCallback, 'function');
+  assert.equal(scheduledMilliseconds > 0, true);
+  assert.equal(scheduledMilliseconds <= 72 * 60 * 60 * 1_000, true);
+  await maintenanceCallback();
+  await runtime.idle();
+  assert.deepEqual(calls.slice(0, 2), ['expire', 'purge']);
+
+  await runtime.close();
+  assert.equal(timer.cleared, true);
+  calls.length = 0;
+  await maintenanceCallback();
+  await runtime.idle();
+  assert.deepEqual(calls, []);
+});
+
 test('purged count and unresolved identity are aggregate-only health state', async () => {
   const calls = [];
   const spool = memorySpool([], calls);
@@ -860,6 +949,23 @@ test('production config requires own observer subtree and transport-only secrets
   assert.throws(
     () => loadObserverConfig({ ...valid, BRAIN_CTWA_RAW_MAX_DEPTH: '0' }),
     /raw|max depth/i,
+  );
+  assert.throws(
+    () =>
+      loadObserverConfig({
+        ...valid,
+        BRAIN_CTWA_RAW_MAX_BYTES: String(6 * 1024 * 1024),
+      }),
+    /BRAIN_CTWA_RAW_MAX_BYTES|raw/i,
+  );
+  assert.throws(
+    () =>
+      loadObserverConfig({
+        ...valid,
+        BRAIN_CTWA_RAW_MAX_BYTES: '2048',
+        BRAIN_CTWA_QUARANTINE_MAX_BYTES: '1024',
+      }),
+    /BRAIN_CTWA_RAW_MAX_BYTES|raw/i,
   );
   const overridden = loadObserverConfig({
     ...valid,

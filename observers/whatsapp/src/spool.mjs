@@ -841,7 +841,7 @@ export class SafeSpool {
         continue;
       }
       const record = await this.#readQuarantineRecord(match[1], quarantineDir);
-      if (record.captured_at < cutoff) {
+      if (record.captured_at <= cutoff) {
         await unlink(this.#target(match[1], quarantineDir));
         quarantine += 1;
       }

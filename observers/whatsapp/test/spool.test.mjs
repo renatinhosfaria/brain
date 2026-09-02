@@ -763,6 +763,25 @@ test('purge uses immutable spooled_at cutoff and replay does not extend retentio
   });
 });
 
+test('quarantine expires at the cutoff while event retention keeps its existing boundary', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent('retention-exact-cutoff');
+    await spool.put(event);
+    await spool.quarantine({
+      event_id: event.event_id,
+      captured_at: CAPTURED_AT + 10,
+      reason: 'raw_size',
+    });
+
+    assert.deepEqual(await spool.purgeOlderThan(CAPTURED_AT + 10), {
+      events: 0,
+      quarantine: 1,
+    });
+    assert.deepEqual(await readdir(path.join(rootDir, 'quarantine')), []);
+    assert.deepEqual(await spool.list(), [event.event_id]);
+  });
+});
+
 test('purge ignores symlinks and non-regular files', async () => {
   await withSpool(async ({ rootDir, spool, testRoot }) => {
     await spool.list();
