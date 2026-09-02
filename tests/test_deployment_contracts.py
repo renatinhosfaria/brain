@@ -222,6 +222,48 @@ class DeploymentContractTests(unittest.TestCase):
             )
             self.assertNotIn(token, stdout.getvalue() + stderr.getvalue())
 
+    def test_meta_credential_installer_rejects_expiries_the_runtime_rejects(
+        self,
+    ) -> None:
+        """Permissive ISO parsing must not write a credential Brain cannot load."""
+        from scripts import install_meta_ads_credential
+
+        token = "synthetic-meta-token-never-log"
+        original = b"OTHER_VALUE=preserved\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            env_path = config_dir / "brain.env"
+            for expiry in ("2026-W36-2T12:00:00Z", "2026-09-02T12:00:00,123Z"):
+                with self.subTest(expiry=expiry):
+                    env_path.write_bytes(original)
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                        patch.object(
+                            install_meta_ads_credential.sys,
+                            "stdin",
+                            io.StringIO(token + "\n"),
+                        ),
+                    ):
+                        result = install_meta_ads_credential.main(
+                            [
+                                "--config-dir",
+                                str(config_dir),
+                                "--expires-at",
+                                expiry,
+                                "--rotate",
+                            ]
+                        )
+                    self.assertEqual(result, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(
+                        stderr.getvalue(),
+                        "FAIL: Meta Ads MCP credential installation failed\n",
+                    )
+                    self.assertEqual(env_path.read_bytes(), original)
+                    self.assertNotIn(token, stdout.getvalue() + stderr.getvalue())
+
     def test_meta_probe_validates_credential_while_feature_stays_disabled(
         self,
     ) -> None:

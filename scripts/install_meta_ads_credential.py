@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import re
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -25,10 +26,11 @@ except ModuleNotFoundError:  # Executed directly as scripts/install_*.py.
 
 _TOKEN_KEY = "BRAIN_META_ADS_MCP_ACCESS_TOKEN"
 _EXPIRY_KEY = "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT"
+_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
 def _valid_expiry(value: str) -> bool:
-    if not value.endswith("Z"):
+    if _RFC3339_UTC_RE.fullmatch(value) is None:
         return False
     try:
         parsed = datetime.fromisoformat(value)
