@@ -22,7 +22,7 @@ PrivateTmp=true
 UMask=0077
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/brain/runtime
+ReadWritePaths=/var/lib/brain/runtime /var/lib/brain/credentials
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -32,7 +32,8 @@ RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Ads MCP requires outbound HTTPS; root-only Brain keeps network capability.
-# The runtime DB directory is the sole writable application path.
+# The runtime DB and encrypted OAuth credential directories are the sole
+# writable application paths.
 # The future whatsapp-observer service is not installed or enabled by this unit.
 # ProtectHome is read-only, not hidden: Brain must read /root/.hermes. Never
 # modify /usr/local/lib/hermes-agent; Brain reads the installed Hermes runtime.

@@ -115,6 +115,16 @@ account, and optional known-ad checks; it does not print tokens, ad IDs, names,
 or responses. The complete authentication, rotation, rollback, pending-state,
 and 90-day catalog-GC procedure is in [`docs/runbook.md`](docs/runbook.md).
 
+### Amendment 5: direct OAuth for Meta Ads MCP
+
+OAuth is opt-in through `BRAIN_META_ADS_MCP_AUTH_MODE=oauth`. Run
+`scripts/meta_ads_oauth.py configure`, then create an SSH tunnel with
+`ssh -N -L 8766:127.0.0.1:8766 root@brain-host` before running `login`.
+The callback is fixed to `http://127.0.0.1:8766/oauth/callback`; it is never a
+public service. Credentials live encrypted at
+`/var/lib/brain/credentials/meta-ads-oauth.json.enc` and its root-only key is
+`/etc/brain/meta-ads-oauth.key`. Token mode remains the explicit rollback.
+
 ## Hermes integration
 
 Use [`deploy/hermes-brain.example.yaml`](deploy/hermes-brain.example.yaml) for

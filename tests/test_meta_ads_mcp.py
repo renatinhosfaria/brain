@@ -210,6 +210,58 @@ class MetaAdsMcpClientTests(unittest.TestCase):
             self._settings(**settings), session_factory=_factory(session)
         )
 
+    def test_oauth_provider_supplies_a_dynamic_bearer_token_without_env_fallback(
+        self,
+    ) -> None:
+        class _Provider:
+            def __init__(self) -> None:
+                self.calls: list[float] = []
+
+            def access_token(self, now: float) -> str:
+                self.calls.append(now)
+                return "oauth-token-only"
+
+            def invalidate(self) -> None:
+                return None
+
+        provider = _Provider()
+        client = MetaAdsMcpClient(
+            self._settings(
+                meta_ads_mcp_auth_mode="oauth",
+                meta_ads_mcp_access_token="legacy-token-must-not-be-used",
+            ),
+            session_factory=_factory(self._probe_session()),
+            credential_provider=provider,
+        )
+
+        self.assertEqual(client._authorization_token(123.0), "oauth-token-only")
+        self.assertEqual(provider.calls, [123.0])
+
+    def test_oauth_refresh_deadline_is_mapped_to_a_bounded_meta_timeout(self) -> None:
+        class _BlockedProvider:
+            def access_token(self, now: float) -> str:
+                raise AssertionError("async provider must be used in an MCP session")
+
+            async def access_token_async(
+                self, now: float, budget_seconds: float
+            ) -> str:
+                await anyio.sleep(budget_seconds * 2)
+                return "late-token"
+
+            def invalidate(self) -> None:
+                return None
+
+        client = MetaAdsMcpClient(
+            self._settings(meta_ads_mcp_auth_mode="oauth"),
+            credential_provider=_BlockedProvider(),
+        )
+
+        async def resolve() -> None:
+            with self.assertRaisesRegex(MetaAdsError, "^meta_timeout$"):
+                await client._authorization_token_async(123.0, 0.01)
+
+        anyio.run(resolve)
+
     def _probe_session(
         self,
         tools: list[mcp_types.Tool] | None = None,

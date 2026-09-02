@@ -135,6 +135,55 @@ tools = ["conversation_phone"]
         self.assertNotIn("fixture-token", repr(settings))
         self.assertEqual(settings.meta_ads_mcp_token_expires_at, 1788350400.0)
 
+    def test_from_env_selects_oauth_without_reading_the_legacy_token(self) -> None:
+        config_path = self._write_production_config()
+        with patch.dict(
+            os.environ,
+            {
+                "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                "BRAIN_META_ATTRIBUTION_ENABLED": "true",
+                "BRAIN_META_AD_ACCOUNT_ID": "act_1598606388477916",
+                "BRAIN_META_ADS_MCP_AUTH_MODE": "oauth",
+                "BRAIN_META_ADS_OAUTH_STORE": "/var/lib/brain/credentials/custom.enc",
+                "BRAIN_META_ADS_OAUTH_KEY": "/etc/brain/custom.key",
+                "BRAIN_META_ADS_OAUTH_REDIRECT_URI": "http://127.0.0.1:8766/oauth/callback",
+                "BRAIN_META_ADS_MCP_ACCESS_TOKEN": "legacy-token-must-not-be-used",
+            },
+            clear=True,
+        ):
+            settings = BrainSettings.from_env(config_path)
+
+        self.assertEqual(settings.meta_ads_mcp_auth_mode, "oauth")
+        self.assertEqual(
+            settings.meta_ads_oauth_store_path,
+            Path("/var/lib/brain/credentials/custom.enc"),
+        )
+        self.assertEqual(
+            settings.meta_ads_oauth_key_path, Path("/etc/brain/custom.key")
+        )
+        self.assertEqual(
+            settings.meta_ads_oauth_redirect_uri,
+            "http://127.0.0.1:8766/oauth/callback",
+        )
+        self.assertEqual(settings.meta_ads_mcp_access_token, "")
+
+    def test_oauth_mode_rejects_unknown_modes_and_redirects(self) -> None:
+        principals = {
+            "default": self._principal(
+                "default", "gateway", "gateway", "conversation_phone"
+            )
+        }
+        for field, value in (
+            ("meta_ads_mcp_auth_mode", "auto"),
+            ("meta_ads_oauth_redirect_uri", "https://example.invalid/callback"),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                BrainSettings(
+                    principals=principals,
+                    cursor_secret=b"c" * 32,
+                    **{field: value},
+                )
+
     def test_meta_config_rejects_foreign_account_even_when_disabled(self) -> None:
         config_path = self._write_production_config()
         with (

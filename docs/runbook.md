@@ -127,6 +127,41 @@ initial sync, verify a synthetic exact-match/mismatch/pending/retry case, then
 enable the feature and send one controlled CTWA message. Disabling the flag is
 the rollback; it stops Meta work without deleting raw attribution or tables.
 
+## Amendment 5: direct OAuth lifecycle (2026-09-02)
+
+OAuth is a local operator flow for the fixed Ads MCP resource and account. It
+requests only `ads_read`; the presence of an optional `ads_mcp_management`
+scope in server metadata does not grant permission to request it automatically.
+Any future elevation must be an explicit, reviewed configuration change. A
+response containing `ads_management` is rejected.
+Do not expose a callback publicly or place app credentials in command
+arguments, environment variables, tickets, logs, or the CEO context.
+
+1. Configure the business-owned Meta app with the exact redirect URI
+   `http://127.0.0.1:8766/oauth/callback`.
+2. Create `/var/lib/brain/credentials` as root-owned mode `0700`; install
+   `/etc/brain` and its files as root-only. The `brain.service` unit may write
+   only that credentials directory plus the runtime directory.
+3. On the Brain host run `scripts/meta_ads_oauth.py configure`; it prompts for
+   the app ID and optional secret without accepting either in argv.
+4. From the operator workstation create `ssh -N -L 8766:127.0.0.1:8766
+   root@brain-host`, then run `scripts/meta_ads_oauth.py login` on the host and
+   open only its printed authorization URL. The callback is one-shot.
+5. Run `scripts/meta_ads_oauth.py status` and `probe`. Keep attribution
+   disabled until the probe passes. Then set
+   `BRAIN_META_ADS_MCP_AUTH_MODE=oauth` and restart Brain.
+
+The running Brain process detects the atomically replaced credential envelope
+before the next token use and also forces that reload after a `401`; no restart
+is required merely to adopt a successful `login`. Restart only when changing
+the authentication mode or other service configuration.
+
+The runtime refreshes an access token with 600 seconds or less remaining and
+persists any rotation atomically. A failed refresh is degraded/expired and
+leaves CTWA attribution pending; CEO attendance continues. For rollback, set
+`BRAIN_META_ADS_MCP_AUTH_MODE=token` and restore the validated legacy token,
+or disable attribution. Use `clear` before revoking a compromised OAuth grant.
+
 ## Amendment 3: raw CTWA attribution rollout (2026-09-02)
 
 Raw `externalAdReply` is retained as plaintext attribution evidence for the
