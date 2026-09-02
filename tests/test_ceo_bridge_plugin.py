@@ -281,6 +281,29 @@ class CEOBridgePluginTests(unittest.TestCase):
         )
         self.assertNotIn("fixture-secret", json.dumps(result))
 
+    def test_rejects_integer_valued_unsafe_raw_floats(self) -> None:
+        for value in (9007199254740992.0, 1e20):
+            payload = self.ok_payload(
+                events=[
+                    {
+                        "event_id": "waevt_safe",
+                        "transport_kind": "ctwa_candidate",
+                        "source_app": "instagram",
+                        "inbound_kind": None,
+                        "external_ad_reply": {"futureNumber": value},
+                    }
+                ]
+            )
+
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.call_tool(payload),
+                    {
+                        "status": "unavailable",
+                        "reason": "context_unavailable",
+                    },
+                )
+
     def test_rejects_raw_attribution_past_depth_and_node_limits(self) -> None:
         too_deep: object = {"fixture": "depth-secret"}
         for _ in range(33):

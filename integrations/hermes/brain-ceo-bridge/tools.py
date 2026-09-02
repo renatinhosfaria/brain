@@ -178,6 +178,11 @@ def _valid_raw_value(value: object, depth: int, nodes: list[int]) -> bool:
             and not (isinstance(value, int) and abs(value) > _MAX_SAFE_INTEGER)
             and not (
                 isinstance(value, float)
+                and value.is_integer()
+                and abs(value) > _MAX_SAFE_INTEGER
+            )
+            and not (
+                isinstance(value, float)
                 and value == 0
                 and math.copysign(1, value) < 0
             )

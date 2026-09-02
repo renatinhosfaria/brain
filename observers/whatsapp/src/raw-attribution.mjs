@@ -56,13 +56,41 @@ function ownEntries(value) {
   const entries = [];
   for (const key of keys) {
     if (typeof key !== 'string') fail('raw_type');
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    let descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(value, key); } catch { fail('raw_accessor'); }
     if (!descriptor || !('value' in descriptor)) fail('raw_accessor');
     checkString(key);
     entries.push([key, descriptor.value]);
   }
   entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return entries;
+}
+
+function arrayValues(value, invalidCode, missingCode = invalidCode) {
+  const entries = ownEntries(value);
+  const byKey = new Map(entries);
+  const length = byKey.get('length');
+  if (!Number.isSafeInteger(length) || length < 0) fail(invalidCode);
+  for (const [key] of entries) {
+    if (key === 'length') continue;
+    const index = Number(key);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= length || String(index) !== key) {
+      fail(invalidCode);
+    }
+  }
+  const values = [];
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    if (!byKey.has(key)) fail(missingCode);
+    values.push(byKey.get(key));
+  }
+  return values;
+}
+
+function isPlainSnapshotObject(value) {
+  let prototype;
+  try { prototype = Object.getPrototypeOf(value); } catch { fail('raw_type'); }
+  return prototype === Object.prototype || prototype === null;
 }
 
 function encodeValue(value, depth, state) {
@@ -89,20 +117,12 @@ function encodeValue(value, depth, state) {
   state.seen.add(value);
   try {
     if (Array.isArray(value)) {
-      if (Object.getPrototypeOf(value) !== Array.prototype) fail('raw_type');
-      const entries = ownEntries(value).filter(([key]) => key !== 'length');
       const out = [];
-      for (let index = 0; index < value.length; index += 1) {
-        const entry = entries.find(([key]) => key === String(index));
-        if (!entry) fail('raw_accessor');
-        out.push(encodeValue(entry[1], depth + 1, state));
+      for (const child of arrayValues(value, 'raw_type', 'raw_accessor')) {
+        out.push(encodeValue(child, depth + 1, state));
       }
-      if (entries.length !== value.length ||
-          entries.some(([key], index) => key !== String(index))) fail('raw_type');
       return out;
     }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) fail('raw_type');
     const out = {};
     for (const [key, child] of ownEntries(value)) define(out, key, encodeValue(child, depth + 1, state));
     return out;
@@ -132,12 +152,15 @@ function validateValue(value, depth, state) {
   state.seen.add(value);
   try {
     if (Array.isArray(value)) {
-      const entries = ownEntries(value).filter(([key]) => key !== 'length');
-      if (Object.getPrototypeOf(value) !== Array.prototype || entries.length !== value.length ||
-          entries.some(([key], index) => key !== String(index))) fail('raw_tag');
-      for (const [, child] of entries) validateValue(child, depth + 1, state);
+      let prototype;
+      try { prototype = Object.getPrototypeOf(value); } catch { fail('raw_type'); }
+      if (prototype !== Array.prototype) fail('raw_type');
+      for (const child of arrayValues(value, 'raw_tag')) {
+        validateValue(child, depth + 1, state);
+      }
       return;
     }
+    if (!isPlainSnapshotObject(value)) fail('raw_type');
     const entries = ownEntries(value);
     const tag = entries.find(([key]) => key === '$type');
     if (tag) {
@@ -157,7 +180,7 @@ function validateValue(value, depth, state) {
 function canonicalValue(value) {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
-    return ownEntries(value).filter(([key]) => key !== 'length').map(([, child]) => canonicalValue(child));
+    return arrayValues(value, 'raw_tag').map((child) => canonicalValue(child));
   }
   const entries = ownEntries(value);
   const tag = entries.find(([key]) => key === '$type');

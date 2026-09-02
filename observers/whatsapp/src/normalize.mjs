@@ -97,9 +97,10 @@ function safeExternalAdReply(raw, ids, rawLimits) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return null;
   }
+  const snapshot = encodeRawAttribution(raw, rawLimits).value;
   const safe = {};
-  const sourceType = boundedMetadata(raw.sourceType);
-  const sourceApp = boundedMetadata(raw.sourceApp);
+  const sourceType = boundedMetadata(snapshot.sourceType);
+  const sourceApp = boundedMetadata(snapshot.sourceApp);
   if (sourceType !== undefined) {
     safe.source_type = sourceType;
   }
@@ -107,26 +108,26 @@ function safeExternalAdReply(raw, ids, rawLimits) {
     safe.source_app = sourceApp;
   }
 
-  const sourceIdPresent = safeOpaque(raw.sourceId, ids, 'source_id', safe);
-  const ctwaClidPresent = safeOpaque(raw.ctwaClid, ids, 'ctwa_clid', safe);
-  safeSourceUrl(raw.sourceUrl, ids, safe);
+  const sourceIdPresent = safeOpaque(snapshot.sourceId, ids, 'source_id', safe);
+  const ctwaClidPresent = safeOpaque(snapshot.ctwaClid, ids, 'ctwa_clid', safe);
+  safeSourceUrl(snapshot.sourceUrl, ids, safe);
 
   for (const [rawName, safeName] of [
     ['showAdAttribution', 'show_ad_attribution'],
     ['clickToWhatsappCall', 'click_to_whatsapp_call'],
     ['containsAutoReply', 'contains_auto_reply'],
   ]) {
-    if (typeof raw[rawName] === 'boolean') {
-      safe[safeName] = raw[rawName];
+    if (typeof snapshot[rawName] === 'boolean') {
+      safe[safeName] = snapshot[rawName];
     }
   }
 
   return {
     safe,
-    raw: encodeRawAttribution(raw, rawLimits).value,
+    raw: snapshot,
     isCtwa:
       sourceType === 'ad' &&
-      (raw.clickToWhatsappCall === true || sourceIdPresent || ctwaClidPresent),
+      (snapshot.clickToWhatsappCall === true || sourceIdPresent || ctwaClidPresent),
   };
 }
 

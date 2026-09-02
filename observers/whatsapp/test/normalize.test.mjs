@@ -326,6 +326,63 @@ test('raw capture respects caller-supplied limits without exposing raw identifie
   );
 });
 
+test('known-field accessors fail as a controlled raw capture error before normalization', () => {
+  const message = ctwaMessage();
+  const external = {};
+  Object.defineProperty(external, 'sourceType', {
+    enumerable: true,
+    get() {
+      throw new Error('synthetic-secret-getter');
+    },
+  });
+  message.message.extendedTextMessage.contextInfo.externalAdReply = external;
+
+  assert.throws(
+    () => normalizeInboundMessage(message, CAPTURED_AT, IDS, 'observer-a'),
+    (error) => {
+      assert.ok(error instanceof RawAttributionError);
+      assert.equal(error.code, 'raw_accessor');
+      assert.doesNotMatch(error.message, /synthetic|secret|getter/i);
+      return true;
+    },
+  );
+});
+
+test('source URL normalization uses WHATWG IDNA and rejects invalid ports', () => {
+  const idn = ctwaMessage();
+  const idnExternal = idn.message.extendedTextMessage.contextInfo.externalAdReply;
+  idnExternal.sourceUrl = 'https://bücher.example:8443/path';
+  const invalidPort = ctwaMessage();
+  const invalidExternal = invalidPort.message.extendedTextMessage.contextInfo.externalAdReply;
+  invalidExternal.sourceUrl = 'https://example.test:99999/path';
+
+  const normalizedIdn = normalizeInboundMessage(
+    idn,
+    CAPTURED_AT,
+    IDS,
+    'observer-a',
+  );
+  const normalizedInvalidPort = normalizeInboundMessage(
+    invalidPort,
+    CAPTURED_AT,
+    IDS,
+    'observer-a',
+  );
+
+  assert.equal(
+    normalizedIdn.external_ad_reply.source_url_hostname,
+    'xn--bcher-kva.example',
+  );
+  assert.equal(
+    'source_url_hostname' in normalizedInvalidPort.external_ad_reply,
+    false,
+  );
+  assert.equal(
+    'source_url_hmac' in normalizedInvalidPort.external_ad_reply,
+    false,
+  );
+});
+
 test('production observer source contains no explicit forbidden mutation calls', async () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const sourceDir = path.resolve(here, '../src');

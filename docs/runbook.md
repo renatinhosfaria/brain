@@ -75,8 +75,11 @@ that prohibited storing the complete `externalAdReply`; it does not revise
 historical evidence, the identity boundary, or the observer's receive-only
 role.
 
-The raw field is captured only for CTWA candidates and is exposed as
-`events[].external_ad_reply` by `conversation_context`. It is not a Meta Ads
+The raw field is captured whenever Baileys decodes an `externalAdReply`,
+including events whose normalized evidence remains `ordinary_inbound`.
+Normalized evidence alone controls classification. `conversation_context`
+exposes the raw field as `events[].external_ad_reply` for CTWA candidates and
+returns it as `null` for ordinary or legacy events. This is not a Meta Ads
 Manager integration: campaign lookup, reporting, enrichment, and any control
 plane action in Meta Ads remain out of scope.
 

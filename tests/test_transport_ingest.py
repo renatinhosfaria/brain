@@ -276,6 +276,89 @@ class TransportIngestTests(unittest.TestCase):
         stored = self.rows("transport_events")[0]["external_ad_reply_raw_json"]
         self.assertEqual(json.loads(stored), raw)
 
+    def test_v2_rejects_integer_valued_unsafe_raw_floats(self) -> None:
+        for index, value in enumerate((9007199254740992.0, 1e20)):
+            raw = self.raw_ctwa()
+            raw["futureNumber"] = value
+            response = self.post(
+                self.envelope(
+                    message_id=f"unsafe-float-{index}",
+                    transport_kind="ctwa_candidate",
+                    external=self.normalized_ctwa_for_raw(),
+                    observer_event_version=2,
+                    raw=raw,
+                )
+            )
+
+            with self.subTest(value=value):
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rows("transport_events"), [])
+
+    def test_v2_accepts_raw_attribution_at_the_exact_observer_byte_limit(
+        self,
+    ) -> None:
+        maximum = 4 * 1024 * 1024
+        empty = '{"number":1e-7,"padding":""}'
+        raw = {
+            "number": 1e-7,
+            "padding": "x" * (maximum - len(empty.encode("utf-8"))),
+        }
+        external = {
+            "source_id_present": False,
+            "ctwa_clid_present": False,
+        }
+
+        response = self.post(
+            self.envelope(
+                message_id="exact-raw-limit",
+                transport_kind="ordinary_inbound",
+                external=external,
+                observer_event_version=2,
+                raw=raw,
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        stored = self.rows("transport_events")[0]["external_ad_reply_raw_json"]
+        self.assertEqual(len(stored.encode("utf-8")), maximum)
+        self.assertIn('"number":1e-7', stored)
+
+    def test_v2_cross_checks_whatwg_idna_and_port_semantics(self) -> None:
+        valid_url = "https://bücher.example:8443/path"
+        invalid_url = "https://example.test:99999/path"
+        base_external = {
+            "source_id_present": False,
+            "ctwa_clid_present": False,
+        }
+        valid_external = {
+            **base_external,
+            "source_url_hostname": "xn--bcher-kva.example",
+            "source_url_length": len(valid_url),
+            "source_url_hmac": self.runtime_ids.opaque_hmac(valid_url),
+        }
+
+        valid = self.post(
+            self.envelope(
+                message_id="idn-valid-port",
+                transport_kind="ordinary_inbound",
+                external=valid_external,
+                observer_event_version=2,
+                raw={"sourceUrl": valid_url},
+            )
+        )
+        invalid = self.post(
+            self.envelope(
+                message_id="invalid-port",
+                transport_kind="ordinary_inbound",
+                external=base_external,
+                observer_event_version=2,
+                raw={"sourceUrl": invalid_url},
+            )
+        )
+
+        self.assertEqual(valid.status_code, 200)
+        self.assertEqual(invalid.status_code, 200)
+
     def test_v2_raw_replay_is_idempotent(self) -> None:
         payload = self.envelope(
             message_id="v2-replay",

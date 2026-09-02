@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+
+import { proto } from '@whiskeysockets/baileys/WAProto/index.js';
+
 import {
   RawAttributionError,
   encodeRawAttribution,
@@ -36,6 +39,82 @@ test('canonical JSON ignores input key order', () => {
   assert.equal(
     encodeRawAttribution({ z: 1, a: { y: 2, b: 3 } }).canonicalJson,
     encodeRawAttribution({ a: { b: 3, y: 2 }, z: 1 }).canonicalJson,
+  );
+});
+
+test('encodes the pinned Baileys protobuf ExternalAdReplyInfo as a plain snapshot', () => {
+  const ExternalAdReplyInfo = proto.ContextInfo.ExternalAdReplyInfo;
+  const protobuf = ExternalAdReplyInfo.decode(
+    ExternalAdReplyInfo.encode(
+      ExternalAdReplyInfo.create({
+        sourceType: 'ad',
+        sourceId: 'protobuf-source',
+        clickToWhatsappCall: true,
+        thumbnail: Buffer.from([0, 1, 2, 255]),
+      }),
+    ).finish(),
+  );
+
+  const encoded = encodeRawAttribution(protobuf);
+
+  assert.equal(Object.getPrototypeOf(protobuf).constructor.name, 'ExternalAdReplyInfo');
+  assert.equal(Object.getPrototypeOf(encoded.value), Object.prototype);
+  assert.deepEqual(encoded.value, {
+    clickToWhatsappCall: true,
+    sourceId: 'protobuf-source',
+    sourceType: 'ad',
+    thumbnail: {
+      $type: 'bytes', encoding: 'base64', data: 'AAEC/w==',
+    },
+  });
+  assert.equal(
+    validateEncodedRawAttribution(encoded.value),
+    encoded.canonicalJson,
+  );
+});
+
+test('encodes and validates arrays with double-digit indexes in numeric order', () => {
+  const source = Array.from({ length: 12 }, (_, index) => index);
+
+  const encoded = encodeRawAttribution(source);
+
+  assert.deepEqual(encoded.value, source);
+  assert.equal(encoded.canonicalJson, '[0,1,2,3,4,5,6,7,8,9,10,11]');
+  assert.equal(
+    validateEncodedRawAttribution(encoded.value),
+    encoded.canonicalJson,
+  );
+});
+
+test('validates only JSON snapshot containers and never special object serialization', () => {
+  class SpecialRecord {
+    constructor() {
+      this.value = 'data';
+    }
+  }
+  const nullPrototype = Object.create(null);
+  nullPrototype.value = 'data';
+
+  assert.equal(
+    validateEncodedRawAttribution(nullPrototype),
+    '{"value":"data"}',
+  );
+  rejectsCode(() => validateEncodedRawAttribution(new Date(0)), 'raw_type');
+  rejectsCode(() => validateEncodedRawAttribution(new SpecialRecord()), 'raw_type');
+});
+
+test('uses ECMAScript number text at the exact raw byte ceiling', () => {
+  const maximum = 4 * 1024 * 1024;
+  const empty = '{"number":1e-7,"padding":""}';
+  const padding = 'x'.repeat(maximum - Buffer.byteLength(empty));
+
+  const encoded = encodeRawAttribution({ number: 1e-7, padding });
+
+  assert.equal(Buffer.byteLength(encoded.canonicalJson), maximum);
+  assert.equal(encoded.canonicalJson.startsWith('{"number":1e-7,'), true);
+  assert.equal(
+    validateEncodedRawAttribution(encoded.value),
+    encoded.canonicalJson,
   );
 });
 

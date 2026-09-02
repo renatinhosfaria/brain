@@ -31,6 +31,19 @@ class RawAttributionTests(unittest.TestCase):
             '{"$type":"bytes","data":"AAEC/w==","encoding":"base64"}}',
         )
 
+    def test_uses_ecmascript_number_text_at_the_exact_byte_ceiling(self) -> None:
+        maximum = 4 * 1024 * 1024
+        empty = '{"number":1e-7,"padding":""}'
+        padding = "x" * (maximum - len(empty.encode("utf-8")))
+
+        encoded = canonicalize_raw_attribution(
+            {"number": 1e-7, "padding": padding},
+            RawAttributionLimits(maximum, 32, 10_000),
+        )
+
+        self.assertEqual(len(encoded.encode("utf-8")), maximum)
+        self.assertTrue(encoded.startswith('{"number":1e-7,'))
+
     def test_rejects_normalized_hmac_mismatch(self) -> None:
         ids = RuntimeIds(b"t" * 32)
         normalized = {
@@ -57,6 +70,16 @@ class RawAttributionTests(unittest.TestCase):
         ):
             with self.subTest(raw=raw), self.assertRaises(RawAttributionError):
                 canonicalize_raw_attribution(raw, RawAttributionLimits())
+
+    def test_rejects_integer_valued_unsafe_floats(self) -> None:
+        for value in (9007199254740992.0, 1e20):
+            with self.subTest(value=value):
+                with self.assertRaises(RawAttributionError) as caught:
+                    canonicalize_raw_attribution(
+                        {"value": value}, RawAttributionLimits()
+                    )
+
+                self.assertEqual(caught.exception.code, "raw_type")
 
     def test_matches_observer_known_fields(self) -> None:
         ids = RuntimeIds(b"t" * 32)
@@ -88,6 +111,53 @@ class RawAttributionTests(unittest.TestCase):
         }
 
         assert_raw_matches_normalized(raw, normalized, ids)
+
+    def test_matches_whatwg_idna_hostname_with_a_valid_port(self) -> None:
+        ids = RuntimeIds(b"t" * 32)
+        url = "https://bücher.example:8443/path"
+        normalized = {
+            "source_type": None,
+            "source_app": None,
+            "source_id_present": False,
+            "source_id_length": None,
+            "source_id_hmac": None,
+            "ctwa_clid_present": False,
+            "ctwa_clid_length": None,
+            "ctwa_clid_hmac": None,
+            "source_url_hostname": "xn--bcher-kva.example",
+            "source_url_length": len(url),
+            "source_url_hmac": ids.opaque_hmac(url),
+            "show_ad_attribution": None,
+            "click_to_whatsapp_call": None,
+            "contains_auto_reply": None,
+        }
+
+        assert_raw_matches_normalized({"sourceUrl": url}, normalized, ids)
+
+    def test_invalid_whatwg_port_produces_no_normalized_url(self) -> None:
+        ids = RuntimeIds(b"t" * 32)
+        normalized = {
+            "source_type": None,
+            "source_app": None,
+            "source_id_present": False,
+            "source_id_length": None,
+            "source_id_hmac": None,
+            "ctwa_clid_present": False,
+            "ctwa_clid_length": None,
+            "ctwa_clid_hmac": None,
+            "source_url_hostname": None,
+            "source_url_length": None,
+            "source_url_hmac": None,
+            "show_ad_attribution": None,
+            "click_to_whatsapp_call": None,
+            "contains_auto_reply": None,
+        }
+
+        assert_raw_matches_normalized(
+            {"sourceUrl": "https://example.test:99999/path"},
+            normalized,
+            ids,
+        )
 
 
 if __name__ == "__main__":

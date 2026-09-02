@@ -8,7 +8,10 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from decimal import Decimal
+from urllib.parse import unquote, urlsplit
+
+import idna
 
 from .transport_models import RuntimeIds
 
@@ -19,6 +22,7 @@ _DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 _MAX_SAFE_LENGTH = 10_000_000
 _MAX_SAFE_INTEGER = 2**53 - 1
+_SPECIAL_URL_SCHEMES = frozenset({"ftp", "file", "http", "https", "ws", "wss"})
 
 
 @dataclass(frozen=True)
@@ -98,15 +102,18 @@ def _validate_value(value: object, depth: int, state: _State) -> object:
         return value
     if isinstance(value, str):
         return _string(value)
-    if isinstance(value, (int, float)):
-        if (
-            isinstance(value, bool)
-            or not math.isfinite(value)
-            or (isinstance(value, int) and abs(value) > _MAX_SAFE_INTEGER)
-            or (isinstance(value, float) and value == 0 and math.copysign(1, value) < 0)
-        ):
+    if isinstance(value, int):
+        if isinstance(value, bool) or abs(value) > _MAX_SAFE_INTEGER:
             raise RawAttributionError("raw_type")
         return value
+    if isinstance(value, float):
+        if (
+            not math.isfinite(value)
+            or (value == 0 and math.copysign(1, value) < 0)
+            or (value.is_integer() and abs(value) > _MAX_SAFE_INTEGER)
+        ):
+            raise RawAttributionError("raw_type")
+        return int(value) if value.is_integer() else value
     if isinstance(value, list):
         return [_validate_value(child, depth + 1, state) for child in value]
     if isinstance(value, dict):
@@ -123,19 +130,61 @@ def _validate_value(value: object, depth: int, state: _State) -> object:
     raise RawAttributionError("raw_type")
 
 
+def _ecmascript_number(value: float) -> str:
+    """Render a finite non-integral float like ECMAScript Number::toString."""
+    sign = "-" if value < 0 else ""
+    decimal = Decimal(repr(abs(value)))
+    parts = decimal.as_tuple()
+    digits = "".join(str(digit) for digit in parts.digits)
+    decimal_position = len(digits) + parts.exponent
+    if 0 < decimal_position <= 21:
+        if len(digits) <= decimal_position:
+            body = digits + "0" * (decimal_position - len(digits))
+        else:
+            body = digits[:decimal_position] + "." + digits[decimal_position:]
+        return sign + body
+    if -6 < decimal_position <= 0:
+        return sign + "0." + "0" * (-decimal_position) + digits
+    exponent = decimal_position - 1
+    mantissa = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
+    exponent_sign = "+" if exponent >= 0 else ""
+    return f"{sign}{mantissa}e{exponent_sign}{exponent}"
+
+
+def _canonical_json(value: object) -> str:
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _ecmascript_number(value)
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical_json(child) for child in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{"
+            + ",".join(
+                json.dumps(key, ensure_ascii=False) + ":" + _canonical_json(value[key])
+                for key in sorted(value)
+            )
+            + "}"
+        )
+    raise RawAttributionError("raw_type")
+
+
 def canonicalize_raw_attribution(value: object, limits: RawAttributionLimits) -> str:
     """Validate a decoded raw tree and return its deterministic JSON encoding."""
     if not isinstance(limits, RawAttributionLimits):
         raise RawAttributionError("raw_type")
     validated = _validate_value(value, 0, _State(limits))
     try:
-        encoded = json.dumps(
-            validated,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        encoded = _canonical_json(validated)
     except (TypeError, ValueError):
         raise RawAttributionError("raw_type") from None
     if len(encoded.encode("utf-8")) > limits.max_bytes:
@@ -211,16 +260,82 @@ def _source_url(
         or _codepoint_length(value) > _MAX_SAFE_LENGTH
     ):
         return None, None, None
-    try:
-        hostname = urlsplit(value).hostname
-    except (TypeError, ValueError):
-        return None, None, None
+    hostname = _whatwg_hostname(value)
     if hostname is None:
         return None, None, None
-    hostname = hostname.lower()
     if _codepoint_length(hostname) > 253 or not _HOSTNAME_RE.fullmatch(hostname):
         return None, None, None
     return hostname, _codepoint_length(value), ids.opaque_hmac(value)
+
+
+def _ipv4_number(part: str) -> int | None:
+    base = 10
+    digits = part
+    if len(digits) >= 2 and digits[:2].lower() == "0x":
+        base = 16
+        digits = digits[2:]
+    elif len(digits) >= 2 and digits.startswith("0"):
+        base = 8
+        digits = digits[1:]
+    if not digits:
+        return 0
+    allowed = {
+        8: re.compile(r"^[0-7]+$"),
+        10: re.compile(r"^[0-9]+$"),
+        16: re.compile(r"^[0-9a-fA-F]+$"),
+    }[base]
+    if allowed.fullmatch(digits) is None:
+        return None
+    return int(digits, base)
+
+
+def _whatwg_ipv4(hostname: str) -> str | None:
+    parts = hostname.split(".")
+    if parts[-1] == "":
+        parts.pop()
+    if not parts or len(parts) > 4:
+        return None
+    numbers = [_ipv4_number(part) for part in parts]
+    if any(number is None for number in numbers):
+        return None
+    parsed = [int(number) for number in numbers if number is not None]
+    if any(number > 255 for number in parsed[:-1]):
+        return None
+    maximum_last = 256 ** (5 - len(parsed))
+    if parsed[-1] >= maximum_last:
+        return None
+    ipv4 = parsed[-1]
+    for index, number in enumerate(parsed[:-1]):
+        ipv4 += number * 256 ** (3 - index)
+    return ".".join(str((ipv4 >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
+def _whatwg_hostname(value: str) -> str | None:
+    scheme = value.partition(":")[0].lower()
+    candidate = value.replace("\\", "/") if scheme in _SPECIAL_URL_SCHEMES else value
+    try:
+        parsed = urlsplit(candidate)
+        _ = parsed.port
+        hostname = parsed.hostname
+        if hostname is None or ":" in hostname:
+            return None
+        unicode_hostname = unquote(hostname, encoding="utf-8", errors="strict")
+        ascii_hostname = (
+            idna.encode(
+                unicode_hostname,
+                uts46=True,
+                std3_rules=False,
+            )
+            .decode("ascii")
+            .lower()
+        )
+    except (UnicodeError, ValueError, idna.IDNAError):
+        return None
+    last = ascii_hostname.removesuffix(".")
+    last = last.rsplit(".", 1)[-1]
+    if last.isdigit() or _ipv4_number(last) is not None:
+        return _whatwg_ipv4(ascii_hostname)
+    return ascii_hostname
 
 
 def _require(normalized: Mapping[str, object], expected: Mapping[str, object]) -> None:
