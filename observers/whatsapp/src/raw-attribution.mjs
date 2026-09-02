@@ -35,6 +35,21 @@ function checkString(value) {
   return value;
 }
 
+function decimalNumber(value) {
+  const text = value.toString(10);
+  const exponentAt = text.search(/[eE]/);
+  if (exponentAt < 0) return text;
+  const exponent = Number(text.slice(exponentAt + 1));
+  const sign = text.startsWith('-') ? '-' : '';
+  const unsigned = sign ? text.slice(1, exponentAt) : text.slice(0, exponentAt);
+  const dot = unsigned.indexOf('.');
+  const digits = unsigned.replace('.', '');
+  const decimalPosition = (dot < 0 ? unsigned.length : dot) + exponent;
+  if (decimalPosition <= 0) return sign + '0.' + '0'.repeat(-decimalPosition) + digits;
+  if (decimalPosition >= digits.length) return sign + digits + '0'.repeat(decimalPosition - digits.length);
+  return sign + digits.slice(0, decimalPosition) + '.' + digits.slice(decimalPosition);
+}
+
 function ownEntries(value) {
   let keys;
   try { keys = Reflect.ownKeys(value); } catch { fail('raw_accessor'); }
@@ -59,7 +74,7 @@ function encodeValue(value, depth, state) {
   if (typeof value === 'number') {
     if (!Number.isFinite(value) || Object.is(value, -0)) fail('raw_type');
     if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      return { $type: 'integer', encoding: 'decimal', data: value.toString(10) };
+      return { $type: 'integer', encoding: 'decimal', data: decimalNumber(value) };
     }
     return value;
   }
@@ -118,7 +133,8 @@ function validateValue(value, depth, state) {
   try {
     if (Array.isArray(value)) {
       const entries = ownEntries(value).filter(([key]) => key !== 'length');
-      if (Object.getPrototypeOf(value) !== Array.prototype || entries.length !== value.length) fail('raw_tag');
+      if (Object.getPrototypeOf(value) !== Array.prototype || entries.length !== value.length ||
+          entries.some(([key], index) => key !== String(index))) fail('raw_tag');
       for (const [, child] of entries) validateValue(child, depth + 1, state);
       return;
     }

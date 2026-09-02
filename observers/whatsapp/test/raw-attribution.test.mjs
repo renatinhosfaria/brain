@@ -66,6 +66,12 @@ test('preserves unsafe integer numbers as decimal tags', () => {
   assert.deepEqual(encodeRawAttribution(9007199254740992).value, {
     $type: 'integer', encoding: 'decimal', data: '9007199254740992',
   });
+  for (const value of [1e21, Number.MAX_VALUE]) {
+    const encoded = encodeRawAttribution(value);
+    assert.equal(encoded.value.$type, 'integer');
+    assert.doesNotMatch(encoded.value.data, /e/i);
+    assert.equal(validateEncodedRawAttribution(encoded.value), encoded.canonicalJson);
+  }
 });
 
 test('preserves an own __proto__ field', () => {
@@ -81,6 +87,9 @@ test('rejects malformed array index keys', () => {
   Object.defineProperty(malformed, '00', { value: null, enumerable: true });
   rejectsCode(() => encodeRawAttribution(malformed), 'raw_type');
   rejectsCode(() => validateEncodedRawAttribution(malformed), 'raw_tag');
+  const nonCanonical = [null, null];
+  Object.defineProperty(nonCanonical, '00', { value: null, enumerable: true });
+  rejectsCode(() => validateEncodedRawAttribution(nonCanonical), 'raw_tag');
 });
 
 test('error class is exported', () => {
