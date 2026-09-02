@@ -40,13 +40,14 @@ VALID_TOOLS = frozenset(
 _PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _DECIMAL_INTEGER_RE = re.compile(r"^-?[0-9]+$")
 logger = logging.getLogger("brain.config")
+_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
 def _meta_bool(value: object, name: str) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, str) and value.lower() in {"true", "false"}:
-        return value.lower() == "true"
+    if isinstance(value, str) and value in {"true", "false"}:
+        return value == "true"
     raise ValueError(f"{name} must be true or false")
 
 
@@ -55,6 +56,8 @@ def _meta_expiry(value: object, name: str) -> float | None:
         return None
     if not isinstance(value, str):
         raise TypeError(f"{name} must be RFC3339")
+    if not _RFC3339_UTC_RE.fullmatch(value):
+        raise ValueError(f"{name} must be RFC3339 UTC")
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
@@ -351,6 +354,8 @@ class BrainSettings:
         configured_account = os.environ.get(
             "BRAIN_META_AD_ACCOUNT_ID", server.get("meta_ad_account_id", "")
         )
+        if configured_account:
+            canonical_account_id(configured_account)
         meta_account = canonical_account_id(configured_account) if meta_enabled else ""
         meta_token = os.environ.get("BRAIN_META_ADS_MCP_ACCESS_TOKEN", "")
         meta_expiry = _meta_expiry(

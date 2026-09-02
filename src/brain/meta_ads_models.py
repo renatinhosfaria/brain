@@ -108,6 +108,10 @@ class MetaAdRecord:
                 raise ValueError(f"{name} must contain ASCII decimal digits")
             if value is None and not nullable:
                 raise ValueError(f"{name} is required")
+        if (self.adset_id is None) != (self.adset_name is None):
+            raise ValueError("adset_id and adset_name must be paired")
+        if (self.creative_id is None) != (self.creative_name is None):
+            raise ValueError("creative_id and creative_name must be paired")
         for name, value, nullable in (
             ("ad_name", self.ad_name, False),
             ("adset_name", self.adset_name, True),
@@ -126,6 +130,10 @@ class MetaAdRecord:
                 raise ValueError(f"{name} is invalid")
         if not isinstance(self.metadata_complete, bool):
             raise TypeError("metadata_complete must be boolean")
+        if self.metadata_complete and (
+            self.adset_id is None or self.creative_id is None
+        ):
+            raise ValueError("metadata_complete requires optional metadata")
         if not _valid_timestamp(self.fetched_at):
             raise ValueError("fetched_at must be finite")
 
@@ -185,14 +193,22 @@ class MetaAttributionView:
     retry_scheduled: bool
 
     def __post_init__(self) -> None:
+        if not isinstance(self.observed, ObservedAttribution):
+            raise TypeError("observed must be ObservedAttribution")
+        if self.record is not None and not isinstance(self.record, MetaAdRecord):
+            raise TypeError("record must be MetaAdRecord or None")
         if not _valid_name(self.event_id):
             raise ValueError("event_id is invalid")
         if self.status not in {"pending", "confirmed"}:
             raise ValueError("attribution status is invalid")
         if self.status == "confirmed" and self.record is None:
             raise ValueError("confirmed attribution requires a record")
+        if self.status == "confirmed" and self.confirmed_at is None:
+            raise ValueError("confirmed attribution requires confirmed_at")
         if self.status == "pending" and self.record is not None:
             raise ValueError("pending attribution cannot have a record")
+        if self.status == "pending" and self.confirmed_at is not None:
+            raise ValueError("pending attribution cannot have confirmed_at")
         if not _valid_timestamp(self.confirmed_at, nullable=True):
             raise ValueError("confirmed_at must be finite")
         if not _valid_timestamp(self.last_attempt_at, nullable=True):

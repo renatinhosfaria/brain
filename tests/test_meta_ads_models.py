@@ -5,6 +5,7 @@ from brain.meta_ads_models import (
     META_ERROR_CODES,
     MetaAdRecord,
     MetaAdsError,
+    MetaAttributionView,
     ObservedAttribution,
     canonical_account_id,
     confirmed_payload,
@@ -105,6 +106,46 @@ class MetaAdsModelTests(unittest.TestCase):
         pending = pending_payload(observed, None, True, None)
         self.assertEqual(pending["status"], "pending")
         self.assertIsNone(pending["last_attempt_at"])
+
+    def test_optional_hierarchy_fields_are_paired_and_complete_flag_is_honest(self):
+        args = [
+            "1598606388477916",
+            "1",
+            "Ad",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "2",
+            "Campaign",
+            None,
+            None,
+            None,
+            True,
+            1.0,
+        ]
+        with self.assertRaises(ValueError):
+            MetaAdRecord(*args[:5], "3", None, None, *args[8:])
+        with self.assertRaises(ValueError):
+            MetaAdRecord(*args[:11], "4", None, True, 1.0)
+        with self.assertRaises(ValueError):
+            MetaAdRecord(*args[:13], True, 1.0)
+
+    def test_view_validates_types_and_status_timestamp_pairings(self):
+        observed = ObservedAttribution("1", None)
+        with self.assertRaises(TypeError):
+            MetaAttributionView(
+                "event", "pending", "pending", None, None, None, None, True
+            )
+        with self.assertRaises(ValueError):
+            MetaAttributionView(
+                "event", observed, "pending", None, 1.0, None, None, True
+            )
+        with self.assertRaises(ValueError):
+            MetaAttributionView(
+                "event", observed, "confirmed", None, 1.0, 1.0, None, True
+            )
 
 
 if __name__ == "__main__":

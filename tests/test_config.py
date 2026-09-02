@@ -135,6 +135,55 @@ tools = ["conversation_phone"]
         self.assertNotIn("fixture-token", repr(settings))
         self.assertEqual(settings.meta_ads_mcp_token_expires_at, 1788350400.0)
 
+    def test_meta_config_rejects_foreign_account_even_when_disabled(self) -> None:
+        config_path = self._write_production_config()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                    "BRAIN_META_AD_ACCOUNT_ID": "act_1",
+                },
+                clear=True,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            BrainSettings.from_env(config_path)
+
+    def test_meta_config_requires_exact_boolean_and_utc_expiry(self) -> None:
+        config_path = self._write_production_config()
+        base = {
+            "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+            "BRAIN_META_ATTRIBUTION_ENABLED": "true",
+            "BRAIN_META_AD_ACCOUNT_ID": "act_1598606388477916",
+        }
+        for flag in ("TRUE", " true", "false "):
+            with (
+                self.subTest(flag=flag),
+                patch.dict(
+                    os.environ,
+                    {**base, "BRAIN_META_ATTRIBUTION_ENABLED": flag},
+                    clear=True,
+                ),
+                self.assertRaises(ValueError),
+            ):
+                BrainSettings.from_env(config_path)
+        for expiry in (
+            "2026-09-02 12:00:00Z",
+            "2026-09-02T12:00:00-03:00",
+            "2026-09-02T12:00:00",
+        ):
+            with (
+                self.subTest(expiry=expiry),
+                patch.dict(
+                    os.environ,
+                    {**base, "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT": expiry},
+                    clear=True,
+                ),
+                self.assertRaises(ValueError),
+            ):
+                BrainSettings.from_env(config_path)
+
     def test_from_env_reads_raw_attribution_limits(self) -> None:
         config_path = self._write_production_config()
         with patch.dict(
