@@ -104,10 +104,12 @@ explícito. Falhas de registro, login, refresh ou `probe` deixam a atribuição 
 
 ## Compatibilidade e rollout
 
-O modo legado por token não será removido. A implementação será compatível com
-envelopes OAuth existentes apenas quando eles contiverem client registration
-válida; envelopes antigos com client pré-registrado poderão ser migrados uma
-vez durante o primeiro `login`, sem fallback silencioso. O rollout é:
+O modo legado por token não será removido. Envelopes OAuth do modelo antigo,
+contendo App ID/App Secret ou client pré-registrado, não serão migrados nem
+reutilizados pelo DCR. O primeiro rollout exigirá executar `clear` para remover
+o envelope antigo e, depois, `login` para criar uma registration nova. A chave
+local poderá ser reutilizada; a app Meta antiga só será revogada depois que o
+novo `probe` passar. O rollout é:
 
 1. atualizar o Brain com DCR, mantendo atribuição desabilitada;
 2. executar `login` por túnel SSH;
