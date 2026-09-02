@@ -390,6 +390,16 @@ class CEOBridgePluginTests(unittest.TestCase):
                 "not-a-timestamp",
             ),
             (
+                "ISO week-date timestamp",
+                self.pending_attribution(last_attempt_at="2026-W36-2T12:00:00Z"),
+                "2026-W36-2T12:00:00Z",
+            ),
+            (
+                "comma fractional timestamp",
+                self.pending_attribution(last_attempt_at="2026-09-02T12:00:00,123Z"),
+                "2026-09-02T12:00:00,123Z",
+            ),
+            (
                 "unknown error",
                 self.pending_attribution(last_error_code="meta_inject_instruction"),
                 "meta_inject_instruction",

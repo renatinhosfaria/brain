@@ -69,6 +69,10 @@ _META_EVENT_FIELDS = _RAW_EVENT_FIELDS | {"meta_attribution"}
 _META_ACCOUNT_ID = "act_1598606388477916"
 _META_ID_RE = re.compile(r"^[0-9]{1,64}$", re.ASCII)
 _META_STATUS_RE = re.compile(r"^[A-Z][A-Z_]{0,63}$", re.ASCII)
+_RFC3339_UTC_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$",
+    re.ASCII,
+)
 _META_ERROR_CODES = frozenset(
     {
         "meta_timeout",
@@ -267,9 +271,11 @@ def _valid_meta_status(value: object) -> bool:
 def _valid_meta_timestamp(value: object, *, nullable: bool = False) -> bool:
     if value is None:
         return nullable
-    if not isinstance(value, str) or not (20 <= len(value) <= 32):
-        return False
-    if "T" not in value or not value.endswith("Z"):
+    if (
+        not isinstance(value, str)
+        or not (20 <= len(value) <= 32)
+        or _RFC3339_UTC_RE.fullmatch(value) is None
+    ):
         return False
     try:
         datetime.fromisoformat(value)
