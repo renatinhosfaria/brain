@@ -228,13 +228,6 @@ class DeploymentContractTests(unittest.TestCase):
         """Enabling the resolver just to probe a credential breaks the rollout order."""
         from scripts import meta_ads_mcp_probe
 
-        settings = SimpleNamespace(
-            meta_attribution_enabled=False,
-            meta_ad_account_id="1598606388477916",
-            meta_ads_mcp_access_token="synthetic-meta-token-never-log",
-            meta_ads_mcp_token_expires_at=1_793_491_200.0,
-        )
-
         class FakeClient:
             def __init__(self, configured: object) -> None:
                 self.configured = configured
@@ -258,16 +251,38 @@ class DeploymentContractTests(unittest.TestCase):
             created.append(client)
             return client
 
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with (
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-            patch.object(
-                meta_ads_mcp_probe.BrainSettings, "from_env", return_value=settings
-            ),
-            patch.dict(os.environ, {"BRAIN_META_PROBE_AD_ID": "1203001"}, clear=False),
-        ):
-            result = meta_ads_mcp_probe.main(client_factory=factory)
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "brain.toml"
+            config_path.write_text(
+                """[server]
+meta_attribution_enabled = false
+meta_ad_account_id = "act_1598606388477916"
+cursor_secret = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+
+[principals.default]
+mode = "gateway"
+token_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+tools = ["conversation_context"]
+""",
+                encoding="utf-8",
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.dict(
+                    os.environ,
+                    {
+                        "BRAIN_CONFIG": str(config_path),
+                        "BRAIN_TRANSPORT_HMAC_SECRET": "x" * 32,
+                        "BRAIN_META_ADS_MCP_ACCESS_TOKEN": "synthetic-meta-token-never-log",
+                        "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT": "2026-11-01T00:00:00Z",
+                        "BRAIN_META_PROBE_AD_ID": "1203001",
+                    },
+                    clear=True,
+                ),
+            ):
+                result = meta_ads_mcp_probe.main(client_factory=factory)
         self.assertEqual(result, 0)
         self.assertEqual(
             stdout.getvalue(),
@@ -275,7 +290,8 @@ class DeploymentContractTests(unittest.TestCase):
         )
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(len(created), 1)
-        self.assertIs(created[0].configured, settings)
+        self.assertFalse(created[0].configured.meta_attribution_enabled)
+        self.assertEqual(created[0].configured.meta_ad_account_id, "1598606388477916")
         self.assertEqual(created[0].ad_id, "1203001")
 
     def test_meta_probe_hides_token_known_id_and_exception_details(self) -> None:

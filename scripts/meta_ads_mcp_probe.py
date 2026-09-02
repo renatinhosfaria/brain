@@ -6,7 +6,10 @@ from __future__ import annotations
 import os
 import sys
 import time
+import tomllib
 from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from brain.config import BrainSettings
@@ -20,19 +23,36 @@ def _failure_code(error: Exception) -> str:
     return "meta_server_unavailable"
 
 
+def _configured_account(settings: BrainSettings) -> str:
+    environment_account = os.environ.get("BRAIN_META_AD_ACCOUNT_ID")
+    if environment_account is not None:
+        return environment_account
+    config_path = os.environ.get("BRAIN_CONFIG")
+    if config_path:
+        with Path(config_path).open("rb") as handle:
+            config = tomllib.load(handle)
+        server = config.get("server")
+        if not isinstance(server, dict):
+            return ""
+        account = server.get("meta_ad_account_id", "")
+        return account if isinstance(account, str) else ""
+    return settings.meta_ad_account_id
+
+
 def main(
     *,
     client_factory: Callable[[BrainSettings], Any] = MetaAdsMcpClient,
 ) -> int:
     try:
         settings = BrainSettings.from_env()
+        account_id = canonical_account_id(_configured_account(settings))
         if (
             not settings.meta_ads_mcp_access_token
             or settings.meta_ads_mcp_token_expires_at is None
-            or canonical_account_id(settings.meta_ad_account_id) != "1598606388477916"
+            or account_id != "1598606388477916"
         ):
             raise MetaAdsError("meta_auth_unavailable")
-        client = client_factory(settings)
+        client = client_factory(replace(settings, meta_ad_account_id=account_id))
         client.probe()
         known_ad_id = os.environ.get("BRAIN_META_PROBE_AD_ID")
         if known_ad_id:
