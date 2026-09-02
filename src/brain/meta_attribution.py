@@ -308,12 +308,14 @@ class MetaAttributionService:
         if not self.enabled:
             return 0
         if self._durable_auth_circuit_active(now):
-            if self._last_retention_at is None or (
-                now - self._last_retention_at
-                >= self._settings.meta_ads_full_sync_interval_seconds
-            ):
-                self.apply_retention(now)
-            return 0
+            self.probe(now)
+            if self._durable_auth_circuit_active(now):
+                if self._last_retention_at is None or (
+                    now - self._last_retention_at
+                    >= self._settings.meta_ads_full_sync_interval_seconds
+                ):
+                    self.apply_retention(now)
+                return 0
         if not self._probe_succeeded:
             self.probe(now)
         if self._last_incremental_sync_at is None or (

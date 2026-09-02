@@ -504,6 +504,54 @@ class MetaAttributionServiceTests(unittest.TestCase):
 
         self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
 
+    def test_restarted_tick_probes_rotated_credential_and_confirms_due_job(
+        self,
+    ) -> None:
+        """Returning before probe would strand rotated credentials for an hour."""
+        self.client.get_error = MetaAdsError("meta_auth_unavailable")
+        self.runtime.write(lambda conn: self._event(conn, "waevt_tick_rotation"))
+        self.runtime.write(
+            lambda conn: self.service.stage_event(
+                conn,
+                event_id="waevt_tick_rotation",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+        self.assertFalse(self.service.resolve_source(SOURCE_ID, now=100.0))
+        self.client.get_error = None
+        self.client.list_records = []
+
+        restarted_runtime = RuntimeDatabase(self.runtime.path, timeout_seconds=0.25)
+        restarted_runtime.initialize()
+        restarted = MetaAttributionService(
+            self._settings(meta_ads_mcp_access_token="rotated-fixture-token"),
+            restarted_runtime,
+            MetaAdsStore(ACCOUNT_ID),
+            self.client,
+        )
+
+        self.assertEqual(restarted.tick(now=101.0), 1)
+
+        view = restarted_runtime.read(
+            lambda conn: MetaAdsStore(ACCOUNT_ID).context_for_event(
+                conn, "waevt_tick_rotation"
+            )
+        )
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertEqual(view.status, "confirmed")
+        self.assertEqual(
+            self.client.calls,
+            [
+                ("get_ad", SOURCE_ID),
+                ("probe", ""),
+                ("list_ads", "incremental"),
+                ("list_ads", "full"),
+                ("get_ad", SOURCE_ID),
+            ],
+        )
+
     def test_failed_probe_without_jobs_defers_new_work_after_restart(self) -> None:
         """An account auth failure must survive even when there were no jobs to defer."""
         self.client.probe_error = MetaAdsError("meta_auth_unavailable")
