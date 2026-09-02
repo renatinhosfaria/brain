@@ -30,6 +30,18 @@ def _finite(value: object, name: str) -> float:
     return float(value)
 
 
+def _credential_fingerprint(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("credential fingerprint must be a SHA-256 hex digest")
+    return value
+
+
 def _record_from_row(row: sqlite3.Row) -> MetaAdRecord:
     return MetaAdRecord(
         account_id=str(row["account_id"]),
@@ -188,6 +200,7 @@ class MetaAdsStore:
         lease_token: str,
         retry_after_seconds: float | None = None,
         jitter_seconds: float = 0.0,
+        auth_credential_fingerprint: str | None = None,
     ) -> bool:
         now = _finite(now, "now")
         ObservedAttribution(source_id, None)
@@ -202,6 +215,9 @@ class MetaAdsStore:
             retry_after_seconds = _finite(retry_after_seconds, "retry_after_seconds")
             if retry_after_seconds < 0:
                 raise ValueError("retry_after_seconds must not be negative")
+        auth_credential_fingerprint = _credential_fingerprint(
+            auth_credential_fingerprint
+        )
 
         job = conn.execute(
             "SELECT attempt_count FROM meta_attribution_jobs "
@@ -228,7 +244,12 @@ class MetaAdsStore:
             ).rowcount
             if updated != 1:
                 return False
-            self.defer_auth_circuit(conn, now, retry_after_seconds=retry_after_seconds)
+            self.defer_auth_circuit(
+                conn,
+                now,
+                retry_after_seconds=retry_after_seconds,
+                auth_credential_fingerprint=auth_credential_fingerprint,
+            )
             return True
         delay = RETRY_DELAYS_SECONDS[min(attempt_count, len(RETRY_DELAYS_SECONDS) - 1)]
         normal_delay = min(86_400.0, max(0.0, delay + jitter_seconds))
@@ -268,6 +289,7 @@ class MetaAdsStore:
         now: float,
         *,
         retry_after_seconds: float | None = None,
+        auth_credential_fingerprint: str | None = None,
     ) -> float:
         """Durably defer every account job after authentication becomes unavailable."""
         now = _finite(now, "now")
@@ -275,6 +297,9 @@ class MetaAdsStore:
             retry_after_seconds = _finite(retry_after_seconds, "retry_after_seconds")
             if retry_after_seconds < 0:
                 raise ValueError("retry_after_seconds must not be negative")
+        auth_credential_fingerprint = _credential_fingerprint(
+            auth_credential_fingerprint
+        )
         requested_until = now + max(AUTH_CIRCUIT_SECONDS, retry_after_seconds or 0.0)
         job_until = conn.execute(
             "SELECT MAX(next_attempt_at) FROM meta_attribution_jobs "
@@ -293,11 +318,15 @@ class MetaAdsStore:
         )
         conn.execute(
             "INSERT INTO meta_attribution_state "
-            "(account_id, auth_circuit_until, updated_at) VALUES (?, ?, ?) "
+            "(account_id, auth_circuit_until, auth_credential_fingerprint, updated_at) "
+            "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(account_id) DO UPDATE SET "
             "auth_circuit_until = excluded.auth_circuit_until, "
+            "auth_credential_fingerprint = COALESCE("
+            "excluded.auth_credential_fingerprint, "
+            "meta_attribution_state.auth_credential_fingerprint), "
             "updated_at = excluded.updated_at",
-            (self.account_id, circuit_until, now),
+            (self.account_id, circuit_until, auth_credential_fingerprint, now),
         )
         conn.execute(
             "UPDATE meta_attribution_jobs SET next_attempt_at = CASE "
@@ -319,9 +348,11 @@ class MetaAdsStore:
         now = _finite(now, "now")
         conn.execute(
             "INSERT INTO meta_attribution_state "
-            "(account_id, auth_circuit_until, updated_at) VALUES (?, ?, ?) "
+            "(account_id, auth_circuit_until, auth_credential_fingerprint, updated_at) "
+            "VALUES (?, ?, NULL, ?) "
             "ON CONFLICT(account_id) DO UPDATE SET "
             "auth_circuit_until = excluded.auth_circuit_until, "
+            "auth_credential_fingerprint = NULL, "
             "updated_at = excluded.updated_at",
             (self.account_id, now, now),
         )
@@ -350,6 +381,19 @@ class MetaAdsStore:
         ).fetchone()
         state_until = now if state is None else float(state["auth_circuit_until"])
         return max(now, float(job_until or now), state_until)
+
+    def auth_circuit_credential_fingerprint(
+        self, conn: sqlite3.Connection
+    ) -> str | None:
+        """Return the non-reversible credential digest recorded for this account."""
+        state = conn.execute(
+            "SELECT auth_credential_fingerprint FROM meta_attribution_state "
+            "WHERE account_id = ?",
+            (self.account_id,),
+        ).fetchone()
+        if state is None or state["auth_credential_fingerprint"] is None:
+            return None
+        return _credential_fingerprint(str(state["auth_credential_fingerprint"]))
 
     def upsert_record_and_confirm(
         self,

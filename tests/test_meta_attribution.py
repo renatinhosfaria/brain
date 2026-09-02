@@ -557,6 +557,116 @@ class MetaAttributionServiceTests(unittest.TestCase):
 
         self.assertEqual(restarted.run_due_jobs(now=3701.0), 1)
 
+    def test_rotated_credential_probe_closes_auth_circuit_before_expiry(
+        self,
+    ) -> None:
+        """Dropping credential identity would keep a validated replacement blocked."""
+        self.client.get_error = MetaAdsError("meta_auth_unavailable")
+        self.runtime.write(lambda conn: self._event(conn, "waevt_rotated_credential"))
+        self.runtime.write(
+            lambda conn: self.service.stage_event(
+                conn,
+                event_id="waevt_rotated_credential",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+        self.assertFalse(self.service.resolve_source(SOURCE_ID, now=100.0))
+        self.client.get_error = None
+
+        same_credential_runtime = RuntimeDatabase(
+            self.runtime.path, timeout_seconds=0.25
+        )
+        same_credential_runtime.initialize()
+        same_credential = MetaAttributionService(
+            self._settings(cursor_secret=b"d" * 32),
+            same_credential_runtime,
+            MetaAdsStore(ACCOUNT_ID),
+            self.client,
+        )
+        self.assertIsNone(same_credential.probe(now=101.0))
+        self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
+
+        rotated_runtime = RuntimeDatabase(self.runtime.path, timeout_seconds=0.25)
+        rotated_runtime.initialize()
+        rotated = MetaAttributionService(
+            self._settings(meta_ads_mcp_access_token="rotated-fixture-token"),
+            rotated_runtime,
+            MetaAdsStore(ACCOUNT_ID),
+            self.client,
+        )
+
+        self.assertIsNotNone(rotated.probe(now=101.0))
+
+        circuit_state = rotated_runtime.read(
+            lambda conn: tuple(
+                conn.execute(
+                    "SELECT auth_circuit_until, auth_credential_fingerprint "
+                    "FROM meta_attribution_state WHERE account_id = ?",
+                    (ACCOUNT_ID,),
+                ).fetchone()
+            )
+        )
+        self.assertEqual(circuit_state, (101.0, None))
+        self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID), ("probe", "")])
+
+        confirmed_runtime = RuntimeDatabase(self.runtime.path, timeout_seconds=0.25)
+        confirmed_runtime.initialize()
+        confirmed = MetaAttributionService(
+            self._settings(meta_ads_mcp_access_token="rotated-fixture-token"),
+            confirmed_runtime,
+            MetaAdsStore(ACCOUNT_ID),
+            self.client,
+        )
+
+        self.assertEqual(confirmed.run_due_jobs(now=101.0), 1)
+        view = confirmed_runtime.read(
+            lambda conn: MetaAdsStore(ACCOUNT_ID).context_for_event(
+                conn, "waevt_rotated_credential"
+            )
+        )
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertEqual(view.status, "confirmed")
+
+    def test_unsuccessful_rotated_credential_probe_keeps_auth_circuit_open(
+        self,
+    ) -> None:
+        """Closing on a failed probe would let a bad replacement retry through jobs."""
+        self.client.get_error = MetaAdsError("meta_auth_unavailable")
+        self.runtime.write(lambda conn: self._event(conn, "waevt_failed_rotation"))
+        self.runtime.write(
+            lambda conn: self.service.stage_event(
+                conn,
+                event_id="waevt_failed_rotation",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+        self.assertFalse(self.service.resolve_source(SOURCE_ID, now=100.0))
+        self.client.get_error = None
+        self.client.probe_error = MetaAdsError("meta_server_unavailable")
+
+        rotated_runtime = RuntimeDatabase(self.runtime.path, timeout_seconds=0.25)
+        rotated_runtime.initialize()
+        rotated = MetaAttributionService(
+            self._settings(meta_ads_mcp_access_token="rotated-fixture-token"),
+            rotated_runtime,
+            MetaAdsStore(ACCOUNT_ID),
+            self.client,
+        )
+
+        self.assertIsNone(rotated.probe(now=101.0))
+
+        after_failed_probe = MetaAttributionService(
+            self._settings(meta_ads_mcp_access_token="rotated-fixture-token"),
+            RuntimeDatabase(self.runtime.path, timeout_seconds=0.25),
+            MetaAdsStore(ACCOUNT_ID),
+            self.client,
+        )
+        self.assertEqual(after_failed_probe.run_due_jobs(now=101.0), 0)
+        self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID), ("probe", "")])
+
     def test_restart_recovers_an_expired_lease_and_runs_the_due_job(self) -> None:
         """A process restart must not strand attribution behind an old worker lease."""
         self.runtime.write(lambda conn: self._event(conn, "waevt_restart"))

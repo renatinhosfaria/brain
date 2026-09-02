@@ -149,6 +149,7 @@ _SCHEMA = (
     CREATE TABLE IF NOT EXISTS meta_attribution_state (
         account_id TEXT PRIMARY KEY,
         auth_circuit_until REAL NOT NULL CHECK (auth_circuit_until >= 0),
+        auth_credential_fingerprint TEXT,
         updated_at REAL NOT NULL
     )
     """,
@@ -226,6 +227,15 @@ class RuntimeDatabase:
                 if "lease_token" not in job_columns:
                     conn.execute(
                         "ALTER TABLE meta_attribution_jobs ADD COLUMN lease_token TEXT"
+                    )
+                state_columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(meta_attribution_state)")
+                }
+                if "auth_credential_fingerprint" not in state_columns:
+                    conn.execute(
+                        "ALTER TABLE meta_attribution_state "
+                        "ADD COLUMN auth_credential_fingerprint TEXT"
                     )
                 conn.commit()
             except BaseException:

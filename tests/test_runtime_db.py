@@ -160,8 +160,56 @@ class RuntimeDatabaseTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(columns, {"account_id", "auth_circuit_until", "updated_at"})
+        self.assertEqual(
+            columns,
+            {
+                "account_id",
+                "auth_circuit_until",
+                "auth_credential_fingerprint",
+                "updated_at",
+            },
+        )
         self.assertIn("PRIMARY KEY", sql)
+
+    def test_initialize_adds_credential_fingerprint_to_legacy_circuit_state(
+        self,
+    ) -> None:
+        """A state migration must retain its horizon without storing a credential."""
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE meta_attribution_state ("
+                "account_id TEXT PRIMARY KEY, auth_circuit_until REAL NOT NULL, "
+                "updated_at REAL NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO meta_attribution_state VALUES "
+                "('1598606388477916', 3700.0, 100.0)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.initialize()
+
+        columns, state = self.runtime.read(
+            lambda conn: (
+                {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(meta_attribution_state)")
+                },
+                tuple(
+                    conn.execute(
+                        "SELECT auth_circuit_until, auth_credential_fingerprint "
+                        "FROM meta_attribution_state WHERE account_id = ?",
+                        ("1598606388477916",),
+                    ).fetchone()
+                ),
+            )
+        )
+        self.assertIn("auth_credential_fingerprint", columns)
+        self.assertEqual(state, (3700.0, None))
 
     def test_meta_attribution_schema_rejects_unknown_error_codes(self) -> None:
         """A corrupted error code must not become durable retry state."""

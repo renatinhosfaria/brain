@@ -7,6 +7,8 @@ short transaction stores its outcome.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
 import sqlite3
 import time
@@ -124,6 +126,7 @@ class MetaAttributionService:
                 "meta_auth_unavailable",
                 lease_token,
                 retry_after_seconds=AUTH_CIRCUIT_SECONDS,
+                auth_credential_fingerprint=self._credential_fingerprint(),
             )
             self._refresh_auth_circuit(now)
             return False
@@ -161,6 +164,11 @@ class MetaAttributionService:
                 exc.code,
                 lease_token,
                 retry_after_seconds=exc.retry_after_seconds,
+                auth_credential_fingerprint=(
+                    self._credential_fingerprint()
+                    if exc.code == "meta_auth_unavailable"
+                    else None
+                ),
             )
             if exc.code == "meta_auth_unavailable":
                 self._refresh_auth_circuit(completed_at)
@@ -213,12 +221,19 @@ class MetaAttributionService:
 
     def probe(self, now: float) -> MetaAdsCapabilities | None:
         """Run the explicit capability probe and close the auth circuit on success."""
-        if (
-            not self.enabled
-            or self._durable_auth_circuit_active(now)
-            or self._credential_status(now) in {"missing", "expired"}
-        ):
+        if not self.enabled or self._credential_status(now) in {"missing", "expired"}:
             return None
+        if self._durable_auth_circuit_active(now):
+            recorded_fingerprint = self._runtime.read(
+                lambda conn: self._store.auth_circuit_credential_fingerprint(conn)
+            )
+            current_fingerprint = self._credential_fingerprint()
+            if (
+                recorded_fingerprint is None
+                or current_fingerprint is None
+                or hmac.compare_digest(recorded_fingerprint, current_fingerprint)
+            ):
+                return None
         try:
             capabilities = self._client.probe()
         except MetaAdsError as exc:
@@ -336,7 +351,10 @@ class MetaAttributionService:
     ) -> None:
         circuit_until = self._runtime.write(
             lambda conn: self._store.defer_auth_circuit(
-                conn, now, retry_after_seconds=retry_after_seconds
+                conn,
+                now,
+                retry_after_seconds=retry_after_seconds,
+                auth_credential_fingerprint=self._credential_fingerprint(),
             )
         )
         self._auth_circuit_until = max(self._auth_circuit_until, circuit_until)
@@ -364,6 +382,7 @@ class MetaAttributionService:
         lease_token: str,
         *,
         retry_after_seconds: float | None = None,
+        auth_credential_fingerprint: str | None = None,
     ) -> None:
         self._runtime.write(
             lambda conn: self._store.fail_job(
@@ -373,8 +392,20 @@ class MetaAttributionService:
                 error_code,
                 lease_token=lease_token,
                 retry_after_seconds=retry_after_seconds,
+                auth_credential_fingerprint=auth_credential_fingerprint,
             )
         )
+
+    def _credential_fingerprint(self) -> str | None:
+        credential = self._settings.meta_ads_mcp_access_token
+        if not credential:
+            return None
+        key = self._settings.transport_hmac_secret or credential.encode("utf-8")
+        return hmac.new(
+            key,
+            b"brain-meta-auth-circuit-v1\x00" + credential.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     def _validate_confirmation(self, source_id: str, record: object) -> None:
         if not isinstance(record, MetaAdRecord):
