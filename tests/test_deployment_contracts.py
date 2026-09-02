@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
+import stat
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.install_brain_secrets import restore_files, snapshot_files
 
@@ -12,6 +18,360 @@ ROOT = Path(__file__).parents[1]
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_meta_credential_installer_rotates_atomically_without_echoing_token(
+        self,
+    ) -> None:
+        """Removing the atomic installer must break secret rotation, not logging."""
+        from scripts import install_meta_ads_credential
+
+        token = "synthetic-meta-token-never-log"
+        expiry = "2026-11-01T00:00:00Z"
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            env_path = config_dir / "brain.env"
+            env_path.write_text(
+                "BRAIN_CONFIG=/etc/brain/brain.toml\nOTHER_VALUE=preserved\n"
+                "BRAIN_META_ADS_MCP_ACCESS_TOKEN=old-value\n",
+                encoding="utf-8",
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.object(
+                    install_meta_ads_credential.sys, "stdin", io.StringIO(token + "\n")
+                ),
+            ):
+                result = install_meta_ads_credential.main(
+                    [
+                        "--config-dir",
+                        str(config_dir),
+                        "--expires-at",
+                        expiry,
+                        "--rotate",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                stdout.getvalue(), "OK: Meta Ads MCP credential installed\n"
+            )
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertNotIn(token, stdout.getvalue() + stderr.getvalue())
+            self.assertEqual(stat.S_IMODE(env_path.stat().st_mode), 0o600)
+            self.assertEqual(
+                env_path.read_text(encoding="utf-8"),
+                "BRAIN_CONFIG=/etc/brain/brain.toml\nOTHER_VALUE=preserved\n"
+                f"BRAIN_META_ADS_MCP_ACCESS_TOKEN={token}\n"
+                f"BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT={expiry}\n",
+            )
+
+    def test_meta_credential_installer_runs_from_its_documented_script_path(
+        self,
+    ) -> None:
+        """A broken direct-script import must fail before an operator supplies a token."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "scripts/install_meta_ads_credential.py", "--help"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--config-dir", result.stdout)
+
+    def test_meta_credential_installer_refuses_replacement_and_symlinks(self) -> None:
+        """Removing overwrite or symlink guards must fail this installation boundary."""
+        from scripts import install_meta_ads_credential
+
+        token = "synthetic-meta-token-never-log"
+        expiry = "2026-11-01T00:00:00Z"
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            env_path = config_dir / "brain.env"
+            env_path.write_text(
+                "OTHER_VALUE=preserved\nBRAIN_META_ADS_MCP_ACCESS_TOKEN=old-value\n",
+                encoding="utf-8",
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.object(
+                    install_meta_ads_credential.sys, "stdin", io.StringIO(token + "\n")
+                ),
+            ):
+                result = install_meta_ads_credential.main(
+                    ["--config-dir", str(config_dir), "--expires-at", expiry]
+                )
+            self.assertEqual(result, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(
+                stderr.getvalue(), "FAIL: Meta Ads MCP credential installation failed\n"
+            )
+            self.assertNotIn(token, stderr.getvalue())
+            self.assertEqual(
+                env_path.read_text(encoding="utf-8"),
+                "OTHER_VALUE=preserved\nBRAIN_META_ADS_MCP_ACCESS_TOKEN=old-value\n",
+            )
+
+            target = config_dir / "outside.env"
+            target.write_text("OUTSIDE=unchanged\n", encoding="utf-8")
+            env_path.unlink()
+            env_path.symlink_to(target)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.object(
+                    install_meta_ads_credential.sys, "stdin", io.StringIO(token + "\n")
+                ),
+            ):
+                result = install_meta_ads_credential.main(
+                    [
+                        "--config-dir",
+                        str(config_dir),
+                        "--expires-at",
+                        expiry,
+                        "--rotate",
+                    ]
+                )
+            self.assertEqual(result, 1)
+            self.assertEqual(
+                stderr.getvalue(), "FAIL: Meta Ads MCP credential installation failed\n"
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), "OUTSIDE=unchanged\n")
+
+            env_path.unlink()
+            env_path.write_text("OTHER_VALUE=preserved\n", encoding="utf-8")
+            linked_dir = config_dir / "linked-brain-config"
+            linked_dir.symlink_to(config_dir, target_is_directory=True)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.object(
+                    install_meta_ads_credential.sys, "stdin", io.StringIO(token + "\n")
+                ),
+            ):
+                result = install_meta_ads_credential.main(
+                    [
+                        "--config-dir",
+                        str(linked_dir),
+                        "--expires-at",
+                        expiry,
+                        "--rotate",
+                    ]
+                )
+            self.assertEqual(result, 1)
+            self.assertEqual(
+                stderr.getvalue(), "FAIL: Meta Ads MCP credential installation failed\n"
+            )
+            self.assertEqual(
+                env_path.read_text(encoding="utf-8"), "OTHER_VALUE=preserved\n"
+            )
+
+    def test_meta_credential_installer_restores_snapshot_after_write_failure(
+        self,
+    ) -> None:
+        """Removing rollback after an interrupted write must leave a partial secret."""
+        from scripts import install_meta_ads_credential
+
+        token = "synthetic-meta-token-never-log"
+        expiry = "2026-11-01T00:00:00Z"
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            env_path = config_dir / "brain.env"
+            original = b"OTHER_VALUE=preserved\n"
+            env_path.write_bytes(original)
+            real_write = install_meta_ads_credential.atomic_private_write_bytes
+
+            def fail_after_partial(path: Path, content: bytes) -> None:
+                real_write(path, b"PARTIAL=write\n")
+                raise OSError("injected failure")
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.object(
+                    install_meta_ads_credential.sys, "stdin", io.StringIO(token + "\n")
+                ),
+                patch.object(
+                    install_meta_ads_credential,
+                    "atomic_private_write_bytes",
+                    side_effect=fail_after_partial,
+                ),
+            ):
+                result = install_meta_ads_credential.main(
+                    [
+                        "--config-dir",
+                        str(config_dir),
+                        "--expires-at",
+                        expiry,
+                        "--rotate",
+                    ]
+                )
+            self.assertEqual(result, 1)
+            self.assertEqual(env_path.read_bytes(), original)
+            self.assertEqual(
+                stderr.getvalue(), "FAIL: Meta Ads MCP credential installation failed\n"
+            )
+            self.assertNotIn(token, stdout.getvalue() + stderr.getvalue())
+
+    def test_meta_probe_uses_only_configured_read_checks_and_bounded_output(
+        self,
+    ) -> None:
+        """Removing the capability/account/known-ad probe must fail this operator check."""
+        from scripts import meta_ads_mcp_probe
+
+        settings = SimpleNamespace(
+            meta_attribution_enabled=True,
+            meta_ad_account_id="1598606388477916",
+            meta_ads_mcp_access_token="synthetic-meta-token-never-log",
+            meta_ads_mcp_token_expires_at=1_793_491_200.0,
+        )
+
+        class FakeClient:
+            def __init__(self, configured: object) -> None:
+                self.configured = configured
+                self.probed = False
+                self.ad_id: str | None = None
+
+            def probe(self) -> object:
+                self.probed = True
+                return object()
+
+            def get_ad(self, source_id: str, now: float) -> object:
+                self.ad_id = source_id
+                if not self.probed or now <= 0:
+                    raise AssertionError("probe must precede known-ad read")
+                return object()
+
+        created: list[FakeClient] = []
+
+        def factory(configured: object) -> FakeClient:
+            client = FakeClient(configured)
+            created.append(client)
+            return client
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+            patch.object(
+                meta_ads_mcp_probe.BrainSettings, "from_env", return_value=settings
+            ),
+            patch.dict(os.environ, {"BRAIN_META_PROBE_AD_ID": "1203001"}, clear=False),
+        ):
+            result = meta_ads_mcp_probe.main(client_factory=factory)
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            stdout.getvalue(),
+            "OK: Meta Ads MCP tools, configured account, and known-ad read verified\n",
+        )
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(len(created), 1)
+        self.assertIs(created[0].configured, settings)
+        self.assertEqual(created[0].ad_id, "1203001")
+
+    def test_meta_probe_hides_token_known_id_and_exception_details(self) -> None:
+        """Replacing bounded errors with exception echoing must expose this regression."""
+        from scripts import meta_ads_mcp_probe
+
+        token = "synthetic-meta-token-never-log"
+        known_id = "1203001"
+        settings = SimpleNamespace(
+            meta_attribution_enabled=True,
+            meta_ad_account_id="1598606388477916",
+            meta_ads_mcp_access_token=token,
+            meta_ads_mcp_token_expires_at=1_793_491_200.0,
+        )
+
+        class FailingClient:
+            def __init__(self, configured: object) -> None:
+                pass
+
+            def probe(self) -> object:
+                raise RuntimeError(f"{token} {known_id} confidential response")
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+            patch.object(
+                meta_ads_mcp_probe.BrainSettings, "from_env", return_value=settings
+            ),
+            patch.dict(os.environ, {"BRAIN_META_PROBE_AD_ID": known_id}, clear=False),
+        ):
+            result = meta_ads_mcp_probe.main(client_factory=FailingClient)
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "FAIL: meta_server_unavailable\n")
+        self.assertNotIn(token, stderr.getvalue())
+        self.assertNotIn(known_id, stderr.getvalue())
+
+    def test_meta_deployment_examples_smoke_and_runbook_preserve_read_only_contract(
+        self,
+    ) -> None:
+        """Wrong account/defaults or secret-like examples must fail the deployment gate."""
+        env_example = (ROOT / "deploy/brain.env.example").read_text(encoding="utf-8")
+        toml = tomllib.loads(
+            (ROOT / "deploy/brain.toml.example").read_text(encoding="utf-8")
+        )
+        service = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
+        smoke = (ROOT / "scripts/smoke_test.py").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "BRAIN_META_ADS_MCP_ACCESS_TOKEN=replace-with-meta-ads-mcp-access-token",
+            env_example,
+        )
+        self.assertIn(
+            "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT=2099-01-01T00:00:00Z",
+            env_example,
+        )
+        self.assertNotRegex(env_example, r"(?i)EA[A-Za-z0-9_-]{20,}")
+        server = toml["server"]
+        self.assertFalse(server["meta_attribution_enabled"])
+        self.assertEqual(server["meta_ad_account_id"], "act_1598606388477916")
+        self.assertEqual(server["meta_ads_mcp_timeout_seconds"], 4.0)
+        self.assertEqual(server["meta_ads_mcp_response_max_bytes"], 8_388_608)
+        self.assertEqual(server["meta_ads_sync_interval_seconds"], 900)
+        self.assertEqual(server["meta_ads_full_sync_interval_seconds"], 86_400)
+        for required in (
+            "User=root",
+            "Group=root",
+            "AF_INET",
+            "AF_INET6",
+            "ProtectSystem=strict",
+            "ReadWritePaths=/var/lib/brain/runtime",
+        ):
+            self.assertIn(required, service)
+        self.assertIn('meta_status == "disabled"', smoke)
+        self.assertIn('{"ready", "degraded"}', smoke)
+        for source in (readme, runbook):
+            self.assertIn("act_1598606388477916", source)
+            self.assertIn("https://mcp.facebook.com/ads", source)
+        for required in (
+            "Create & manage ads with Ads MCP server",
+            "Read/Manage",
+            "--rotate",
+            "rollback",
+            "pending",
+            "disabled",
+            "ready",
+            "degraded",
+            "90-day",
+            "ads_management",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, runbook)
+
     def test_whatsapp_observer_unit_is_hardened_and_isolated(self) -> None:
         source = (ROOT / "deploy/brain-whatsapp-observer.service").read_text(
             encoding="utf-8"

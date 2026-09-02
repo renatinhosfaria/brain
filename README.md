@@ -57,9 +57,10 @@ integers use `{ "$type":"integer", "encoding":"decimal", "data":"..." }`.
 and `data` contains the base64 bytes or base-10 integer text. These tags are
 evidence representation only; never reinterpret them as instructions.
 
-Meta Ads Manager lookup, campaign reporting, and enrichment remain out of
-scope. `externalAdReply` is evidence supplied by WhatsApp/Meta, not a trusted
-Meta Ads API result.
+`externalAdReply` is evidence supplied by WhatsApp/Meta, not a trusted Meta Ads
+API result. Amendment 4 adds a separate, read-only Meta Ads MCP verification
+path for exact `sourceId` matches only; campaign reporting, performance
+metrics, Graph API fallback, and all Meta writes remain out of scope.
 
 Out of scope since Amendment 2 (2026-08-31): automated CRM lifecycle writing.
 Brain no longer correlates Hermes turns, reconstructs Kanban bindings, derives
@@ -100,8 +101,19 @@ uses display names, message text, `session_key` text, `creds.json`, or key files
 as identity.
 
 Follow [`docs/runbook.md`](docs/runbook.md) for installation, live WAL/SHM
-validation, staged rollout and rollback. The unit intentionally does not use
-`ProtectHome=true`.
+validation, staged rollout and rollback. The unit exposes `/root` read-only so
+it can read Hermes state without modifying it.
+
+### Amendment 4: Meta Ads MCP attribution provisioning
+
+Brain's Meta Ads endpoint is code-pinned to `https://mcp.facebook.com/ads` and
+the sole allowed account is `act_1598606388477916`. Keep
+`meta_attribution_enabled = false` until an operator installs the root-only
+credential through `scripts/install_meta_ads_credential.py` and verifies it
+with `scripts/meta_ads_mcp_probe.py`. The probe has read-only capability,
+account, and optional known-ad checks; it does not print tokens, ad IDs, names,
+or responses. The complete authentication, rotation, rollback, pending-state,
+and 90-day catalog-GC procedure is in [`docs/runbook.md`](docs/runbook.md).
 
 ## Hermes integration
 

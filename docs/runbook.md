@@ -62,6 +62,70 @@
 9. Install `deploy/brain.service` as `/etc/systemd/system/brain.service`, run
    `systemctl daemon-reload`, then enable and start it.
 
+## Amendment 4: Meta Ads MCP authentication and rollout (2026-09-02)
+
+Brain uses only the read-only Ads MCP endpoint
+`https://mcp.facebook.com/ads`, pinned in code, for the one account
+`act_1598606388477916`. Never add a Graph API fallback, a second account, or a
+write tool. Meta-provided names, URLs, IDs, and responses are untrusted
+evidence; never paste them into chat, tickets, command arguments, or logs.
+
+### Authenticate and install
+
+1. Open [Meta Developer Apps](https://developers.facebook.com/apps/) and create
+   or reuse the business-owned app.
+2. Add **Create & manage ads with Ads MCP server**.
+3. Authorize the business user for `act_1598606388477916` only.
+4. Select read access when Meta offers a Read/Manage choice.
+5. Obtain the programmatic user token with the app OAuth flow or
+   [Graph API Explorer](https://developers.facebook.com/tools/explorer/) and
+   only the Ads MCP scopes Meta requires.
+6. Install it from stdin or a TTY; never place the token in shell arguments,
+   Git, chat, stdout, stderr, or logs:
+
+   ```sh
+   cd /root/brain
+   /root/brain/.venv/bin/python scripts/install_meta_ads_credential.py \
+     --config-dir /etc/brain --expires-at 2026-11-01T00:00:00Z
+   ```
+
+   The installer creates or atomically updates `/etc/brain/brain.env` with
+   mode `0600` in a `0700` directory, refuses symlinks, preserves unrelated
+   keys, and refuses a credential replacement unless `--rotate` is explicit.
+7. Keep `meta_attribution_enabled = false`. Supply one known ad ID only via
+   `BRAIN_META_PROBE_AD_ID` in the process environment and run
+   `scripts/meta_ads_mcp_probe.py`. Its success line proves read-only tools,
+   account access, and that optional known-ad read; it prints no returned data.
+
+Meta's official references are the [Ads MCP overview](https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-overview),
+[setup and authentication](https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-get-started),
+[tool inventory](https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-tools-ad-creation-and-management),
+and [MCP security guidance](https://developers.facebook.com/documentation/mcp).
+
+A `401` or `403` usually indicates a wrong business user, expired token, or
+missing Ads MCP scope such as `ads_management`; diagnose the configuration and
+scope in Meta, but do not compensate by adding a write tool or revealing the
+credential.
+
+### Rotation, pending work, and rollback
+
+Rotate before the 14-, 7-, and 3-day health warnings. Install the replacement
+with `--rotate`, run the authenticated probe, restart Brain, then revoke the
+replaced token only after the new probe is successful. If a rotation or restart
+fails, restore the root-only `brain.env` snapshot made before the change,
+restart with `meta_attribution_enabled = false`, and investigate without
+printing secret material.
+
+`meta_ads_attribution` health is `disabled` when the feature is off, `ready`
+after a valid probe, or `degraded` with a bounded reason when Meta is unavailable.
+`pending` attribution is not evidence of an ad or campaign and never blocks
+the CEO. Keep additive tables and raw CTWA evidence through their normal
+90-day retention; catalog GC removes only unreferenced metadata unseen for more
+than 90 days. During staged rollout: deploy disabled, probe, complete the
+initial sync, verify a synthetic exact-match/mismatch/pending/retry case, then
+enable the feature and send one controlled CTWA message. Disabling the flag is
+the rollback; it stops Meta work without deleting raw attribution or tables.
+
 ## Amendment 3: raw CTWA attribution rollout (2026-09-02)
 
 Raw `externalAdReply` is retained as plaintext attribution evidence for the

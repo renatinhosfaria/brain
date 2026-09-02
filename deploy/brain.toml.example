@@ -22,6 +22,14 @@ ctwa_raw_max_nodes = 10000
 context_response_max_bytes = 33554432
 busy_retries = 2
 busy_timeout_seconds = 1.0
+# Meta Ads MCP is fixed to https://mcp.facebook.com/ads in Brain code. Keep it
+# disabled until the root-only credential installer and authenticated probe pass.
+meta_attribution_enabled = false
+meta_ad_account_id = "act_1598606388477916"
+meta_ads_mcp_timeout_seconds = 4.0
+meta_ads_mcp_response_max_bytes = 8388608
+meta_ads_sync_interval_seconds = 900
+meta_ads_full_sync_interval_seconds = 86400
 # Keep this stable across restarts so issued pagination cursors remain valid.
 # Generate with: openssl rand -hex 32
 # cursor_secret = "replace-with-64-hex-characters"
