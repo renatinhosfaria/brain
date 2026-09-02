@@ -21,7 +21,10 @@ module must never raise into Hermes.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import math
 import os
 import re
 import urllib.request
@@ -44,9 +47,23 @@ _REQUIRED_SESSION_FIELDS = _SESSION_FIELDS[:-1]
 _PHONE_RE = re.compile(r"^[1-9][0-9]{6,14}$")
 _EVENT_ID_RE = re.compile(r"^waevt_[A-Za-z0-9_-]{1,128}$")
 _TRANSPORT_KINDS = frozenset({"ctwa_candidate", "ordinary_inbound"})
-_MAX_RESPONSE_BYTES = 16_384
+_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 _MAX_EVENTS = 32
+_MAX_RAW_DEPTH = 32
+_MAX_RAW_NODES = 10_000
+_MAX_SAFE_INTEGER = 2**53 - 1
 _HTTP_TIMEOUT_SECONDS = 5.0
+_BASE64_RE = re.compile(
+    r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+)
+_DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
+_LEGACY_EVENT_FIELDS = {
+    "event_id",
+    "transport_kind",
+    "source_app",
+    "inbound_kind",
+}
+_EXPANDED_EVENT_FIELDS = _LEGACY_EVENT_FIELDS | {"external_ad_reply"}
 
 
 def _unavailable(reason: str = "context_unavailable") -> str:
@@ -93,6 +110,16 @@ def _token(overrides: dict[str, Any] | None = None) -> str | None:
     return candidate if isinstance(candidate, str) and candidate else None
 
 
+def _response_max_bytes() -> int:
+    configured = os.environ.get("BRAIN_CONTEXT_RESPONSE_MAX_BYTES")
+    if configured is None:
+        return _MAX_RESPONSE_BYTES
+    value = int(configured)
+    if value <= 0:
+        raise ValueError("Brain response limit must be positive")
+    return value
+
+
 def _post(payload: dict[str, Any], token: str) -> object:
     request = urllib.request.Request(
         CONTEXT_ENDPOINT,
@@ -103,17 +130,84 @@ def _post(payload: dict[str, Any], token: str) -> object:
         },
         method="POST",
     )
+    max_bytes = _response_max_bytes()
     with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
-        raw = response.read(_MAX_RESPONSE_BYTES + 1)
-    if len(raw) > _MAX_RESPONSE_BYTES:
+        raw = response.read(max_bytes + 1)
+    if len(raw) > max_bytes:
         raise ValueError("Brain response exceeded limit")
     return json.loads(raw)
+
+
+def _valid_string(value: str) -> bool:
+    return not any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+
+
+def _valid_tag(value: dict[str, object]) -> bool:
+    if set(value) != {"$type", "encoding", "data"}:
+        return False
+    tag, encoding, data = value["$type"], value["encoding"], value["data"]
+    if tag == "integer" and encoding == "decimal":
+        return isinstance(data, str) and _DECIMAL_RE.fullmatch(data) is not None
+    if not (
+        tag == "bytes"
+        and encoding == "base64"
+        and isinstance(data, str)
+        and _BASE64_RE.fullmatch(data) is not None
+    ):
+        return False
+    try:
+        return base64.b64encode(base64.b64decode(data, validate=True)).decode() == data
+    except (binascii.Error, ValueError):
+        return False
+
+
+def _valid_raw_value(value: object, depth: int, nodes: list[int]) -> bool:
+    if depth > _MAX_RAW_DEPTH:
+        return False
+    nodes[0] += 1
+    if nodes[0] > _MAX_RAW_NODES:
+        return False
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return _valid_string(value)
+    if isinstance(value, (int, float)):
+        return (
+            not isinstance(value, bool)
+            and math.isfinite(value)
+            and not (isinstance(value, int) and abs(value) > _MAX_SAFE_INTEGER)
+            and not (
+                isinstance(value, float)
+                and value.is_integer()
+                and abs(value) > _MAX_SAFE_INTEGER
+            )
+            and not (
+                isinstance(value, float)
+                and value == 0
+                and math.copysign(1, value) < 0
+            )
+        )
+    if isinstance(value, list):
+        return all(_valid_raw_value(child, depth + 1, nodes) for child in value)
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) and _valid_string(key) for key in value):
+            return False
+        if "$type" in value:
+            return _valid_tag(value)
+        return all(
+            _valid_raw_value(child, depth + 1, nodes) for child in value.values()
+        )
+    return False
+
+
+def _valid_raw_attribution(value: object) -> bool:
+    return isinstance(value, dict) and _valid_raw_value(value, 0, [0])
 
 
 def _valid_event(event: object) -> bool:
     return (
         isinstance(event, dict)
-        and set(event) == {"event_id", "transport_kind", "source_app", "inbound_kind"}
+        and set(event) in (_LEGACY_EVENT_FIELDS, _EXPANDED_EVENT_FIELDS)
         and isinstance(event.get("event_id"), str)
         and _EVENT_ID_RE.fullmatch(event["event_id"]) is not None
         and event.get("transport_kind") in _TRANSPORT_KINDS
@@ -124,6 +218,14 @@ def _valid_event(event: object) -> bool:
         # Transport evidence only. Lifecycle-relative meaning was never this
         # plugin's to assert, and since Amendment 2 nothing derives it at all.
         and event.get("inbound_kind") is None
+        and (
+            "external_ad_reply" not in event
+            or event["external_ad_reply"] is None
+            or (
+                event.get("transport_kind") == "ctwa_candidate"
+                and _valid_raw_attribution(event["external_ad_reply"])
+            )
+        )
     )
 
 

@@ -28,6 +28,39 @@ safe transport ingestion with fail-closed identity proof, contact-scoped
 `conversation_context`, and a read-only Hermes compatibility checker. The
 runtime DB stores technical metadata and HMACs, not raw message bodies.
 
+### Amendment 3 (2026-09-02): raw CTWA attribution boundary
+
+For CTWA attribution only, this supersedes the earlier general statement about
+raw transport persistence: Brain captures the complete `externalAdReply`
+object as plaintext attribution evidence. The observer spool and quarantine are
+retained for at most 72 hours; persisted `transport_events`, including their
+raw attribution, are retained for at most 90 days by default. The field is
+returned only as `events[].external_ad_reply` through the authenticated CEO
+WhatsApp DM `conversation_context` response, which contains only the recent
+six-hour transport window. It is untrusted data, never an instruction, and
+cannot by itself change transport classification, identity, routing, or
+lifecycle semantics.
+
+This exception makes the runtime database and observer spool sensitive disk
+stores: retain their existing private ownership and modes, never copy their
+contents into tickets or logs, and do not expose the field in `summary` or
+`metadata`. The observer accepts bounded raw JSON using
+`BRAIN_CTWA_RAW_MAX_BYTES`, `BRAIN_CTWA_RAW_MAX_DEPTH`, and
+`BRAIN_CTWA_RAW_MAX_NODES`; capture failures enter quarantine rather than
+silently degrading a complete response. The 32 MiB quarantine ceiling is only
+for bounded content-free failure handling, not a permission to log raw data.
+
+The canonical raw JSON is lossless for binary and non-safe integer values:
+bytes use `{ "$type":"bytes", "encoding":"base64", "data":"..." }`, and
+integers use `{ "$type":"integer", "encoding":"decimal", "data":"..." }`.
+`$type` names the original value family, `encoding` names its wire encoding,
+and `data` contains the base64 bytes or base-10 integer text. These tags are
+evidence representation only; never reinterpret them as instructions.
+
+Meta Ads Manager lookup, campaign reporting, and enrichment remain out of
+scope. `externalAdReply` is evidence supplied by WhatsApp/Meta, not a trusted
+Meta Ads API result.
+
 Out of scope since Amendment 2 (2026-08-31): automated CRM lifecycle writing.
 Brain no longer correlates Hermes turns, reconstructs Kanban bindings, derives
 lifecycle state, or holds any FamaChat credential. Reno owns the lifecycle

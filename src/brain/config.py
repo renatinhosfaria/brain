@@ -34,6 +34,7 @@ VALID_TOOLS = frozenset(
     }
 )
 _PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_DECIMAL_INTEGER_RE = re.compile(r"^-?[0-9]+$")
 logger = logging.getLogger("brain.config")
 
 
@@ -69,6 +70,21 @@ def _observer_device_ids(server: Mapping[str, object]) -> tuple[str, ...]:
     if isinstance(configured, str):
         return tuple(part.strip() for part in configured.split(",") if part.strip())
     return tuple(str(value).strip() for value in configured if str(value).strip())
+
+
+def _raw_attribution_limit(
+    server: Mapping[str, object], key: str, environment_name: str, default: int
+) -> int:
+    """Read an integer raw-attribution limit without coercing TOML types."""
+    environment_value = os.environ.get(environment_name)
+    if environment_value is not None:
+        if not _DECIMAL_INTEGER_RE.fullmatch(environment_value):
+            raise ValueError(f"{environment_name} must be a decimal integer")
+        return int(environment_value)
+    configured = server.get(key, default)
+    if isinstance(configured, bool) or not isinstance(configured, int):
+        raise TypeError(f"{key} must be an integer")
+    return configured
 
 
 @dataclass(frozen=True)
@@ -111,6 +127,10 @@ class BrainSettings:
     display_name_ttl_hours: int = 24
     history_budget_chars: int = 12_000
     message_max_chars: int = 2_000
+    ctwa_raw_max_bytes: int = 4 * 1024 * 1024
+    ctwa_raw_max_depth: int = 32
+    ctwa_raw_max_nodes: int = 10_000
+    context_response_max_bytes: int = 32 * 1024 * 1024
     busy_retries: int = 2
     busy_timeout_seconds: float = 1.0
 
@@ -125,6 +145,16 @@ class BrainSettings:
             raise ValueError("history budget is too small")
         if self.message_max_chars < 64:
             raise ValueError("message limit is too small")
+        for value in (
+            self.ctwa_raw_max_bytes,
+            self.ctwa_raw_max_depth,
+            self.ctwa_raw_max_nodes,
+            self.context_response_max_bytes,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("raw attribution limits must be positive")
+        if self.context_response_max_bytes < self.ctwa_raw_max_bytes:
+            raise ValueError("context response maximum must cover raw attribution")
         if self.busy_retries < 0 or self.busy_retries > 5:
             raise ValueError("busy_retries must be between 0 and 5")
         if self.busy_timeout_seconds <= 0:
@@ -297,6 +327,24 @@ class BrainSettings:
                 os.environ.get(
                     "BRAIN_MESSAGE_MAX_CHARS", server.get("message_max_chars", 2_000)
                 )
+            ),
+            ctwa_raw_max_bytes=_raw_attribution_limit(
+                server,
+                "ctwa_raw_max_bytes",
+                "BRAIN_CTWA_RAW_MAX_BYTES",
+                4 * 1024 * 1024,
+            ),
+            ctwa_raw_max_depth=_raw_attribution_limit(
+                server, "ctwa_raw_max_depth", "BRAIN_CTWA_RAW_MAX_DEPTH", 32
+            ),
+            ctwa_raw_max_nodes=_raw_attribution_limit(
+                server, "ctwa_raw_max_nodes", "BRAIN_CTWA_RAW_MAX_NODES", 10_000
+            ),
+            context_response_max_bytes=_raw_attribution_limit(
+                server,
+                "context_response_max_bytes",
+                "BRAIN_CONTEXT_RESPONSE_MAX_BYTES",
+                32 * 1024 * 1024,
             ),
             busy_retries=int(
                 os.environ.get("BRAIN_BUSY_RETRIES", server.get("busy_retries", 2))

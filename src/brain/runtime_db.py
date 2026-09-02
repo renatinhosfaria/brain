@@ -44,6 +44,7 @@ _SCHEMA = (
             CHECK (click_to_whatsapp_call IS NULL OR click_to_whatsapp_call IN (0, 1)),
         contains_auto_reply INTEGER
             CHECK (contains_auto_reply IS NULL OR contains_auto_reply IN (0, 1)),
+        external_ad_reply_raw_json TEXT,
         created_at REAL NOT NULL
     )
     """,
@@ -87,6 +88,15 @@ class RuntimeDatabase:
             try:
                 for statement in _SCHEMA:
                     conn.execute(statement)
+                columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(transport_events)")
+                }
+                if "external_ad_reply_raw_json" not in columns:
+                    conn.execute(
+                        "ALTER TABLE transport_events "
+                        "ADD COLUMN external_ad_reply_raw_json TEXT"
+                    )
                 conn.commit()
             except BaseException:
                 conn.rollback()

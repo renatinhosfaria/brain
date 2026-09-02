@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { TransportIds } from '../src/hmac.mjs';
 import { normalizeInboundMessage } from '../src/normalize.mjs';
+import { RawAttributionError } from '../src/raw-attribution.mjs';
 
 const SECRET = Buffer.from('t'.repeat(32), 'utf8');
 const IDS = new TransportIds(SECRET);
@@ -42,7 +43,7 @@ function ctwaMessage(overrides = {}) {
             clickToWhatsappCall: true,
             containsAutoReply: false,
             thumbnail: Buffer.from('raw-thumbnail'),
-            arbitraryRawField: 'must-not-leak',
+            arbitraryRawField: 'must-be-preserved',
           },
           arbitraryContext: 'raw-context-must-not-leak',
         },
@@ -89,7 +90,24 @@ test('historical CTWA normalizes to the exact Brain-safe envelope', () => {
       click_to_whatsapp_call: true,
       contains_auto_reply: false,
     },
+    external_ad_reply_raw: {
+      arbitraryRawField: 'must-be-preserved',
+      clickToWhatsappCall: true,
+      containsAutoReply: false,
+      ctwaClid: RAW_CTWA_CLID,
+      showAdAttribution: false,
+      sourceApp: 'instagram',
+      sourceId: RAW_SOURCE_ID,
+      sourceType: 'ad',
+      sourceUrl: RAW_SOURCE_URL,
+      thumbnail: {
+        $type: 'bytes',
+        encoding: 'base64',
+        data: Buffer.from('raw-thumbnail').toString('base64'),
+      },
+    },
   });
+  assert.equal('arbitraryContext' in safe.external_ad_reply_raw, false);
 });
 
 test('ordinary conversation and extended text use only the two proven paths', () => {
@@ -120,6 +138,7 @@ test('ordinary conversation and extended text use only the two proven paths', ()
   assert.equal(first.native_type, 'conversation');
   assert.equal(first.transport_kind, 'ordinary_inbound');
   assert.equal('external_ad_reply' in first, false);
+  assert.equal('external_ad_reply_raw' in first, false);
   assert.equal('display_name' in first, false);
   assert.equal(second.native_type, 'extendedTextMessage');
   assert.equal(second.transport_kind, 'ordinary_inbound');
@@ -255,14 +274,14 @@ test('display name is control-stripped and bounded to 160 code points', () => {
   assert.equal('pushName' in safe, false);
 });
 
-test('serialized safe event contains no raw payload or arbitrary Baileys tree', () => {
+test('raw capture is limited to externalAdReply and preserves no enclosing Baileys tree', () => {
   const safe = normalizeInboundMessage(
     ctwaMessage(),
     CAPTURED_AT,
     IDS,
     'observer-a',
   );
-  const serialized = JSON.stringify(safe);
+  const normalized = JSON.stringify(safe.external_ad_reply);
 
   for (const raw of [
     RAW_BODY,
@@ -273,7 +292,7 @@ test('serialized safe event contains no raw payload or arbitrary Baileys tree', 
     RAW_SOURCE_URL,
     'raw-context-must-not-leak',
     'arbitrary-tree-must-not-leak',
-    'must-not-leak',
+    'must-be-preserved',
     'raw-thumbnail',
     'contextInfo',
     'externalAdReply',
@@ -281,9 +300,87 @@ test('serialized safe event contains no raw payload or arbitrary Baileys tree', 
     'ctwaClid',
     'sourceUrl',
   ]) {
-    assert.equal(serialized.includes(raw), false, raw);
+    assert.equal(normalized.includes(raw), false, raw);
   }
+  assert.equal('arbitraryContext' in safe.external_ad_reply_raw, false);
+  assert.equal(JSON.stringify(safe.external_ad_reply_raw).includes('raw-context-must-not-leak'), false);
+  assert.equal(JSON.stringify(safe.external_ad_reply_raw).includes('arbitrary-tree-must-not-leak'), false);
   assert.equal(safe.external_ad_reply.source_url_hostname, 'ads.example.test');
+});
+
+test('raw capture respects caller-supplied limits without exposing raw identifiers', () => {
+  assert.throws(
+    () => normalizeInboundMessage(
+      ctwaMessage(),
+      CAPTURED_AT,
+      IDS,
+      'observer-a',
+      { maxBytes: 16, maxDepth: 32, maxNodes: 10_000 },
+    ),
+    (error) => {
+      assert.ok(error instanceof RawAttributionError);
+      assert.equal(error.code, 'raw_size');
+      assert.equal(error.message.includes(RAW_CTWA_CLID), false);
+      return true;
+    },
+  );
+});
+
+test('known-field accessors fail as a controlled raw capture error before normalization', () => {
+  const message = ctwaMessage();
+  const external = {};
+  Object.defineProperty(external, 'sourceType', {
+    enumerable: true,
+    get() {
+      throw new Error('synthetic-secret-getter');
+    },
+  });
+  message.message.extendedTextMessage.contextInfo.externalAdReply = external;
+
+  assert.throws(
+    () => normalizeInboundMessage(message, CAPTURED_AT, IDS, 'observer-a'),
+    (error) => {
+      assert.ok(error instanceof RawAttributionError);
+      assert.equal(error.code, 'raw_accessor');
+      assert.doesNotMatch(error.message, /synthetic|secret|getter/i);
+      return true;
+    },
+  );
+});
+
+test('source URL normalization uses WHATWG IDNA and rejects invalid ports', () => {
+  const idn = ctwaMessage();
+  const idnExternal = idn.message.extendedTextMessage.contextInfo.externalAdReply;
+  idnExternal.sourceUrl = 'https://bücher.example:8443/path';
+  const invalidPort = ctwaMessage();
+  const invalidExternal = invalidPort.message.extendedTextMessage.contextInfo.externalAdReply;
+  invalidExternal.sourceUrl = 'https://example.test:99999/path';
+
+  const normalizedIdn = normalizeInboundMessage(
+    idn,
+    CAPTURED_AT,
+    IDS,
+    'observer-a',
+  );
+  const normalizedInvalidPort = normalizeInboundMessage(
+    invalidPort,
+    CAPTURED_AT,
+    IDS,
+    'observer-a',
+  );
+
+  assert.equal(
+    normalizedIdn.external_ad_reply.source_url_hostname,
+    'xn--bcher-kva.example',
+  );
+  assert.equal(
+    'source_url_hostname' in normalizedInvalidPort.external_ad_reply,
+    false,
+  );
+  assert.equal(
+    'source_url_hmac' in normalizedInvalidPort.external_ad_reply,
+    false,
+  );
 });
 
 test('production observer source contains no explicit forbidden mutation calls', async () => {

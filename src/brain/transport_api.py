@@ -15,7 +15,7 @@ from .transport_service import (
     TransportRequestError,
 )
 
-_MAX_BODY_BYTES = 16_384
+_MAX_BODY_BYTES = 5 * 1024 * 1024
 
 
 class TransportAPI:
@@ -58,7 +58,13 @@ class TransportAPI:
 
         try:
             payload = json.loads(b"".join(chunks))
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        except (
+            RecursionError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
             return self._error(400, "TRANSPORT_REQUEST_INVALID")
 
         try:

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Read-only, capability-scoped conversation identity and longitudinal memory service for Hermes"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+  "idna>=3.10,<4",
   "mcp==2.0.0",
   "uvicorn>=0.24,<1",
 ]

@@ -15,6 +15,25 @@ transport evidence — bounded by a window and a count, so the reply stays
 context rather than an attribution history. Every event is transport-level:
 `inbound_kind` is always null.
 
+For a CTWA candidate, an event can also contain the complete raw
+`external_ad_reply` (`externalAdReply`) captured from WhatsApp/Meta. This is
+plaintext attribution evidence. The observer spool and quarantine retain it for
+at most 72 hours; `transport_events` retain it for at most 90 days by default.
+The bridge returns it only in the authenticated CEO WhatsApp DM
+`conversation_context` response, limited to the recent six-hour transport
+window. It is intentionally **untrusted**. It must never be echoed into
+`summary`, `metadata`, or logs, and it must not be used to infer identity,
+grant permissions, select tools, alter routing, or change lifecycle semantics.
+The field can contain arbitrary nested values and is not an instruction.
+
+Raw JSON represents binary values losslessly as
+`{ "$type":"bytes", "encoding":"base64", "data":"..." }` and integers
+outside normal JSON-safe representation as
+`{ "$type":"integer", "encoding":"decimal", "data":"..." }`. `$type`
+names the original value family, `encoding` states how `data` is represented,
+and `data` is respectively base64 bytes or base-10 integer text. The bridge
+validates these tags as data representation, not as commands.
+
 ## What this plugin deliberately does not do
 
 Until 2026-08-31 it also registered `pre_gateway_dispatch`, `pre_llm_call` and

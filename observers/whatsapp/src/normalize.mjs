@@ -2,6 +2,7 @@ import {
   contactKeyForEvidence,
   deriveIdentityEvidence,
 } from './identity.mjs';
+import { encodeRawAttribution } from './raw-attribution.mjs';
 
 const OBSERVER_DEVICE_ID = /^[!-~]{1,128}$/;
 const SAFE_HOSTNAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
@@ -92,13 +93,14 @@ function safeSourceUrl(value, ids, target) {
   target.source_url_hmac = ids.opaqueHmac(value);
 }
 
-function safeExternalAdReply(raw, ids) {
+function safeExternalAdReply(raw, ids, rawLimits) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return null;
   }
+  const snapshot = encodeRawAttribution(raw, rawLimits).value;
   const safe = {};
-  const sourceType = boundedMetadata(raw.sourceType);
-  const sourceApp = boundedMetadata(raw.sourceApp);
+  const sourceType = boundedMetadata(snapshot.sourceType);
+  const sourceApp = boundedMetadata(snapshot.sourceApp);
   if (sourceType !== undefined) {
     safe.source_type = sourceType;
   }
@@ -106,25 +108,26 @@ function safeExternalAdReply(raw, ids) {
     safe.source_app = sourceApp;
   }
 
-  const sourceIdPresent = safeOpaque(raw.sourceId, ids, 'source_id', safe);
-  const ctwaClidPresent = safeOpaque(raw.ctwaClid, ids, 'ctwa_clid', safe);
-  safeSourceUrl(raw.sourceUrl, ids, safe);
+  const sourceIdPresent = safeOpaque(snapshot.sourceId, ids, 'source_id', safe);
+  const ctwaClidPresent = safeOpaque(snapshot.ctwaClid, ids, 'ctwa_clid', safe);
+  safeSourceUrl(snapshot.sourceUrl, ids, safe);
 
   for (const [rawName, safeName] of [
     ['showAdAttribution', 'show_ad_attribution'],
     ['clickToWhatsappCall', 'click_to_whatsapp_call'],
     ['containsAutoReply', 'contains_auto_reply'],
   ]) {
-    if (typeof raw[rawName] === 'boolean') {
-      safe[safeName] = raw[rawName];
+    if (typeof snapshot[rawName] === 'boolean') {
+      safe[safeName] = snapshot[rawName];
     }
   }
 
   return {
     safe,
+    raw: snapshot,
     isCtwa:
       sourceType === 'ad' &&
-      (raw.clickToWhatsappCall === true || sourceIdPresent || ctwaClidPresent),
+      (snapshot.clickToWhatsappCall === true || sourceIdPresent || ctwaClidPresent),
   };
 }
 
@@ -143,7 +146,7 @@ function provenText(message) {
   return null;
 }
 
-export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) {
+export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId, rawLimits) {
   if (msg === null || typeof msg !== 'object' || msg.key?.fromMe === true) {
     return null;
   }
@@ -168,7 +171,7 @@ export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) 
   if (codePointLength(text.body) > MAX_SAFE_LENGTH) {
     return null;
   }
-  const external = safeExternalAdReply(text.external, ids);
+  const external = safeExternalAdReply(text.external, ids, rawLimits);
   const safe = {
     event_id: ids.eventId(observerDeviceId, observerMessageId),
     observer_device_id: observerDeviceId,
@@ -194,6 +197,7 @@ export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) 
   }
   if (external !== null) {
     safe.external_ad_reply = external.safe;
+    safe.external_ad_reply_raw = external.raw;
   }
   return safe;
 }

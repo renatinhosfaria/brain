@@ -16,6 +16,10 @@ host = "127.0.0.1"
 port = 8765
 history_budget_chars = 12000
 message_max_chars = 2000
+ctwa_raw_max_bytes = 4194304
+ctwa_raw_max_depth = 32
+ctwa_raw_max_nodes = 10000
+context_response_max_bytes = 33554432
 busy_retries = 2
 busy_timeout_seconds = 1.0
 # Keep this stable across restarts so issued pagination cursors remain valid.

@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
 import { HealthState } from '../src/health.mjs';
+import { RawAttributionError } from '../src/raw-attribution.mjs';
 import * as observerRuntime from '../src/main.mjs';
 
 const { loadObserverConfig, runObserver } = observerRuntime;
@@ -10,6 +11,7 @@ const { loadObserverConfig, runObserver } = observerRuntime;
 const RAW_BODY = 'raw-body-runtime-secret';
 const RAW_JID = '15551234567@s.whatsapp.net';
 const SAFE_ONE = Object.freeze({
+  observer_event_version: 2,
   event_id: `waevt_${'1'.repeat(64)}`,
   observer_device_id: 'observer-test',
   received_at: 1_000,
@@ -61,12 +63,16 @@ function memorySpool(initial = [], calls = []) {
     },
     async purgeOlderThan() {
       calls.push('purge');
-      return 0;
+      return { events: 0, quarantine: 0 };
     },
     async put(event) {
       calls.push(`put:${event.event_id}`);
       records.set(event.event_id, structuredClone(event));
       return { event_id: event.event_id, duplicate: false };
+    },
+    async quarantine(record) {
+      calls.push(`quarantine:${record.event_id}`);
+      return { event_id: record.event_id, duplicate: false };
     },
     async read(eventId) {
       calls.push(`read:${eventId}`);
@@ -165,7 +171,13 @@ function dependencies(overrides = {}) {
       },
       healthServer: overrides.healthServer,
       healthState,
-      ids: {},
+      ids: overrides.ids ?? {
+        eventId(_deviceId, messageId) {
+          return messageId === 'raw-capture-failure'
+            ? `waevt_${'7'.repeat(64)}`
+            : SAFE_ONE.event_id;
+        },
+      },
       makeSocket: sockets.makeSocket,
       normalize:
         overrides.normalize ??
@@ -183,9 +195,14 @@ function dependencies(overrides = {}) {
           return { status: 'unresolved' };
         }),
       renderQr: overrides.renderQr ?? ((_qr) => calls.push('qr')),
+      rawLimits: overrides.rawLimits,
+      quarantineMaxBytes: overrides.quarantineMaxBytes,
+      clearIntervalFn: overrides.clearIntervalFn,
+      maintenanceIntervalMs: overrides.maintenanceIntervalMs,
       retryBaseMs: overrides.retryBaseMs ?? 10,
       retryMaxAttempts: overrides.retryMaxAttempts ?? 4,
       retryMaxMs: overrides.retryMaxMs ?? 25,
+      setIntervalFn: overrides.setIntervalFn,
       sleep: overrides.sleep ?? abortableSleep(calls),
       spool,
     },
@@ -490,6 +507,193 @@ test('multiple messages follow identity, mapping, normalize, spool, ingest, ack 
   await runtime.close();
 });
 
+test('raw attribution failures are quarantined and do not interrupt a subsequent ordinary message', async () => {
+  const calls = [];
+  const quarantined = [];
+  const delivered = [];
+  const spool = memorySpool([], calls);
+  spool.quarantine = async (record) => {
+    calls.push(`quarantine:${record.event_id}`);
+    quarantined.push(structuredClone(record));
+    return { event_id: record.event_id, duplicate: false };
+  };
+  const fixture = dependencies({
+    calls,
+    spool,
+    client: {
+      async ingest(event) {
+        delivered.push(structuredClone(event));
+        return { event_id: event.event_id, duplicate: false };
+      },
+    },
+    quarantineMaxBytes: 1_024,
+    rawLimits: { maxBytes: 16, maxDepth: 32, maxNodes: 10_000 },
+    normalize(message, _capturedAt, _ids, _deviceId, rawLimits) {
+      assert.deepEqual(rawLimits, {
+        maxBytes: 16,
+        maxDepth: 32,
+        maxNodes: 10_000,
+      });
+      if (message.key.id === 'raw-capture-failure') {
+        throw new RawAttributionError('raw_size');
+      }
+      return structuredClone(SAFE_TWO);
+    },
+  });
+  const runtime = await runObserver(fixture.options);
+  calls.length = 0;
+  const written = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    fixture.sockets.sockets[0].ev.emit('messages.upsert', {
+      messages: [
+        rawMessage({
+          key: { id: 'raw-capture-failure' },
+          message: {
+            extendedTextMessage: {
+              text: 'ordinary text',
+              contextInfo: {
+                externalAdReply: { sourceType: 'ad', sourceId: 'raw-only' },
+              },
+            },
+          },
+        }),
+        rawMessage({ key: { id: 'ordinary-after-raw-failure' } }),
+      ],
+    });
+    await runtime.idle();
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.equal(quarantined.length, 1);
+  assert.equal(quarantined[0].event_id, `waevt_${'7'.repeat(64)}`);
+  assert.equal(quarantined[0].reason, 'raw_size');
+  assert.equal(quarantined[0].external_ad_reply_raw.sourceId, 'raw-only');
+  assert.deepEqual(delivered, [SAFE_TWO]);
+  assert.equal((await fixture.options.healthState.snapshot()).raw_capture_failure_count, 1);
+  assert.equal(written.join('').includes('raw-only'), false);
+  assert.equal(written.join('').includes('raw_size'), true);
+  await runtime.close();
+});
+
+test('quarantine persistence failure is non-fatal and does not interrupt the message batch', async () => {
+  const persistenceSecret = 'quarantine-write-secret-must-not-leak';
+  const delivered = [];
+  const spool = memorySpool();
+  spool.quarantine = async () => {
+    throw new Error(persistenceSecret);
+  };
+  const fixture = dependencies({
+    client: {
+      async ingest(event) {
+        delivered.push(structuredClone(event));
+        return { event_id: event.event_id, duplicate: false };
+      },
+    },
+    normalize(message) {
+      if (message.key.id === 'raw-capture-failure') {
+        throw new RawAttributionError('raw_size');
+      }
+      return structuredClone(SAFE_TWO);
+    },
+    spool,
+  });
+  const runtime = await runObserver(fixture.options);
+  const written = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    written.push(String(chunk));
+    return true;
+  };
+  try {
+    fixture.sockets.sockets[0].ev.emit('messages.upsert', {
+      messages: [
+        rawMessage({ key: { id: 'raw-capture-failure' } }),
+        rawMessage({ key: { id: 'ordinary-after-quarantine-failure' } }),
+      ],
+    });
+    await runtime.idle();
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.deepEqual(delivered, [SAFE_TWO]);
+  const health = await fixture.options.healthState.snapshot();
+  assert.equal(health.raw_capture_failure_count, 1);
+  assert.notEqual(health.status, 'unavailable');
+  assert.equal(written.join('').includes(persistenceSecret), false);
+  assert.equal(written.join('').includes(RAW_BODY), false);
+  assert.equal(written.join('').includes('quarantine_persistence_failed'), true);
+  await runtime.close();
+});
+
+test('raw attribution that makes quarantine exceed its ceiling stores only technical metadata', async () => {
+  const quarantined = [];
+  const spool = memorySpool();
+  spool.quarantine = async (record) => {
+    quarantined.push(structuredClone(record));
+    return { event_id: record.event_id, duplicate: false };
+  };
+  const fixture = dependencies({
+    quarantineMaxBytes: 256,
+    rawLimits: { maxBytes: 16, maxDepth: 32, maxNodes: 10_000 },
+    spool,
+    normalize() {
+      throw new RawAttributionError('raw_size');
+    },
+  });
+  const runtime = await runObserver(fixture.options);
+  fixture.sockets.sockets[0].ev.emit('messages.upsert', {
+    messages: [
+      rawMessage({
+        key: { id: 'raw-capture-failure' },
+        message: {
+          extendedTextMessage: {
+            text: 'ordinary text',
+            contextInfo: {
+              externalAdReply: { sourceId: 'x'.repeat(80) },
+            },
+          },
+        },
+      }),
+    ],
+  });
+  await runtime.idle();
+
+  assert.equal(quarantined.length, 1);
+  assert.equal(quarantined[0].reason, 'raw_size');
+  assert.equal(quarantined[0].external_ad_reply_raw, null);
+  await runtime.close();
+});
+
+test('runtime stamps normalized messages as observer event version 2', async () => {
+  const delivered = [];
+  const unversioned = { ...SAFE_ONE };
+  delete unversioned.observer_event_version;
+  const fixture = dependencies({
+    client: {
+      async ingest(event) {
+        delivered.push(structuredClone(event));
+        return { event_id: event.event_id, duplicate: false };
+      },
+    },
+    normalize: () => structuredClone(unversioned),
+  });
+  const runtime = await runObserver(fixture.options);
+  fixture.sockets.sockets[0].ev.emit('messages.upsert', {
+    messages: [rawMessage()],
+  });
+  await runtime.idle();
+
+  assert.equal(delivered[0].observer_event_version, 2);
+  await runtime.close();
+});
+
 test('Brain durable new and duplicate success both ACK only after ingest', async () => {
   for (const duplicate of [false, true]) {
     const calls = [];
@@ -606,10 +810,45 @@ test('startup and reconnect drain safe events oldest-first after expiry and purg
   await runtime.close();
 });
 
+test('healthy runtime runs periodic maintenance and cancels it on close', async () => {
+  const calls = [];
+  const timer = { cleared: false };
+  let maintenanceCallback = null;
+  let scheduledMilliseconds = null;
+  const fixture = dependencies({
+    calls,
+    clearIntervalFn(handle) {
+      assert.strictEqual(handle, timer);
+      handle.cleared = true;
+    },
+    setIntervalFn(callback, milliseconds) {
+      maintenanceCallback = callback;
+      scheduledMilliseconds = milliseconds;
+      return timer;
+    },
+  });
+  const runtime = await runObserver(fixture.options);
+  calls.length = 0;
+
+  assert.equal(typeof maintenanceCallback, 'function');
+  assert.equal(scheduledMilliseconds > 0, true);
+  assert.equal(scheduledMilliseconds <= 72 * 60 * 60 * 1_000, true);
+  await maintenanceCallback();
+  await runtime.idle();
+  assert.deepEqual(calls.slice(0, 2), ['expire', 'purge']);
+
+  await runtime.close();
+  assert.equal(timer.cleared, true);
+  calls.length = 0;
+  await maintenanceCallback();
+  await runtime.idle();
+  assert.deepEqual(calls, []);
+});
+
 test('purged count and unresolved identity are aggregate-only health state', async () => {
   const calls = [];
   const spool = memorySpool([], calls);
-  spool.purgeOlderThan = async () => 3;
+  spool.purgeOlderThan = async () => ({ events: 3, quarantine: 2 });
   const unresolvedSafe = { ...SAFE_ONE };
   delete unresolvedSafe.contact_key;
   const fixture = dependencies({
@@ -687,6 +926,12 @@ test('production config requires own observer subtree and transport-only secrets
   };
   const parsed = loadObserverConfig(valid);
   assert.equal(parsed.healthHost, '127.0.0.1');
+  assert.deepEqual(parsed.rawLimits, {
+    maxBytes: 4 * 1024 * 1024,
+    maxDepth: 32,
+    maxNodes: 10_000,
+  });
+  assert.equal(parsed.quarantineMaxBytes, 32 * 1024 * 1024);
   assert.equal('runtimeHmacSecret' in parsed, false);
   assert.throws(
     () =>
@@ -701,4 +946,38 @@ test('production config requires own observer subtree and transport-only secrets
       loadObserverConfig({ ...valid, BRAIN_OBSERVER_HEALTH_HOST: '0.0.0.0' }),
     /127\.0\.0\.1|health/i,
   );
+  assert.throws(
+    () => loadObserverConfig({ ...valid, BRAIN_CTWA_RAW_MAX_DEPTH: '0' }),
+    /raw|max depth/i,
+  );
+  assert.throws(
+    () =>
+      loadObserverConfig({
+        ...valid,
+        BRAIN_CTWA_RAW_MAX_BYTES: String(6 * 1024 * 1024),
+      }),
+    /BRAIN_CTWA_RAW_MAX_BYTES|raw/i,
+  );
+  assert.throws(
+    () =>
+      loadObserverConfig({
+        ...valid,
+        BRAIN_CTWA_RAW_MAX_BYTES: '2048',
+        BRAIN_CTWA_QUARANTINE_MAX_BYTES: '1024',
+      }),
+    /BRAIN_CTWA_RAW_MAX_BYTES|raw/i,
+  );
+  const overridden = loadObserverConfig({
+    ...valid,
+    BRAIN_CTWA_RAW_MAX_BYTES: '1024',
+    BRAIN_CTWA_RAW_MAX_DEPTH: '4',
+    BRAIN_CTWA_RAW_MAX_NODES: '100',
+    BRAIN_CTWA_QUARANTINE_MAX_BYTES: '2048',
+  });
+  assert.deepEqual(overridden.rawLimits, {
+    maxBytes: 1_024,
+    maxDepth: 4,
+    maxNodes: 100,
+  });
+  assert.equal(overridden.quarantineMaxBytes, 2_048);
 });
