@@ -210,6 +210,7 @@ class GatewayAPITests(unittest.TestCase):
         *,
         transport_kind: str = "ordinary_inbound",
         source_app: str | None = None,
+        external_ad_reply_raw_json: str | None = None,
         suffix: str = "",
         timestamp: float = 999.0,
     ) -> str:
@@ -219,9 +220,10 @@ class GatewayAPITests(unittest.TestCase):
             lambda conn: conn.execute(
                 "INSERT INTO transport_events (event_id, observer_device_id, "
                 "contact_key, direction, received_at, message_timestamp, body_hmac, "
-                "body_length, native_type, transport_kind, source_app, created_at) "
+                "body_length, native_type, transport_kind, source_app, "
+                "external_ad_reply_raw_json, created_at) "
                 "VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, 'conversation', "
-                "?, ?, ?)",
+                "?, ?, ?, ?)",
                 (
                     event_id,
                     "observer-a",
@@ -232,6 +234,7 @@ class GatewayAPITests(unittest.TestCase):
                     len(body),
                     transport_kind,
                     source_app,
+                    external_ad_reply_raw_json,
                     timestamp + 0.2,
                 ),
             )
@@ -383,12 +386,14 @@ class GatewayAPITests(unittest.TestCase):
                         "transport_kind": "ctwa_candidate",
                         "source_app": "instagram",
                         "inbound_kind": None,
+                        "external_ad_reply": None,
                     },
                     {
                         "event_id": ordinary,
                         "transport_kind": "ordinary_inbound",
                         "source_app": None,
                         "inbound_kind": None,
+                        "external_ad_reply": None,
                     },
                 ],
             },
@@ -404,6 +409,99 @@ class GatewayAPITests(unittest.TestCase):
             "ctwa_clid_hmac",
         ):
             self.assertNotIn(private_field, serialized)
+
+    def test_conversation_context_returns_exact_raw_attribution(self) -> None:
+        self.prepare_turn_identity()
+        self.seed_event(
+            "ad click",
+            transport_kind="ctwa_candidate",
+            source_app="instagram",
+            external_ad_reply_raw_json=(
+                '{"ctwaClid":"ctwa-clid","sourceId":"source-id","thumbnail":'
+                '{"$type":"bytes","data":"AAEC/w==","encoding":"base64"}}'
+            ),
+            suffix="raw",
+            timestamp=time.time() - 10,
+        )
+
+        event = self.post_context(self.context_payload()).json()["events"][0]
+
+        self.assertEqual(
+            event["external_ad_reply"],
+            {
+                "sourceId": "source-id",
+                "ctwaClid": "ctwa-clid",
+                "thumbnail": {
+                    "$type": "bytes",
+                    "encoding": "base64",
+                    "data": "AAEC/w==",
+                },
+            },
+        )
+
+    def test_conversation_context_returns_unavailable_for_invalid_stored_raw(
+        self,
+    ) -> None:
+        self.prepare_turn_identity()
+        self.seed_event(
+            "ad click",
+            transport_kind="ctwa_candidate",
+            source_app="instagram",
+            external_ad_reply_raw_json='{"secret":"fixture-secret"',
+            suffix="invalid-raw",
+            timestamp=time.time() - 10,
+        )
+
+        response = self.post_context(self.context_payload())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"status": "unavailable", "reason": "context_unavailable"},
+        )
+        self.assertNotIn("fixture-secret", response.text)
+
+    def test_conversation_context_contains_stored_json_decoder_failures(self) -> None:
+        self.prepare_turn_identity()
+        self.seed_event(
+            "ad click",
+            transport_kind="ctwa_candidate",
+            source_app="instagram",
+            external_ad_reply_raw_json='{"value":' + "1" * 5_000 + "}",
+            suffix="decoder-limit",
+            timestamp=time.time() - 10,
+        )
+
+        response = self.post_context(self.context_payload())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"status": "unavailable", "reason": "context_unavailable"},
+        )
+        self.assertNotIn("1" * 100, response.text)
+
+    def test_conversation_context_refuses_the_complete_oversized_response(
+        self,
+    ) -> None:
+        self.prepare_turn_identity()
+        self.seed_event(
+            "ad click",
+            transport_kind="ctwa_candidate",
+            source_app="instagram",
+            external_ad_reply_raw_json='{"unknown":"' + "x" * 300 + '"}',
+            suffix="oversized-context",
+            timestamp=time.time() - 10,
+        )
+        object.__setattr__(self.service.settings, "context_response_max_bytes", 256)
+
+        response = self.post_context(self.context_payload())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"status": "unavailable", "reason": "context_too_large"},
+        )
 
     def test_conversation_context_excludes_transport_outside_the_window(self) -> None:
         """A contact's older transport is a profile, not the current context."""

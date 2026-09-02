@@ -25,6 +25,10 @@ from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
 from .projection import ProjectedMessage, project_rows
+from .raw_attribution import (
+    RawAttributionLimits,
+    decode_canonical_raw_attribution,
+)
 from .runtime_db import RuntimeDatabase
 from .transport_models import RuntimeIds
 from .transport_service import TransportService
@@ -387,14 +391,36 @@ class BrainService:
                 raise DatabaseUnavailable()
             else:
                 contact_key = self.runtime_ids.contact_key(resolution.phone)
-                result = self.runtime.read(
-                    lambda conn: self._conversation_context_from_runtime(
-                        conn,
-                        contact_key=contact_key,
-                        phone_e164=resolution.phone,
-                        now=time.time(),
+                try:
+                    result = self.runtime.read(
+                        lambda conn: self._conversation_context_from_runtime(
+                            conn,
+                            contact_key=contact_key,
+                            phone_e164=resolution.phone,
+                            now=time.time(),
+                            raw_limits=RawAttributionLimits(
+                                max_bytes=self.settings.ctwa_raw_max_bytes,
+                                max_depth=self.settings.ctwa_raw_max_depth,
+                                max_nodes=self.settings.ctwa_raw_max_nodes,
+                            ),
+                        )
                     )
-                )
+                except (RecursionError, ValueError):
+                    result = {
+                        "status": "unavailable",
+                        "reason": "context_unavailable",
+                    }
+                encoded = json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                if len(encoded) > self.settings.context_response_max_bytes:
+                    result = {
+                        "status": "unavailable",
+                        "reason": "context_too_large",
+                    }
             self._audit(
                 identity=identity,
                 tool="conversation_context",
@@ -430,6 +456,7 @@ class BrainService:
         contact_key: str,
         phone_e164: str,
         now: float,
+        raw_limits: RawAttributionLimits,
     ) -> dict[str, Any]:
         """Transport evidence for the contact the CEO is speaking to right now.
 
@@ -446,7 +473,8 @@ class BrainService:
         `inbound_kind` is null here and always will be.
         """
         rows = conn.execute(
-            "SELECT event_id, transport_kind, source_app FROM transport_events "
+            "SELECT event_id, transport_kind, source_app, "
+            "external_ad_reply_raw_json FROM transport_events "
             "WHERE contact_key = ? AND received_at > ? "
             "ORDER BY received_at DESC, event_id LIMIT ?",
             (contact_key, now - CONTEXT_WINDOW_SECONDS, CONTEXT_MAX_EVENTS),
@@ -459,6 +487,17 @@ class BrainService:
             (contact_key, now),
         ).fetchone()
         display_name = str(ephemera["display_name"]) if ephemera else None
+        decoded_raw = {
+            str(row["event_id"]): (
+                decode_canonical_raw_attribution(
+                    row["external_ad_reply_raw_json"], raw_limits
+                )
+                if row["transport_kind"] == "ctwa_candidate"
+                and row["external_ad_reply_raw_json"] is not None
+                else None
+            )
+            for row in rows
+        }
         return {
             "status": "ok",
             "contact": {
@@ -474,6 +513,7 @@ class BrainService:
                     if row["source_app"] is not None
                     else None,
                     "inbound_kind": None,
+                    "external_ad_reply": decoded_raw[str(row["event_id"])],
                 }
                 for row in reversed(rows)
             ],

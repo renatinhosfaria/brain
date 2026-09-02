@@ -176,6 +176,7 @@ class CEOBridgePluginTests(unittest.TestCase):
                 self.assertFalse(hasattr(self.tools_module, removed))
 
     def test_returns_brain_contract_for_the_current_dm(self) -> None:
+        """A four-key event remains valid while Brain rolls forward."""
         result = self.call_tool(self.ok_payload())
 
         self.assertEqual(result, self.ok_payload())
@@ -191,6 +192,126 @@ class CEOBridgePluginTests(unittest.TestCase):
                 "session_id": "g-one",
             },
         )
+
+    def test_passes_through_exact_raw_attribution_with_tagged_bytes(self) -> None:
+        raw = {
+            "sourceId": "source-id",
+            "ctwaClid": "ctwa-clid",
+            "thumbnail": {
+                "$type": "bytes",
+                "encoding": "base64",
+                "data": "AAEC/w==",
+            },
+            "unknownNested": [{"untouched": "fixture-value"}],
+        }
+        payload = self.ok_payload(
+            events=[
+                {
+                    "event_id": "waevt_safe",
+                    "transport_kind": "ctwa_candidate",
+                    "source_app": "instagram",
+                    "inbound_kind": None,
+                    "external_ad_reply": raw,
+                }
+            ]
+        )
+
+        result = self.call_tool(payload)
+
+        self.assertEqual(result, payload)
+
+    def test_accepts_expanded_event_with_null_raw_attribution(self) -> None:
+        payload = self.ok_payload(
+            events=[
+                {
+                    "event_id": "waevt_safe",
+                    "transport_kind": "ordinary_inbound",
+                    "source_app": None,
+                    "inbound_kind": None,
+                    "external_ad_reply": None,
+                }
+            ]
+        )
+
+        self.assertEqual(self.call_tool(payload), payload)
+
+    def test_rejects_raw_attribution_on_an_ordinary_event(self) -> None:
+        payload = self.ok_payload(
+            events=[
+                {
+                    "event_id": "waevt_safe",
+                    "transport_kind": "ordinary_inbound",
+                    "source_app": None,
+                    "inbound_kind": None,
+                    "external_ad_reply": {"fixture": "ordinary-secret"},
+                }
+            ]
+        )
+
+        result = self.call_tool(payload)
+
+        self.assertEqual(
+            result, {"status": "unavailable", "reason": "context_unavailable"}
+        )
+        self.assertNotIn("ordinary-secret", json.dumps(result))
+
+    def test_rejects_invalid_raw_attribution_tag_without_echoing_it(self) -> None:
+        payload = self.ok_payload(
+            events=[
+                {
+                    "event_id": "waevt_safe",
+                    "transport_kind": "ctwa_candidate",
+                    "source_app": "instagram",
+                    "inbound_kind": None,
+                    "external_ad_reply": {
+                        "thumbnail": {
+                            "$type": "bytes",
+                            "encoding": "base64",
+                            "data": "fixture-secret",
+                        }
+                    },
+                }
+            ]
+        )
+
+        result = self.call_tool(payload)
+
+        self.assertEqual(
+            result, {"status": "unavailable", "reason": "context_unavailable"}
+        )
+        self.assertNotIn("fixture-secret", json.dumps(result))
+
+    def test_rejects_raw_attribution_past_depth_and_node_limits(self) -> None:
+        too_deep: object = {"fixture": "depth-secret"}
+        for _ in range(33):
+            too_deep = {"nested": too_deep}
+        too_many_nodes = {"nodes": [None] * 10_001}
+        for label, raw, secret in (
+            ("depth", too_deep, "depth-secret"),
+            ("nodes", too_many_nodes, "nodes"),
+        ):
+            with self.subTest(label=label), patch.object(
+                self.tools_module, "_MAX_RESPONSE_BYTES", 1024 * 1024
+            ):
+                payload = self.ok_payload(
+                    events=[
+                        {
+                            "event_id": "waevt_safe",
+                            "transport_kind": "ctwa_candidate",
+                            "source_app": "instagram",
+                            "inbound_kind": None,
+                            "external_ad_reply": raw,
+                        }
+                    ]
+                )
+
+                result = self.call_tool(payload)
+
+                self.assertEqual(
+                    result,
+                    {"status": "unavailable", "reason": "context_unavailable"},
+                )
+                self.assertNotIn(secret, json.dumps(result))
 
     def test_request_carries_no_turn_identifier(self) -> None:
         self.call_tool(self.ok_payload())
@@ -276,20 +397,42 @@ class CEOBridgePluginTests(unittest.TestCase):
         )
 
     def test_an_oversized_response_is_refused(self) -> None:
-        huge = self.ok_payload(events=[
-            {
-                "event_id": f"waevt_{index}",
-                "transport_kind": "ordinary_inbound",
-                "source_app": "x" * 400,
-                "inbound_kind": None,
-            }
-            for index in range(200)
-        ])
+        huge = self.ok_payload(
+            events=[
+                {
+                    "event_id": "waevt_safe",
+                    "transport_kind": "ctwa_candidate",
+                    "source_app": "instagram",
+                    "inbound_kind": None,
+                    "external_ad_reply": {"fixture-secret": "x" * 500},
+                }
+            ]
+        )
+
+        with patch.dict(
+            os.environ, {"BRAIN_CONTEXT_RESPONSE_MAX_BYTES": "256"}
+        ):
+            result = self.call_tool(huge)
 
         self.assertEqual(
-            self.call_tool(huge),
-            {"status": "unavailable", "reason": "context_unavailable"},
+            result, {"status": "unavailable", "reason": "context_unavailable"}
         )
+        self.assertNotIn("fixture-secret", json.dumps(result))
+
+    def test_accepts_response_larger_than_the_legacy_ceiling(self) -> None:
+        payload = self.ok_payload(
+            events=[
+                {
+                    "event_id": "waevt_safe",
+                    "transport_kind": "ctwa_candidate",
+                    "source_app": "instagram",
+                    "inbound_kind": None,
+                    "external_ad_reply": {"unknown": "x" * 20_000},
+                }
+            ]
+        )
+
+        self.assertEqual(self.call_tool(payload), payload)
 
     def test_missing_token_does_not_reach_brain(self) -> None:
         reached = False
