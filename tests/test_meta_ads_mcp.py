@@ -133,6 +133,12 @@ class _FakeSession:
         return values.pop(0)
 
 
+class _SlowSession(_FakeSession):
+    async def initialize(self) -> None:
+        await anyio.sleep(0.02)
+        await super().initialize()
+
+
 def _factory(session: _FakeSession) -> Callable[[], Any]:
     @asynccontextmanager
     async def factory() -> AsyncIterator[_FakeSession]:
@@ -338,6 +344,30 @@ class MetaAdsMcpClientTests(unittest.TestCase):
         self.assertEqual(entity_call[1]["ad_account_id"], f"act_{ACCOUNT_ID}")
         self.assertEqual(entity_call[1]["entity_type"], "ad")
         self.assertEqual(entity_call[1]["limit"], 500)
+
+    def test_get_ad_rejects_a_non_positive_context_budget_before_mcp_io(self) -> None:
+        """A zero context deadline must not start an unbounded Ads MCP request."""
+        session = self._probe_session()
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_invalid_response$"):
+            self._client(session).get_ad(
+                "120200000000001", now=1.0, timeout_seconds=0.0
+            )
+
+        self.assertEqual(session.calls, [])
+
+    def test_get_ad_applies_the_context_budget_to_the_complete_mcp_operation(
+        self,
+    ) -> None:
+        """Timing out only individual HTTP calls could exceed the CEO deadline."""
+        session = _SlowSession(_tools())
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_timeout$"):
+            self._client(session).get_ad(
+                "120200000000001", now=1.0, timeout_seconds=0.001
+            )
+
+        self.assertEqual(session.calls, [])
 
     def test_get_ad_uses_an_exact_id_argument_only_when_the_schema_declares_it(
         self,

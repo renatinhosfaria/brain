@@ -7,6 +7,7 @@ short transaction stores its outcome.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import time
 from collections.abc import Callable
@@ -89,8 +90,21 @@ class MetaAttributionService:
             return None
         return self._store.stage_event(conn, event_id, observed, now=now)
 
-    def resolve_source(self, source_id: str, now: float) -> bool:
+    def resolve_source(
+        self,
+        source_id: str,
+        now: float,
+        *,
+        budget_seconds: float | None = None,
+    ) -> bool:
         """Claim one durable source job, then perform at most one remote lookup."""
+        if budget_seconds is not None and (
+            not isinstance(budget_seconds, (int, float))
+            or isinstance(budget_seconds, bool)
+            or not math.isfinite(budget_seconds)
+            or budget_seconds <= 0
+        ):
+            raise ValueError("context Meta budget must be positive")
         if not self.enabled or self._durable_auth_circuit_active(now):
             return False
         lease_token = self._runtime.write(
@@ -126,7 +140,12 @@ class MetaAttributionService:
 
         request_started = self._monotonic_clock()
         try:
-            record = self._client.get_ad(source_id, now)
+            if budget_seconds is None:
+                record = self._client.get_ad(source_id, now)
+            else:
+                record = self._client.get_ad(
+                    source_id, now, timeout_seconds=budget_seconds
+                )
             if record is None:
                 raise MetaAdsError("meta_not_found")
             self._validate_confirmation(source_id, record)
@@ -166,7 +185,9 @@ class MetaAttributionService:
         )
         return bool(confirmed)
 
-    def resolve_contact_pending(self, event_id: str, now: float) -> bool:
+    def resolve_contact_pending(
+        self, event_id: str, now: float, *, budget_seconds: float | None = None
+    ) -> bool:
         """Attempt the shared job for a single pending context event."""
         if not self.enabled:
             return False
@@ -176,7 +197,9 @@ class MetaAttributionService:
         return bool(
             view is not None
             and view.status == "pending"
-            and self.resolve_source(view.observed.source_id, now)
+            and self.resolve_source(
+                view.observed.source_id, now, budget_seconds=budget_seconds
+            )
         )
 
     def run_due_jobs(self, now: float, *, limit: int = 100) -> int:

@@ -25,13 +25,21 @@ class _FakeMetaAdsClient:
     def __init__(self, record: MetaAdRecord | None) -> None:
         self.record = record
         self.calls: list[tuple[str, str]] = []
+        self.get_timeouts: list[float | None] = []
         self.get_error: MetaAdsError | None = None
         self.probe_error: MetaAdsError | None = None
         self.list_error: MetaAdsError | None = None
         self.list_records: list[MetaAdRecord] | None = None
 
-    def get_ad(self, source_id: str, now: float) -> MetaAdRecord | None:
+    def get_ad(
+        self,
+        source_id: str,
+        now: float,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> MetaAdRecord | None:
         self.calls.append(("get_ad", source_id))
+        self.get_timeouts.append(timeout_seconds)
         if self.get_error is not None:
             raise self.get_error
         return self.record
@@ -139,6 +147,28 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertEqual(view.status, "confirmed")
         self.assertEqual(view.record.ad_id, SOURCE_ID)
         self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
+
+    def test_context_resolution_passes_the_remaining_budget_to_the_meta_client(
+        self,
+    ) -> None:
+        """Ignoring the context budget could make the CEO wait past its deadline."""
+        self.runtime.write(lambda conn: self._event(conn, "waevt_context_budget"))
+        self.runtime.write(
+            lambda conn: self.service.stage_event(
+                conn,
+                event_id="waevt_context_budget",
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+
+        self.assertTrue(
+            self.service.resolve_contact_pending(
+                "waevt_context_budget", now=101.0, budget_seconds=0.25
+            )
+        )
+
+        self.assertEqual(self.client.get_timeouts, [0.25])
 
     def test_disabled_service_never_stages_or_calls_meta(self) -> None:
         """Enabling attribution by accident must be required before any Meta work exists."""

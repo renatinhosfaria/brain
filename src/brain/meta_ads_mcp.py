@@ -67,7 +67,13 @@ class MetaAdsClient(Protocol):
 
     def probe(self) -> MetaAdsCapabilities: ...
 
-    def get_ad(self, source_id: str, now: float) -> MetaAdRecord: ...
+    def get_ad(
+        self,
+        source_id: str,
+        now: float,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> MetaAdRecord: ...
 
     def list_ads(self, now: float, full: bool) -> list[MetaAdRecord]: ...
 
@@ -231,10 +237,17 @@ class MetaAdsMcpClient:
     def probe(self) -> MetaAdsCapabilities:
         return self._run_sync(self._probe)
 
-    def get_ad(self, source_id: str, now: float) -> MetaAdRecord:
+    def get_ad(
+        self,
+        source_id: str,
+        now: float,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> MetaAdRecord:
         self._validate_source_id(source_id)
         self._validate_now(now)
-        return self._run_sync(self._get_ad, source_id, now)
+        timeout_seconds = self._context_timeout(timeout_seconds)
+        return self._run_sync(self._get_ad, source_id, now, timeout_seconds)
 
     def list_ads(self, now: float, full: bool) -> list[MetaAdRecord]:
         self._validate_now(now)
@@ -256,6 +269,18 @@ class MetaAdsMcpClient:
         ):
             raise ValueError("now must be finite")
 
+    def _context_timeout(self, timeout_seconds: float | None) -> float:
+        if timeout_seconds is None:
+            return self._settings.meta_ads_mcp_timeout_seconds
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise MetaAdsError("meta_invalid_response")
+        return min(float(timeout_seconds), self._settings.meta_ads_mcp_timeout_seconds)
+
     @staticmethod
     def _run_sync(function: Callable[..., Any], *args: object) -> Any:
         try:
@@ -265,7 +290,9 @@ class MetaAdsMcpClient:
         raise RuntimeError("Meta Ads MCP client must run outside an event loop")
 
     @asynccontextmanager
-    async def _session(self) -> AsyncIterator[_Session]:
+    async def _session(
+        self, timeout_seconds: float | None = None
+    ) -> AsyncIterator[_Session]:
         if self._session_factory is not None:
             try:
                 async with self._session_factory() as session:
@@ -279,7 +306,7 @@ class MetaAdsMcpClient:
         token = self._settings.meta_ads_mcp_access_token
         if not token:
             raise MetaAdsError("meta_auth_unavailable")
-        timeout_seconds = self._settings.meta_ads_mcp_timeout_seconds
+        timeout_seconds = self._context_timeout(timeout_seconds)
         transport = _ResponseLimitTransport(
             httpx2.AsyncHTTPTransport(),
             _ResponseByteBudget(self._settings.meta_ads_mcp_response_max_bytes),
@@ -514,16 +541,22 @@ class MetaAdsMcpClient:
         if matches != 1:
             raise MetaAdsError("meta_account_mismatch")
 
-    async def _get_ad(self, source_id: str, now: float) -> MetaAdRecord:
-        async with self._session() as session:
-            capabilities = await self._probe_session(session)
-            records = await self._read_entity_pages(
-                session,
-                capabilities,
-                now,
-                source_id=source_id,
-                full=False,
-            )
+    async def _get_ad(
+        self, source_id: str, now: float, timeout_seconds: float
+    ) -> MetaAdRecord:
+        try:
+            with anyio.fail_after(timeout_seconds):
+                async with self._session(timeout_seconds) as session:
+                    capabilities = await self._probe_session(session)
+                    records = await self._read_entity_pages(
+                        session,
+                        capabilities,
+                        now,
+                        source_id=source_id,
+                        full=False,
+                    )
+        except TimeoutError:
+            raise MetaAdsError("meta_timeout") from None
         matching = [record for record in records if record.ad_id == source_id]
         if not matching:
             raise MetaAdsError("meta_not_found")

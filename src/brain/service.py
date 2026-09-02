@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -25,6 +26,14 @@ from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
 from .meta_ads_mcp import MetaAdsMcpClient
+from .meta_ads_models import (
+    MetaAdRecord,
+    MetaAdsError,
+    ObservedAttribution,
+    canonical_account_id,
+    confirmed_payload,
+    pending_payload,
+)
 from .meta_ads_store import MetaAdsStore
 from .meta_attribution import MetaAttributionService
 from .projection import ProjectedMessage, project_rows
@@ -45,6 +54,8 @@ logger = logging.getLogger("brain.audit")
 # into an attribution history of the contact.
 CONTEXT_WINDOW_SECONDS = 6 * 60 * 60
 CONTEXT_MAX_EVENTS = 8
+CONTEXT_META_OPERATION_TIMEOUT_SECONDS = 5.0
+CONTEXT_META_MCP_TIMEOUT_SECONDS = 4.0
 CURSOR_VERSION = 1
 TRUNCATION_MARKER = "\n[… truncated …]"
 FORBIDDEN_ARGUMENTS = frozenset(
@@ -95,10 +106,15 @@ class Health:
 
 class BrainService:
     def __init__(
-        self, settings: BrainSettings, *, clock: Callable[[], float] = time.time
+        self,
+        settings: BrainSettings,
+        *,
+        clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         self._clock = clock
+        self._monotonic_clock = monotonic_clock
         self.state = ReadOnlyDatabase(
             settings.state_db,
             retries=settings.busy_retries,
@@ -401,6 +417,7 @@ class BrainService:
         context: GatewaySessionContext,
     ) -> dict[str, Any]:
         started = time.perf_counter()
+        meta_deadline = self._monotonic_clock() + CONTEXT_META_OPERATION_TIMEOUT_SECONDS
         identity: dict[str, Any] = {
             "profile": "unknown",
             "mode": "unknown",
@@ -423,18 +440,26 @@ class BrainService:
                 raise DatabaseUnavailable()
             else:
                 contact_key = self.runtime_ids.contact_key(resolution.phone)
+                context_now = self._clock()
+                self._resolve_pending_context_meta(
+                    contact_key=contact_key,
+                    now=context_now,
+                    deadline=meta_deadline,
+                )
                 try:
                     result = self.runtime.read(
                         lambda conn: self._conversation_context_from_runtime(
                             conn,
                             contact_key=contact_key,
                             phone_e164=resolution.phone,
-                            now=time.time(),
+                            now=context_now,
                             raw_limits=RawAttributionLimits(
                                 max_bytes=self.settings.ctwa_raw_max_bytes,
                                 max_depth=self.settings.ctwa_raw_max_depth,
                                 max_nodes=self.settings.ctwa_raw_max_nodes,
                             ),
+                            meta_attribution_enabled=self.meta_attribution is not None
+                            and self.meta_attribution.enabled,
                         )
                     )
                 except (RecursionError, ValueError):
@@ -481,6 +506,48 @@ class BrainService:
             )
             raise DatabaseUnavailable() from exc
 
+    def _resolve_pending_context_meta(
+        self, *, contact_key: str, now: float, deadline: float
+    ) -> None:
+        """Make one bounded, best-effort claim before the final context read."""
+        attribution = self.meta_attribution
+        if attribution is None or not attribution.enabled:
+            return
+        event_id = self.runtime.read(
+            lambda conn: self._pending_context_meta_event_id(conn, contact_key, now)
+        )
+        if event_id is None:
+            return
+        remaining = deadline - self._monotonic_clock()
+        if remaining <= 0:
+            return
+        try:
+            attribution.resolve_contact_pending(
+                event_id,
+                now,
+                budget_seconds=min(CONTEXT_META_MCP_TIMEOUT_SECONDS, remaining),
+            )
+        except MetaAdsError:
+            # The resolver has already persisted bounded retry state when it
+            # owns a lease. Context remains useful even if the remote boundary
+            # itself rejects this best-effort attempt.
+            return
+
+    @staticmethod
+    def _pending_context_meta_event_id(
+        conn: sqlite3.Connection, contact_key: str, now: float
+    ) -> str | None:
+        row = conn.execute(
+            "SELECT transport.event_id FROM transport_events AS transport "
+            "JOIN ctwa_meta_attributions AS attribution "
+            "ON attribution.event_id = transport.event_id "
+            "WHERE transport.contact_key = ? AND transport.received_at > ? "
+            "AND attribution.status = 'pending' "
+            "ORDER BY transport.received_at DESC, transport.event_id LIMIT 1",
+            (contact_key, now - CONTEXT_WINDOW_SECONDS),
+        ).fetchone()
+        return None if row is None else str(row["event_id"])
+
     @staticmethod
     def _conversation_context_from_runtime(
         conn: sqlite3.Connection,
@@ -489,6 +556,7 @@ class BrainService:
         phone_e164: str,
         now: float,
         raw_limits: RawAttributionLimits,
+        meta_attribution_enabled: bool,
     ) -> dict[str, Any]:
         """Transport evidence for the contact the CEO is speaking to right now.
 
@@ -505,10 +573,38 @@ class BrainService:
         `inbound_kind` is null here and always will be.
         """
         rows = conn.execute(
-            "SELECT event_id, transport_kind, source_app, "
-            "external_ad_reply_raw_json FROM transport_events "
-            "WHERE contact_key = ? AND received_at > ? "
-            "ORDER BY received_at DESC, event_id LIMIT ?",
+            "SELECT transport.event_id, transport.transport_kind, transport.source_app, "
+            "transport.external_ad_reply_raw_json, attribution.account_id AS meta_account_id, "
+            "attribution.source_id AS meta_source_id, attribution.ctwa_clid AS meta_ctwa_clid, "
+            "attribution.status AS meta_status, attribution.matched_ad_id AS meta_matched_ad_id, "
+            "attribution.match_method AS meta_match_method, "
+            "attribution.metadata_complete AS meta_metadata_complete, "
+            "attribution.confirmed_at AS meta_confirmed_at, "
+            "attribution.last_attempt_at AS meta_last_attempt_at, "
+            "attribution.last_error_code AS meta_last_error_code, "
+            "catalog.account_id AS catalog_account_id, catalog.ad_id AS catalog_ad_id, "
+            "catalog.ad_name AS catalog_ad_name, catalog.ad_status AS catalog_ad_status, "
+            "catalog.ad_effective_status AS catalog_ad_effective_status, "
+            "catalog.adset_id AS catalog_adset_id, catalog.adset_name AS catalog_adset_name, "
+            "catalog.adset_status AS catalog_adset_status, "
+            "catalog.campaign_id AS catalog_campaign_id, "
+            "catalog.campaign_name AS catalog_campaign_name, "
+            "catalog.campaign_status AS catalog_campaign_status, "
+            "catalog.creative_id AS catalog_creative_id, "
+            "catalog.creative_name AS catalog_creative_name, "
+            "catalog.metadata_complete AS catalog_metadata_complete, "
+            "catalog.fetched_at AS catalog_fetched_at, jobs.source_id AS meta_job_source_id "
+            "FROM transport_events AS transport "
+            "LEFT JOIN ctwa_meta_attributions AS attribution "
+            "ON attribution.event_id = transport.event_id "
+            "LEFT JOIN meta_ads_catalog AS catalog "
+            "ON catalog.account_id = attribution.account_id "
+            "AND catalog.ad_id = attribution.matched_ad_id "
+            "LEFT JOIN meta_attribution_jobs AS jobs "
+            "ON jobs.account_id = attribution.account_id "
+            "AND jobs.source_id = attribution.source_id "
+            "WHERE transport.contact_key = ? AND transport.received_at > ? "
+            "ORDER BY transport.received_at DESC, transport.event_id LIMIT ?",
             (contact_key, now - CONTEXT_WINDOW_SECONDS, CONTEXT_MAX_EVENTS),
         ).fetchall()
         if not rows:
@@ -546,10 +642,75 @@ class BrainService:
                     else None,
                     "inbound_kind": None,
                     "external_ad_reply": decoded_raw[str(row["event_id"])],
+                    "meta_attribution": (
+                        BrainService._meta_attribution_from_row(row)
+                        if meta_attribution_enabled
+                        else None
+                    ),
                 }
                 for row in reversed(rows)
             ],
         }
+
+    @staticmethod
+    def _meta_attribution_from_row(row: sqlite3.Row) -> dict[str, Any] | None:
+        if row["meta_source_id"] is None:
+            return None
+        observed = ObservedAttribution(
+            str(row["meta_source_id"]), row["meta_ctwa_clid"]
+        )
+        retry_scheduled = row["meta_job_source_id"] == observed.source_id
+        last_attempt_at = row["meta_last_attempt_at"]
+        last_error_code = row["meta_last_error_code"]
+        if row["meta_status"] != "confirmed":
+            return pending_payload(
+                observed,
+                last_attempt_at,
+                retry_scheduled,
+                last_error_code,
+            )
+        try:
+            if (
+                row["meta_match_method"] != "source_id_exact"
+                or row["meta_matched_ad_id"] != observed.source_id
+                or row["meta_account_id"] is None
+                or row["catalog_account_id"] is None
+                or canonical_account_id(row["meta_account_id"])
+                != canonical_account_id(row["catalog_account_id"])
+                or row["meta_metadata_complete"] not in {0, 1}
+                or row["catalog_metadata_complete"] not in {0, 1}
+                or row["meta_metadata_complete"] != row["catalog_metadata_complete"]
+            ):
+                raise ValueError("inconsistent confirmed attribution")
+            record = MetaAdRecord(
+                account_id=str(row["catalog_account_id"]),
+                ad_id=str(row["catalog_ad_id"]),
+                ad_name=str(row["catalog_ad_name"]),
+                ad_status=row["catalog_ad_status"],
+                ad_effective_status=row["catalog_ad_effective_status"],
+                adset_id=row["catalog_adset_id"],
+                adset_name=row["catalog_adset_name"],
+                adset_status=row["catalog_adset_status"],
+                campaign_id=str(row["catalog_campaign_id"]),
+                campaign_name=str(row["catalog_campaign_name"]),
+                campaign_status=row["catalog_campaign_status"],
+                creative_id=row["catalog_creative_id"],
+                creative_name=row["catalog_creative_name"],
+                metadata_complete=bool(row["catalog_metadata_complete"]),
+                fetched_at=row["catalog_fetched_at"],
+            )
+            return confirmed_payload(record, observed, row["meta_confirmed_at"])
+        except (TypeError, ValueError):
+            return pending_payload(
+                observed,
+                last_attempt_at
+                if isinstance(last_attempt_at, (int, float))
+                and not isinstance(last_attempt_at, bool)
+                and math.isfinite(last_attempt_at)
+                else None,
+                retry_scheduled,
+                "meta_invalid_response",
+            )
 
     @staticmethod
     def _validate_limit(
