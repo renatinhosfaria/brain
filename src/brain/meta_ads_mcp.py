@@ -44,6 +44,7 @@ _MAX_PAGES = 100
 _MAX_ENTITIES_PER_PAGE = 500
 _MAX_COLLECTION_ITEMS = 500
 _MAX_RETRY_AFTER_SECONDS = 86_400.0
+_FIXED_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
 _DECIMAL_ID = re.compile(r"^[0-9]{1,64}$", re.ASCII)
 _SAFE_TEXT = re.compile(r"^[^\x00-\x1f\x7f]+$", re.DOTALL)
 _AD_FIELDS = (
@@ -71,17 +72,35 @@ class MetaAdsClient(Protocol):
     def list_ads(self, now: float, full: bool) -> list[MetaAdRecord]: ...
 
 
-class _CountingStream(httpx2.AsyncByteStream):
-    def __init__(self, stream: httpx2.AsyncByteStream, maximum_bytes: int) -> None:
-        self._stream = stream
-        self._maximum_bytes = maximum_bytes
+class _ResponseByteBudget:
+    """Mutable response budget shared by every HTTP response in one operation."""
+
+    def __init__(self, configured_maximum_bytes: int) -> None:
+        if (
+            isinstance(configured_maximum_bytes, bool)
+            or not isinstance(configured_maximum_bytes, int)
+            or configured_maximum_bytes <= 0
+        ):
+            raise ValueError("response byte budget must be positive")
+        self._maximum_bytes = min(configured_maximum_bytes, _FIXED_RESPONSE_MAX_BYTES)
         self._seen = 0
+
+    def consume(self, size: int) -> None:
+        self._seen += size
+        if self._seen > self._maximum_bytes:
+            raise MetaAdsError("meta_invalid_response")
+
+
+class _CountingStream(httpx2.AsyncByteStream):
+    def __init__(
+        self, stream: httpx2.AsyncByteStream, response_budget: _ResponseByteBudget
+    ) -> None:
+        self._stream = stream
+        self._response_budget = response_budget
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:
-            self._seen += len(chunk)
-            if self._seen > self._maximum_bytes:
-                raise MetaAdsError("meta_invalid_response")
+            self._response_budget.consume(len(chunk))
             yield chunk
 
     async def aclose(self) -> None:
@@ -92,17 +111,23 @@ class _ResponseLimitTransport(httpx2.AsyncBaseTransport):
     """Wrap every MCP HTTP response stream with a per-operation byte limit."""
 
     def __init__(
-        self, transport: httpx2.AsyncBaseTransport, maximum_bytes: int
+        self,
+        transport: httpx2.AsyncBaseTransport,
+        response_budget: _ResponseByteBudget | int,
     ) -> None:
         self._transport = transport
-        self._maximum_bytes = maximum_bytes
+        self._response_budget = (
+            _ResponseByteBudget(response_budget)
+            if isinstance(response_budget, int)
+            else response_budget
+        )
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         response = await self._transport.handle_async_request(request)
         return httpx2.Response(
             status_code=response.status_code,
             headers=response.headers,
-            stream=_CountingStream(response.stream, self._maximum_bytes),
+            stream=_CountingStream(response.stream, self._response_budget),
             extensions=response.extensions,
             request=request,
         )
@@ -185,7 +210,8 @@ def _next_cursor(payload: Mapping[str, object]) -> str | None:
 class _ToolAdapter:
     account_argument: str
     entity_selector_argument: str
-    exact_id_filter_supported: bool
+    exact_id_argument_declared: bool
+    field_context_tool: mcp_types.Tool | None
 
 
 class MetaAdsMcpClient:
@@ -256,7 +282,7 @@ class MetaAdsMcpClient:
         timeout_seconds = self._settings.meta_ads_mcp_timeout_seconds
         transport = _ResponseLimitTransport(
             httpx2.AsyncHTTPTransport(),
-            self._settings.meta_ads_mcp_response_max_bytes,
+            _ResponseByteBudget(self._settings.meta_ads_mcp_response_max_bytes),
         )
         try:
             async with (
@@ -297,6 +323,9 @@ class MetaAdsMcpClient:
             accounts_result = await self._call_tool(session, "ads_get_ad_accounts", {})
             accounts = self._structured_data(accounts_result)
             self._validate_account_presence(accounts)
+            exact_id_filter_supported = await self._direct_id_filter_supported(
+                session, adapter
+            )
         except MetaAdsError:
             raise
         except Exception as exc:  # noqa: BLE001 - remote SDK boundary
@@ -307,7 +336,7 @@ class MetaAdsMcpClient:
             account_argument=adapter.account_argument,
             entity_selector_argument=adapter.entity_selector_argument,
             result_array_path=("data",),
-            exact_id_filter_supported=adapter.exact_id_filter_supported,
+            exact_id_filter_supported=exact_id_filter_supported,
         )
         self._capabilities = capabilities
         return capabilities
@@ -364,9 +393,76 @@ class MetaAdsMcpClient:
         return _ToolAdapter(
             account_argument=account_argument,
             entity_selector_argument=selector_argument,
-            exact_id_filter_supported=isinstance(properties.get("id"), dict)
+            exact_id_argument_declared=isinstance(properties.get("id"), dict)
             and properties["id"].get("type") == "string",
+            field_context_tool=by_name.get("ads_get_field_context"),
         )
+
+    async def _direct_id_filter_supported(
+        self, session: _Session, adapter: _ToolAdapter
+    ) -> bool:
+        """Accept direct filtering only after a structured field-context proof."""
+        tool = adapter.field_context_tool
+        if tool is None or not adapter.exact_id_argument_declared:
+            return False
+        arguments = self._field_context_arguments(tool)
+        if arguments is None or not _declares_data_array(tool.output_schema):
+            return False
+        try:
+            result = await self._call_tool(session, "ads_get_field_context", arguments)
+            fields = self._structured_data(result)
+        except MetaAdsError:
+            return False
+        for field in fields:
+            if (
+                field.get("entity_type") == "ad"
+                and field.get("field") == "id"
+                and field.get("filterable") is True
+            ):
+                return True
+        return False
+
+    def _field_context_arguments(
+        self, tool: mcp_types.Tool
+    ) -> dict[str, object] | None:
+        properties = _object_properties(tool.input_schema)
+        if properties is None:
+            return None
+        selector_argument = next(
+            (
+                name
+                for name in ("entity_type", "level")
+                if isinstance(properties.get(name), dict)
+                and properties[name].get("type") == "string"
+            ),
+            None,
+        )
+        if (
+            selector_argument is None
+            or not isinstance(properties.get("field"), dict)
+            or properties["field"].get("type") != "string"
+        ):
+            return None
+        arguments: dict[str, object] = {selector_argument: "ad", "field": "id"}
+        account_argument = next(
+            (
+                name
+                for name in ("ad_account_id", "account_id")
+                if isinstance(properties.get(name), dict)
+                and properties[name].get("type") == "string"
+            ),
+            None,
+        )
+        if account_argument is not None:
+            arguments[account_argument] = f"act_{self._account_id}"
+        required = tool.input_schema.get("required", [])
+        if not isinstance(required, list) or not all(
+            isinstance(name, str) for name in required
+        ):
+            return None
+        if any(name not in arguments for name in required):
+            return None
+        return arguments
 
     @staticmethod
     async def _call_tool(

@@ -46,6 +46,7 @@ def _tools(
     entity_output: dict[str, Any] | None = None,
     include_accounts: bool = True,
     include_entities: bool = True,
+    include_field_context: bool = False,
 ) -> list[mcp_types.Tool]:
     tools: list[mcp_types.Tool] = []
     if include_accounts:
@@ -67,6 +68,19 @@ def _tools(
                     "required": ["ad_account_id", "entity_type"],
                 },
                 output_schema=entity_output,
+            )
+        )
+    if include_field_context:
+        tools.append(
+            _tool(
+                "ads_get_field_context",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "entity_type": {"type": "string"},
+                        "field": {"type": "string"},
+                    },
+                },
             )
         )
     return tools
@@ -146,6 +160,21 @@ class _StaticTransport(httpx2.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, request=request, stream=_ByteStream([self.body]))
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _SequenceTransport(httpx2.AsyncBaseTransport):
+    def __init__(self, bodies: list[bytes]) -> None:
+        self.bodies = bodies
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            request=request,
+            stream=_ByteStream([self.bodies.pop(0)]),
+        )
 
     async def aclose(self) -> None:
         return None
@@ -325,7 +354,14 @@ class MetaAdsMcpClientTests(unittest.TestCase):
                 "id": {"type": "string"},
             },
         }
-        session = self._probe_session(tools=_tools(entity_schema=schema))
+        session = self._probe_session(
+            tools=_tools(entity_schema=schema, include_field_context=True)
+        )
+        session.responses["ads_get_field_context"] = [
+            _result(
+                {"data": [{"entity_type": "ad", "field": "id", "filterable": True}]}
+            )
+        ]
         session.responses["ads_get_ad_entities"] = [
             _result(
                 {
@@ -344,6 +380,76 @@ class MetaAdsMcpClientTests(unittest.TestCase):
         self._client(session).get_ad(source_id, now=1.0)
 
         self.assertEqual(session.calls[-1][1]["id"], source_id)
+
+    def test_get_ad_falls_back_to_local_exact_comparison_when_field_context_is_unproven(
+        self,
+    ) -> None:
+        source_id = "120200000000001"
+        schema = {
+            "type": "object",
+            "properties": {
+                "ad_account_id": {"type": "string"},
+                "entity_type": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer"},
+                "after": {"type": "string"},
+                "id": {"type": "string"},
+            },
+        }
+        session = self._probe_session(
+            tools=_tools(entity_schema=schema, include_field_context=True)
+        )
+        session.responses["ads_get_field_context"] = [
+            _result(
+                {"data": [{"entity_type": "ad", "field": "id", "filterable": False}]}
+            )
+        ]
+        session.responses["ads_get_ad_entities"] = [
+            _result(
+                {
+                    "data": [
+                        {
+                            "id": source_id,
+                            "account_id": ACCOUNT_ID,
+                            "name": "Fixture ad",
+                            "campaign": {"id": "1204001", "name": "Fixture campaign"},
+                        }
+                    ]
+                }
+            )
+        ]
+
+        self._client(session).get_ad(source_id, now=1.0)
+
+        self.assertNotIn("id", session.calls[-1][1])
+
+    def test_probe_treats_malformed_field_context_as_unproven_not_as_text_evidence(
+        self,
+    ) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "ad_account_id": {"type": "string"},
+                "entity_type": {"type": "string"},
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer"},
+                "after": {"type": "string"},
+                "id": {"type": "string"},
+            },
+        }
+        session = self._probe_session(
+            tools=_tools(entity_schema=schema, include_field_context=True)
+        )
+        session.responses["ads_get_field_context"] = [
+            mcp_types.CallToolResult(
+                content=[mcp_types.TextContent(type="text", text="id is filterable")]
+            )
+        ]
+
+        capabilities = self._client(session).probe()
+
+        self.assertFalse(capabilities.exact_id_filter_supported)
+        self.assertEqual(session.calls[-1][0], "ads_get_field_context")
 
     def test_probe_rejects_schema_that_cannot_support_bounded_requests(self) -> None:
         schema = {
@@ -509,6 +615,40 @@ class MetaAdsMcpClientTests(unittest.TestCase):
         self.assertEqual(len(anyio.run(read, b"x" * limit)), limit)
         with self.assertRaisesRegex(MetaAdsError, "^meta_invalid_response$"):
             anyio.run(read, b"x" * (limit + 1))
+
+    def test_response_limit_counts_multiple_http_responses_in_one_operation(
+        self,
+    ) -> None:
+        limit = 8 * 1024 * 1024
+
+        async def read_two() -> None:
+            transport = _ResponseLimitTransport(
+                _SequenceTransport([b"x" * (limit // 2 + 1), b"y" * (limit // 2)]),
+                limit,
+            )
+            async with httpx2.AsyncClient(transport=transport) as http:
+                await (await http.get("https://example.invalid/one")).aread()
+                await (await http.get("https://example.invalid/two")).aread()
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_invalid_response$"):
+            anyio.run(read_two)
+
+    def test_response_limit_never_exceeds_the_fixed_eight_mebibyte_contract(
+        self,
+    ) -> None:
+        fixed_limit = 8 * 1024 * 1024
+
+        async def read() -> bytes:
+            async with httpx2.AsyncClient(
+                transport=_ResponseLimitTransport(
+                    _StaticTransport(b"x" * (fixed_limit + 1)),
+                    32 * 1024 * 1024,
+                )
+            ) as http:
+                return await (await http.get("https://example.invalid")).aread()
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_invalid_response$"):
+            anyio.run(read)
 
 
 if __name__ == "__main__":
