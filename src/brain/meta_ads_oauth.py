@@ -727,7 +727,9 @@ class MetaAdsOAuth:
             or credentials.resource != META_ADS_MCP_RESOURCE
         ):
             raise OAuthError("oauth_credentials_invalid")
-        form = self._base_form("refresh_token", client_secret=registration.client_secret)
+        form = self._base_form(
+            "refresh_token", client_secret=registration.client_secret
+        )
         form["refresh_token"] = credentials.refresh_token
         payload = self._request_token(metadata.token_endpoint, form)
         if payload.get("error") == "invalid_grant":
