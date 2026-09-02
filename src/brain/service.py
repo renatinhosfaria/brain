@@ -464,16 +464,21 @@ class BrainService:
                         "status": "unavailable",
                         "reason": "context_unavailable",
                     }
+                initial_has_pending_meta_attribution = (
+                    self._context_has_pending_meta_attribution(result)
+                )
                 event_id = self._pending_context_meta_event_id_until_deadline(
                     contact_key=contact_key,
                     now=context_now,
                     deadline=meta_deadline,
                 )
-                if event_id is not None and self._resolve_pending_context_meta(
-                    event_id=event_id,
-                    now=context_now,
-                    deadline=meta_deadline,
-                ):
+                if event_id is not None:
+                    self._resolve_pending_context_meta(
+                        event_id=event_id,
+                        now=context_now,
+                        deadline=meta_deadline,
+                    )
+                if initial_has_pending_meta_attribution:
                     try:
                         result = self._read_conversation_context_until_deadline(
                             contact_key=contact_key,
@@ -549,6 +554,16 @@ class BrainService:
                 meta_attribution_enabled=meta_attribution_enabled,
             ),
             timeout_seconds=remaining,
+        )
+
+    @staticmethod
+    def _context_has_pending_meta_attribution(result: Mapping[str, Any]) -> bool:
+        events = result.get("events")
+        return isinstance(events, list) and any(
+            isinstance(event, Mapping)
+            and isinstance(event.get("meta_attribution"), Mapping)
+            and event["meta_attribution"].get("status") == "pending"
+            for event in events
         )
 
     def _pending_context_meta_event_id_until_deadline(

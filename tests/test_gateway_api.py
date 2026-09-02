@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from starlette.requests import Request
 
@@ -649,7 +650,7 @@ class GatewayAPITests(unittest.TestCase):
     ) -> None:
         """A slow Meta read must not make the CEO lose the transport context."""
         self.prepare_turn_identity()
-        clock_values = iter((100.0, 100.0, 104.98, 104.99))
+        clock_values = iter((100.0, 100.0, 104.98, 104.99, 104.995))
         self.enable_meta_attribution(
             clock=lambda: 1_700_000_050.0,
             monotonic_clock=lambda: next(clock_values),
@@ -772,6 +773,51 @@ class GatewayAPITests(unittest.TestCase):
         )
 
         event = self.post_context(self.context_payload()).json()["events"][0]
+
+        self.assertEqual(event["meta_attribution"]["status"], "confirmed")
+        self.assertEqual(event["meta_attribution"]["ad"]["id"], "120200000000001")
+
+    def test_context_rereads_when_worker_confirms_before_pending_selection(
+        self,
+    ) -> None:
+        """A worker confirmation after the snapshot must not render stale pending."""
+        self.prepare_turn_identity()
+        store = self.enable_meta_attribution()
+        event_id = self.seed_event(
+            "ad click",
+            transport_kind="ctwa_candidate",
+            source_app="instagram",
+            external_ad_reply_raw_json=(
+                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
+            ),
+            suffix="selection-race",
+            timestamp=time.time() - 10,
+        )
+        attribution = self.service.meta_attribution
+        assert attribution is not None
+        self.service.runtime.write(
+            lambda conn: attribution.stage_event(
+                conn,
+                event_id=event_id,
+                raw={"sourceType": "ad", "sourceId": "120200000000001"},
+                now=time.time() - 5,
+            )
+        )
+        record = self.meta_record(fetched_at=time.time() - 1)
+
+        def confirm_before_selection(**_: object) -> None:
+            self.service.runtime.write(
+                lambda conn: store.upsert_record_and_confirm(
+                    conn, record, confirmed_at=time.time()
+                )
+            )
+
+        with patch.object(
+            self.service,
+            "_pending_context_meta_event_id_until_deadline",
+            side_effect=confirm_before_selection,
+        ):
+            event = self.post_context(self.context_payload()).json()["events"][0]
 
         self.assertEqual(event["meta_attribution"]["status"], "confirmed")
         self.assertEqual(event["meta_attribution"]["ad"]["id"], "120200000000001")
