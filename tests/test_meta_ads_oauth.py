@@ -24,11 +24,13 @@ from urllib.parse import parse_qs, urlparse
 import anyio
 
 from brain.meta_ads_oauth import (
+    DEFAULT_REDIRECT_URI,
     META_ADS_MCP_RESOURCE,
     MetaAdsOAuth,
     OAuthCallback,
     OAuthCredentialProvider,
     OAuthCredentials,
+    OAuthDynamicClient,
     OAuthError,
     _client_configuration_from_mapping,
     _fetch_json,
@@ -37,6 +39,7 @@ from brain.meta_ads_oauth import (
 
 AUTH_METADATA = {
     "issuer": META_ADS_MCP_RESOURCE,
+    "registration_endpoint": "https://mcp.facebook.com/oauth/register",
     "authorization_endpoint": "https://www.facebook.com/v99.0/dialog/oauth",
     "token_endpoint": "https://graph.facebook.com/v99.0/oauth/access_token",
     "response_types_supported": ["code"],
@@ -114,6 +117,70 @@ class MetaAdsOAuthTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(OAuthError, "^oauth_metadata_invalid$"):
                 oauth.discover()
+
+    def test_discover_validates_registration_endpoint(self) -> None:
+        metadata = self.oauth.discover()
+        self.assertEqual(
+            metadata.registration_endpoint, "https://mcp.facebook.com/oauth/register"
+        )
+        for value in (
+            "http://mcp.facebook.com/oauth/register",
+            "https://user:pass@mcp.facebook.com/oauth/register",
+            "https://mcp.facebook.com:8443/oauth/register",
+            "https://mcp.facebook.com/oauth/register#fragment",
+            "https://evil.example/oauth/register",
+            None,
+        ):
+            payload = dict(AUTH_METADATA)
+            if value is None:
+                payload.pop("registration_endpoint")
+            else:
+                payload["registration_endpoint"] = value
+            oauth = MetaAdsOAuth(
+                client_id="client",
+                store_path=self.store,
+                key_path=self.key,
+                metadata_fetcher=lambda _url, payload=payload: payload,
+            )
+            with self.assertRaisesRegex(OAuthError, "^oauth_metadata_invalid$"):
+                oauth.discover()
+
+    def test_dynamic_client_validation(self) -> None:
+        client = OAuthDynamicClient(
+            client_id="dynamic-client-id",
+            client_secret=None,
+            registration_access_token=None,
+            registered_at=1_700_000_000.0,
+            expires_at=None,
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            redirect_uri=DEFAULT_REDIRECT_URI,
+            scopes=frozenset({"ads_read"}),
+        )
+        self.assertEqual(client.scopes, frozenset({"ads_read"}))
+        for field, value in (
+            ("client_id", "x" * 16_385),
+            ("issuer", "https://evil.example"),
+            ("resource", "https://evil.example/ads"),
+            ("redirect_uri", "http://127.0.0.1:9999/oauth/callback"),
+            ("scopes", frozenset({"ads_read", "ads_management"})),
+            ("registered_at", float("nan")),
+        ):
+            with self.subTest(field=field):
+                values = {
+                    "client_id": "dynamic-client-id",
+                    "client_secret": None,
+                    "registration_access_token": None,
+                    "registered_at": 1_700_000_000.0,
+                    "expires_at": None,
+                    "issuer": META_ADS_MCP_RESOURCE,
+                    "resource": META_ADS_MCP_RESOURCE,
+                    "redirect_uri": DEFAULT_REDIRECT_URI,
+                    "scopes": frozenset({"ads_read"}),
+                }
+                values[field] = value
+                with self.assertRaises(ValueError):
+                    OAuthDynamicClient(**values)
 
     def test_authorization_url_uses_pkce_and_read_only_scopes(self) -> None:
         request = self.oauth.authorization_url()

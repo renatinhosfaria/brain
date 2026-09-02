@@ -116,7 +116,47 @@ class OAuthMetadata:
     issuer: str
     authorization_endpoint: str
     token_endpoint: str
+    registration_endpoint: str
     scopes_supported: frozenset[str]
+
+
+@dataclass(frozen=True)
+class OAuthDynamicClient:
+    """Validated public client registration returned by the OAuth server."""
+
+    client_id: str
+    client_secret: str | None = field(repr=False)
+    registration_access_token: str | None = field(repr=False)
+    registered_at: float
+    expires_at: float | None
+    issuer: str
+    resource: str
+    redirect_uri: str
+    scopes: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if (
+            not _safe_secret_text(self.client_id)
+            or (
+                self.client_secret is not None
+                and not _safe_secret_text(self.client_secret)
+            )
+            or (
+                self.registration_access_token is not None
+                and not _safe_secret_text(self.registration_access_token)
+            )
+            or not _finite_number(self.registered_at)
+            or self.registered_at <= 0
+            or (
+                self.expires_at is not None
+                and (not _finite_number(self.expires_at) or self.expires_at <= 0)
+            )
+            or self.issuer != META_ADS_MCP_RESOURCE
+            or self.resource != META_ADS_MCP_RESOURCE
+            or self.redirect_uri != DEFAULT_REDIRECT_URI
+            or self.scopes != frozenset({"ads_read"})
+        ):
+            raise ValueError("OAuth dynamic client is invalid")
 
 
 @dataclass(frozen=True)
@@ -823,6 +863,7 @@ def _parse_metadata(payload: object) -> OAuthMetadata:
     resource = payload.get("resource", META_ADS_MCP_RESOURCE)
     authorization_endpoint = payload.get("authorization_endpoint")
     token_endpoint = payload.get("token_endpoint")
+    registration_endpoint = payload.get("registration_endpoint")
     scopes = payload.get("scopes_supported", ())
     methods = payload.get("code_challenge_methods_supported", ())
     grants = payload.get("grant_types_supported", ())
@@ -833,6 +874,7 @@ def _parse_metadata(payload: object) -> OAuthMetadata:
         or not _allowed_https_url(issuer, {"mcp.facebook.com"})
         or not _allowed_https_url(authorization_endpoint, {"www.facebook.com"})
         or not _allowed_https_url(token_endpoint, {"graph.facebook.com"})
+        or not _allowed_https_url(registration_endpoint, {"mcp.facebook.com"})
         or not _string_set(scopes).issuperset({"ads_read"})
         or "S256" not in _string_set(methods)
         or not _string_set(grants).issuperset({"authorization_code", "refresh_token"})
@@ -844,6 +886,7 @@ def _parse_metadata(payload: object) -> OAuthMetadata:
         issuer=issuer,
         authorization_endpoint=cast(str, authorization_endpoint),
         token_endpoint=cast(str, token_endpoint),
+        registration_endpoint=cast(str, registration_endpoint),
         scopes_supported=frozenset(_string_set(scopes) & ALLOWED_SCOPES),
     )
 
