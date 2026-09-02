@@ -91,7 +91,7 @@ class MetaAttributionService:
 
     def resolve_source(self, source_id: str, now: float) -> bool:
         """Claim one durable source job, then perform at most one remote lookup."""
-        if not self.enabled:
+        if not self.enabled or self._durable_auth_circuit_active(now):
             return False
         lease_token = self._runtime.write(
             lambda conn: self._store.claim_job(
@@ -190,7 +190,11 @@ class MetaAttributionService:
 
     def probe(self, now: float) -> MetaAdsCapabilities | None:
         """Run the explicit capability probe and close the auth circuit on success."""
-        if not self.enabled or self._credential_status(now) in {"missing", "expired"}:
+        if (
+            not self.enabled
+            or self._durable_auth_circuit_active(now)
+            or self._credential_status(now) in {"missing", "expired"}
+        ):
             return None
         try:
             capabilities = self._client.probe()
@@ -208,6 +212,7 @@ class MetaAttributionService:
         """Refresh validated readable Ads metadata in bounded write batches."""
         if (
             not self.enabled
+            or self._durable_auth_circuit_active(now)
             or self._credential_status(now) in {"missing", "expired"}
             or now < self._auth_circuit_until
         ):
@@ -250,8 +255,10 @@ class MetaAttributionService:
         credential_status = self._credential_status(now)
         if not self.enabled:
             return MetaAttributionHealth("disabled", credential_status)
+        durable_circuit_active = self._durable_auth_circuit_active(now)
         if (
             credential_status in {"missing", "expired"}
+            or durable_circuit_active
             or now < self._auth_circuit_until
             or not self._probe_succeeded
         ):
@@ -261,6 +268,13 @@ class MetaAttributionService:
     def tick(self, now: float) -> int:
         """Run bounded due work and service-owned refresh/retention schedules."""
         if not self.enabled:
+            return 0
+        if self._durable_auth_circuit_active(now):
+            if self._last_retention_at is None or (
+                now - self._last_retention_at
+                >= self._settings.meta_ads_full_sync_interval_seconds
+            ):
+                self.apply_retention(now)
             return 0
         if not self._probe_succeeded:
             self.probe(now)
@@ -309,6 +323,15 @@ class MetaAttributionService:
             self._auth_circuit_until,
             self._runtime.read(lambda conn: self._store.auth_circuit_until(conn, now)),
         )
+
+    def _durable_auth_circuit_active(self, now: float) -> bool:
+        circuit_until = self._runtime.read(
+            lambda conn: self._store.auth_circuit_until(conn, now)
+        )
+        if circuit_until <= now:
+            return False
+        self._auth_circuit_until = max(self._auth_circuit_until, circuit_until)
+        return True
 
     def _fail_claimed_job(
         self,

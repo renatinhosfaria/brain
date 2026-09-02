@@ -287,8 +287,8 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertEqual(self.service.health(101.0).status, "degraded")
 
         self.client.get_error = None
-        self.assertIsNotNone(self.service.probe(now=102.0))
-        self.assertEqual(self.service.health(102.0).status, "ready")
+        self.assertIsNotNone(self.service.probe(now=3701.0))
+        self.assertEqual(self.service.health(3701.0).status, "ready")
 
     def test_refresh_updates_metadata_without_rebinding_the_confirmed_ad(self) -> None:
         """Refreshing names must preserve the original event's exact ad identity."""
@@ -427,6 +427,53 @@ class MetaAttributionServiceTests(unittest.TestCase):
 
         self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
 
+    def _restart_during_auth_circuit(self, event_id: str) -> MetaAttributionService:
+        self.client.get_error = MetaAdsError("meta_auth_unavailable")
+        self.runtime.write(lambda conn: self._event(conn, event_id))
+        self.runtime.write(
+            lambda conn: self.service.stage_event(
+                conn,
+                event_id=event_id,
+                raw={"sourceType": "ad", "sourceId": SOURCE_ID},
+                now=100.0,
+            )
+        )
+        self.assertFalse(self.service.resolve_source(SOURCE_ID, now=100.0))
+        self.client.get_error = None
+        return MetaAttributionService(
+            self._settings(), self.runtime, self.store, self.client
+        )
+
+    def test_restarted_probe_does_not_call_meta_during_durable_auth_circuit(
+        self,
+    ) -> None:
+        """A fresh process must honor auth deferral before capability discovery."""
+        restarted = self._restart_during_auth_circuit("waevt_probe_circuit")
+
+        self.assertIsNone(restarted.probe(now=101.0))
+
+        self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
+
+    def test_restarted_refresh_does_not_call_meta_during_durable_auth_circuit(
+        self,
+    ) -> None:
+        """A fresh process must honor auth deferral before catalog synchronization."""
+        restarted = self._restart_during_auth_circuit("waevt_refresh_circuit")
+
+        self.assertEqual(restarted.refresh_catalog(now=101.0), 0)
+
+        self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
+
+    def test_restarted_tick_skips_all_meta_operations_during_durable_auth_circuit(
+        self,
+    ) -> None:
+        """The worker tick must not bypass a persistent auth circuit after restart."""
+        restarted = self._restart_during_auth_circuit("waevt_tick_circuit")
+
+        self.assertEqual(restarted.tick(now=101.0), 0)
+
+        self.assertEqual(self.client.calls, [("get_ad", SOURCE_ID)])
+
     def test_successful_probe_closes_the_durable_auth_circuit(self) -> None:
         """A rotated credential must release pending jobs, even for a later worker."""
         self.client.get_error = MetaAdsError("meta_auth_unavailable")
@@ -442,12 +489,12 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertFalse(self.service.resolve_source(SOURCE_ID, now=100.0))
         self.client.get_error = None
 
-        self.assertIsNotNone(self.service.probe(now=101.0))
+        self.assertIsNotNone(self.service.probe(now=3701.0))
         restarted = MetaAttributionService(
             self._settings(), self.runtime, self.store, self.client
         )
 
-        self.assertEqual(restarted.run_due_jobs(now=101.0), 1)
+        self.assertEqual(restarted.run_due_jobs(now=3701.0), 1)
 
     def test_restart_recovers_an_expired_lease_and_runs_the_due_job(self) -> None:
         """A process restart must not strand attribution behind an old worker lease."""
