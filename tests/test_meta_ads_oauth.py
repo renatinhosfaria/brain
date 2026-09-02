@@ -295,6 +295,166 @@ class MetaAdsOAuthTests(unittest.TestCase):
             parse_qs(urlparse(second.url).query)["client_id"], ["dynamic-client-id"]
         )
 
+    def test_dynamic_registration_survives_restart(self) -> None:
+        registration = self._dynamic_registration()
+        oauth = MetaAdsOAuth(
+            client_id=None,
+            store_path=self.store,
+            key_path=self.key,
+            now=lambda: 1_700_000_000.0,
+        )
+        oauth.save_registration(registration)
+
+        restarted = MetaAdsOAuth.from_store_or_new(
+            store_path=self.store,
+            key_path=self.key,
+            now=lambda: 1_700_000_100.0,
+        )
+        self.assertEqual(restarted._dynamic_client, registration)
+        self.assertEqual(restarted._client_id, "dynamic-client-id")
+        self.assertEqual(restarted.load_registration(), registration)
+        self.assertIsNone(restarted.load_credentials())
+
+    def test_dynamic_registration_and_credentials_use_strict_v2_payload(self) -> None:
+        registration = self._dynamic_registration()
+        oauth = MetaAdsOAuth(
+            client_id=None,
+            store_path=self.store,
+            key_path=self.key,
+            now=lambda: 1_700_000_000.0,
+        )
+        oauth.save_registration(registration)
+        credentials = OAuthCredentials(
+            client_id=registration.client_id,
+            client_secret=registration.client_secret,
+            access_token="access-token-value",
+            refresh_token="refresh-token-value",
+            access_expires_at=1_700_003_600.0,
+            refresh_expires_at=None,
+            scopes=frozenset({"ads_read"}),
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            created_at=1_700_000_000.0,
+            updated_at=1_700_000_000.0,
+        )
+        oauth.save_credentials(credentials)
+        self.assertEqual(oauth.load_registration(), registration)
+        self.assertEqual(oauth.load_credentials(), credentials)
+        restarted = MetaAdsOAuth.from_store_or_new(
+            store_path=self.store, key_path=self.key
+        )
+        self.assertEqual(restarted.load_credentials(), credentials)
+
+    def test_legacy_pre_registered_store_is_rejected(self) -> None:
+        self.oauth.save_client_configuration()
+        with self.assertRaisesRegex(OAuthError, "^oauth_legacy_store$"):
+            MetaAdsOAuth.from_store_or_new(store_path=self.store, key_path=self.key)
+        with self.assertRaisesRegex(OAuthError, "^oauth_legacy_store$"):
+            self.oauth.load_registration()
+
+    def test_clear_store_removes_valid_v2_envelope_without_decrypting(self) -> None:
+        oauth = MetaAdsOAuth(
+            client_id=None, store_path=self.store, key_path=self.key
+        )
+        oauth.save_registration(self._dynamic_registration())
+        with patch.object(
+            MetaAdsOAuth, "_read_key", side_effect=AssertionError("must not decrypt")
+        ):
+            MetaAdsOAuth.clear_store(self.store)
+        self.assertFalse(self.store.exists())
+
+    def test_invalid_grant_preserves_dynamic_registration_without_tokens(self) -> None:
+        registration = self._dynamic_registration()
+        credentials = OAuthCredentials(
+            client_id=registration.client_id,
+            client_secret=None,
+            access_token="expired-access-token",
+            refresh_token="revoked-refresh-token",
+            access_expires_at=1_700_000_100.0,
+            refresh_expires_at=None,
+            scopes=frozenset({"ads_read"}),
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            created_at=1_700_000_000.0,
+            updated_at=1_700_000_000.0,
+        )
+        oauth = MetaAdsOAuth(
+            client_id=None,
+            dynamic_client=registration,
+            store_path=self.store,
+            key_path=self.key,
+            metadata_fetcher=self._metadata,
+            token_requester=lambda _url, _form: {"error": "invalid_grant"},
+            now=lambda: 1_700_000_000.0,
+        )
+        oauth.save_credentials(credentials)
+        with self.assertRaisesRegex(OAuthError, "^oauth_invalid_grant$"):
+            oauth.refresh(credentials)
+        self.assertEqual(oauth.load_registration(), registration)
+        self.assertIsNone(oauth.load_credentials())
+
+    def test_provider_loads_dynamic_registration_before_refresh(self) -> None:
+        registration = replace(self._dynamic_registration(), client_secret="dcr-secret")
+        credentials = OAuthCredentials(
+            client_id=registration.client_id,
+            client_secret="dcr-secret",
+            access_token="nearly-expired-token",
+            refresh_token="refresh-token-value",
+            access_expires_at=1_700_000_500.0,
+            refresh_expires_at=None,
+            scopes=frozenset({"ads_read"}),
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            created_at=1_700_000_000.0,
+            updated_at=1_700_000_000.0,
+        )
+        writer = MetaAdsOAuth(
+            client_id=None,
+            dynamic_client=registration,
+            store_path=self.store,
+            key_path=self.key,
+            now=lambda: 1_700_000_000.0,
+        )
+        writer.save_credentials(credentials)
+        refresh_calls: list[dict[str, str]] = []
+
+        def refresh(_url: str, form: dict[str, str]) -> object:
+            refresh_calls.append(form)
+            return {
+                "access_token": "fresh-access-token",
+                "refresh_token": "fresh-refresh-token",
+                "expires_in": 3600,
+                "scope": "ads_read",
+            }
+
+        restarted = MetaAdsOAuth(
+            client_id=None,
+            store_path=self.store,
+            key_path=self.key,
+            metadata_fetcher=self._metadata,
+            token_requester=refresh,
+            now=lambda: 1_700_000_000.0,
+        )
+        self.assertEqual(
+            OAuthCredentialProvider(restarted).access_token(1_700_000_000.0),
+            "fresh-access-token",
+        )
+        self.assertEqual(refresh_calls[0]["client_id"], "dynamic-client-id")
+        self.assertEqual(refresh_calls[0]["client_secret"], "dcr-secret")
+
+    def _dynamic_registration(self) -> OAuthDynamicClient:
+        return OAuthDynamicClient(
+            client_id="dynamic-client-id",
+            client_secret=None,
+            registration_access_token=None,
+            registered_at=1_700_000_000.0,
+            expires_at=None,
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            redirect_uri=DEFAULT_REDIRECT_URI,
+            scopes=frozenset({"ads_read"}),
+        )
+
     def test_post_json_never_follows_redirects_and_rejects_oversized_response(
         self,
     ) -> None:

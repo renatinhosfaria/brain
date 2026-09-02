@@ -66,6 +66,21 @@ _CREDENTIAL_FIELDS = frozenset(
 _CLIENT_CONFIGURATION_FIELDS = frozenset(
     {"version", "kind", "client_id", "client_secret", "configured_at"}
 )
+_DYNAMIC_CLIENT_FIELDS = frozenset(
+    {
+        "version",
+        "client_id",
+        "client_secret",
+        "registration_access_token",
+        "registered_at",
+        "expires_at",
+        "issuer",
+        "resource",
+        "redirect_uri",
+        "scopes",
+    }
+)
+_STORE_PAYLOAD_FIELDS = frozenset({"version", "dynamic_client", "credentials"})
 
 MetadataFetcher = Callable[[str], object]
 TokenRequester = Callable[[str, dict[str, str]], object]
@@ -106,6 +121,7 @@ class OAuthError(Exception):
             "oauth_token_unavailable",
             "oauth_credentials_invalid",
             "oauth_credentials_unavailable",
+            "oauth_legacy_store",
         }
     )
 
@@ -466,8 +482,23 @@ class MetaAdsOAuth:
                 url, payload, allowed_hosts={"mcp.facebook.com"}
             )
         )
-        self._dynamic_client = dynamic_client
         self._now = now
+        # Static client credentials remain supported for the explicit token
+        # fallback.  Keep the compatibility registration in memory only; new
+        # envelopes are always written as a DCR-shaped v2 payload.
+        if dynamic_client is None and client_id is not None:
+            dynamic_client = OAuthDynamicClient(
+                client_id=client_id,
+                client_secret=client_secret,
+                registration_access_token=None,
+                registered_at=max(float(now()), 1.0),
+                expires_at=None,
+                issuer=META_ADS_MCP_RESOURCE,
+                resource=META_ADS_MCP_RESOURCE,
+                redirect_uri=redirect_uri,
+                scopes=frozenset({"ads_read"}),
+            )
+        self._dynamic_client = dynamic_client
         self._metadata: OAuthMetadata | None = None
 
     @classmethod
@@ -482,41 +513,66 @@ class MetaAdsOAuth:
         registration_requester: RegistrationRequester | None = None,
         now: Callable[[], float] = time.time,
     ) -> MetaAdsOAuth:
-        """Open a configured app without sending a request to Meta."""
+        """Backward-compatible alias for :meth:`from_store_or_new`."""
+        return cls.from_store_or_new(
+            store_path=store_path,
+            key_path=key_path,
+            redirect_uri=redirect_uri,
+            metadata_fetcher=metadata_fetcher,
+            token_requester=token_requester,
+            registration_requester=registration_requester,
+            now=now,
+        )
+
+    @classmethod
+    def from_store_or_new(
+        cls,
+        *,
+        store_path: Path = DEFAULT_STORE_PATH,
+        key_path: Path = DEFAULT_KEY_PATH,
+        redirect_uri: str = DEFAULT_REDIRECT_URI,
+        metadata_fetcher: MetadataFetcher | None = None,
+        token_requester: TokenRequester | None = None,
+        registration_requester: RegistrationRequester | None = None,
+        now: Callable[[], float] = time.time,
+    ) -> MetaAdsOAuth:
+        """Open a DCR session, or an empty client when no store exists.
+
+        The old pre-registered envelope is intentionally not migrated.  This
+        makes an operator explicitly clear the old App ID/App Secret before a
+        new dynamic registration is created.
+        """
         store = Path(store_path)
         key = Path(key_path)
+        oauth = cls(
+            client_id=None,
+            store_path=store,
+            key_path=key,
+            redirect_uri=redirect_uri,
+            metadata_fetcher=metadata_fetcher,
+            token_requester=token_requester,
+            registration_requester=registration_requester,
+            now=now,
+        )
+        if not store.exists():
+            return oauth
         try:
-            prototype = object.__new__(cls)
-            prototype._store_path = store
-            prototype._key_path = key
-            payload = prototype._decrypt_payload()
-            if set(payload) == _CLIENT_CONFIGURATION_FIELDS:
-                configuration = _client_configuration_from_mapping(payload)
-            else:
-                credentials = _credentials_from_mapping(payload)
-                configuration = OAuthClientConfiguration(
-                    client_id=credentials.client_id,
-                    client_secret=credentials.client_secret,
-                    configured_at=credentials.created_at,
-                )
-            return cls(
-                client_id=configuration.client_id,
-                client_secret=configuration.client_secret,
-                store_path=store,
-                key_path=key,
-                redirect_uri=redirect_uri,
-                metadata_fetcher=metadata_fetcher,
-                token_requester=token_requester,
-                registration_requester=registration_requester,
-                now=now,
-            )
+            registration, _credentials = oauth._load_store()
+            oauth._dynamic_client = registration
+            oauth._client_id = registration.client_id
+            return oauth
         except OAuthError:
             raise
         except (InvalidTag, OSError, TypeError, ValueError, json.JSONDecodeError):
             raise OAuthError("oauth_credentials_invalid") from None
 
     def save_client_configuration(self) -> None:
-        """Persist app registration before login without a separate secret file."""
+        """Retain the legacy writer solely so old stores can be identified.
+
+        Production code must use ``save_registration``.  Deliberately writing
+        this shape lets an operator run ``clear`` and migrate explicitly,
+        while all DCR readers reject it with ``oauth_legacy_store``.
+        """
         configuration = OAuthClientConfiguration(
             client_id=self._client_id,
             client_secret=self._client_secret,
@@ -524,6 +580,23 @@ class MetaAdsOAuth:
         )
         try:
             self._encrypt_and_save(_client_configuration_mapping(configuration))
+        except OAuthError:
+            raise
+        except (OSError, TypeError, ValueError):
+            raise OAuthError("oauth_credentials_unavailable") from None
+
+    def save_registration(self, registration: OAuthDynamicClient) -> None:
+        """Persist a validated dynamic registration with no bearer tokens."""
+        _validate_dynamic_client(registration)
+        try:
+            credentials = None
+            if self._store_path.exists():
+                _old_registration, credentials = self._load_store()
+                if _old_registration != registration:
+                    credentials = None
+            self._dynamic_client = registration
+            self._client_id = registration.client_id
+            self._encrypt_and_save(_store_mapping(registration, credentials))
         except OAuthError:
             raise
         except (OSError, TypeError, ValueError):
@@ -643,13 +716,18 @@ class MetaAdsOAuth:
     def refresh(self, credentials: OAuthCredentials) -> OAuthCredentials:
         _validate_credentials(credentials)
         metadata = self._metadata or self.discover()
+        registration = self._dynamic_client or self.load_registration()
+        if registration is None:
+            raise OAuthError("oauth_credentials_invalid")
+        self._dynamic_client = registration
+        self._client_id = registration.client_id
         if (
-            credentials.client_id != self._client_id
+            credentials.client_id != registration.client_id
             or credentials.issuer != metadata.issuer
             or credentials.resource != META_ADS_MCP_RESOURCE
         ):
             raise OAuthError("oauth_credentials_invalid")
-        form = self._base_form("refresh_token", client_secret=credentials.client_secret)
+        form = self._base_form("refresh_token", client_secret=registration.client_secret)
         form["refresh_token"] = credentials.refresh_token
         payload = self._request_token(metadata.token_endpoint, form)
         if payload.get("error") == "invalid_grant":
@@ -663,32 +741,69 @@ class MetaAdsOAuth:
         try:
             if not self._store_path.exists():
                 return None
-            payload = self._decrypt_payload()
-            if set(payload) == _CLIENT_CONFIGURATION_FIELDS:
-                _client_configuration_from_mapping(payload)
+            registration, credentials = self._load_store()
+            self._dynamic_client = registration
+            self._client_id = registration.client_id
+            if credentials is None:
                 return None
-            credentials = _credentials_from_mapping(payload)
-            if credentials.client_id != self._client_id:
+            if credentials.client_id != registration.client_id:
                 raise ValueError("OAuth client ID does not match stored credentials")
             return credentials
+        except OAuthError:
+            raise
+        except (InvalidTag, OSError, TypeError, ValueError, json.JSONDecodeError):
+            raise OAuthError("oauth_credentials_invalid") from None
+
+    def load_registration(self) -> OAuthDynamicClient | None:
+        try:
+            if not self._store_path.exists():
+                return None
+            registration, _credentials = self._load_store()
+            self._dynamic_client = registration
+            self._client_id = registration.client_id
+            return registration
+        except OAuthError:
+            raise
         except (InvalidTag, OSError, TypeError, ValueError, json.JSONDecodeError):
             raise OAuthError("oauth_credentials_invalid") from None
 
     def save_credentials(self, credentials: OAuthCredentials) -> None:
         _validate_credentials(credentials)
-        if credentials.client_id != self._client_id:
+        registration = self._dynamic_client or self.load_registration()
+        if registration is None or credentials.client_id != registration.client_id:
             raise OAuthError("oauth_credentials_invalid")
         try:
-            self._encrypt_and_save(_credentials_mapping(credentials))
+            self._dynamic_client = registration
+            self._client_id = registration.client_id
+            self._encrypt_and_save(_store_mapping(registration, credentials))
         except OAuthError:
             raise
         except (OSError, TypeError, ValueError):
             raise OAuthError("oauth_credentials_unavailable") from None
 
+    def _load_store(self) -> tuple[OAuthDynamicClient, OAuthCredentials | None]:
+        payload = self._decrypt_payload()
+        if payload.get("kind") == "client_configuration":
+            raise OAuthError("oauth_legacy_store")
+        if set(payload) != _STORE_PAYLOAD_FIELDS:
+            raise ValueError("OAuth store payload is invalid")
+        if payload.get("version") != 2:
+            raise ValueError("OAuth store payload version is invalid")
+        registration = _dynamic_client_from_mapping(payload.get("dynamic_client"))
+        credentials_payload = payload.get("credentials")
+        credentials = None
+        if credentials_payload is not None:
+            if not isinstance(credentials_payload, Mapping):
+                raise ValueError("OAuth credentials payload is invalid")
+            credentials = _credentials_from_mapping(credentials_payload)
+            if credentials.client_id != registration.client_id:
+                raise ValueError("OAuth client ID does not match registration")
+        return registration, credentials
+
     def _decrypt_payload(self) -> dict[str, object]:
         ciphertext = self._read_private_file(self._store_path, _MAX_ENVELOPE_BYTES)
         outer = _strict_json_object(ciphertext)
-        if set(outer) != _ENVELOPE_FIELDS or outer.get("version") != 1:
+        if set(outer) != _ENVELOPE_FIELDS or outer.get("version") not in {1, 2}:
             raise TypeError
         nonce = _decode_base64(outer["nonce"])
         encrypted = _decode_base64(outer["ciphertext"])
@@ -705,7 +820,7 @@ class MetaAdsOAuth:
         encrypted = AESGCM(self._read_key()).encrypt(nonce, plaintext, _AAD)
         envelope = json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "nonce": _base64url(nonce),
                 "ciphertext": _base64url(encrypted),
             },
@@ -718,9 +833,15 @@ class MetaAdsOAuth:
         self.clear_store(self._store_path)
 
     def invalidate_credentials(self) -> None:
-        """Atomically remove tokens while retaining app configuration."""
+        """Atomically remove tokens while retaining dynamic registration."""
         try:
-            self.save_client_configuration()
+            registration = self._dynamic_client or self.load_registration()
+            if registration is None:
+                self.clear_store(self._store_path)
+                return
+            self._dynamic_client = registration
+            self._client_id = registration.client_id
+            self._encrypt_and_save(_store_mapping(registration, None))
         except OAuthError:
             # If the existing envelope cannot be rewritten, make sure the
             # revoked token is not left available for another process.
@@ -755,6 +876,8 @@ class MetaAdsOAuth:
     def _base_form(
         self, grant_type: str, *, client_secret: str | None = None
     ) -> dict[str, str]:
+        if self._client_id is None:
+            raise OAuthError("oauth_credentials_invalid")
         form = {
             "grant_type": grant_type,
             "client_id": self._client_id,
@@ -789,6 +912,11 @@ class MetaAdsOAuth:
         previous: OAuthCredentials | None,
     ) -> OAuthCredentials:
         try:
+            registration = self._dynamic_client or self.load_registration()
+            if registration is None:
+                raise ValueError
+            self._dynamic_client = registration
+            self._client_id = registration.client_id
             access_token = _required_secret(payload, "access_token")
             expires_in = _positive_seconds(payload.get("expires_in"))
             refresh_token = _optional_secret(payload.get("refresh_token"))
@@ -808,11 +936,7 @@ class MetaAdsOAuth:
             )
             return OAuthCredentials(
                 client_id=self._client_id,
-                client_secret=(
-                    self._client_secret
-                    if self._client_secret is not None
-                    else (previous.client_secret if previous is not None else None)
-                ),
+                client_secret=registration.client_secret,
                 access_token=access_token,
                 refresh_token=refresh_token,
                 access_expires_at=current + expires_in,
@@ -1019,6 +1143,39 @@ def _credentials_mapping(credentials: OAuthCredentials) -> dict[str, object]:
     }
 
 
+def _dynamic_client_mapping(client: OAuthDynamicClient) -> dict[str, object]:
+    _validate_dynamic_client(client)
+    return {
+        "version": 1,
+        "client_id": client.client_id,
+        "client_secret": client.client_secret,
+        "registration_access_token": client.registration_access_token,
+        "registered_at": client.registered_at,
+        "expires_at": client.expires_at,
+        "issuer": client.issuer,
+        "resource": client.resource,
+        "redirect_uri": client.redirect_uri,
+        "scopes": sorted(client.scopes),
+    }
+
+
+def _store_mapping(
+    registration: OAuthDynamicClient, credentials: OAuthCredentials | None
+) -> dict[str, object]:
+    _validate_dynamic_client(registration)
+    if credentials is not None:
+        _validate_credentials(credentials)
+        if credentials.client_id != registration.client_id:
+            raise ValueError("OAuth client ID does not match registration")
+    return {
+        "version": 2,
+        "dynamic_client": _dynamic_client_mapping(registration),
+        "credentials": (
+            None if credentials is None else _credentials_mapping(credentials)
+        ),
+    }
+
+
 def _client_configuration_mapping(
     configuration: OAuthClientConfiguration,
 ) -> dict[str, object]:
@@ -1046,6 +1203,47 @@ def _client_configuration_from_mapping(
         client_id=payload.get("client_id"),  # type: ignore[arg-type]
         client_secret=payload.get("client_secret"),  # type: ignore[arg-type]
         configured_at=payload.get("configured_at"),  # type: ignore[arg-type]
+    )
+
+
+def _dynamic_client_from_mapping(payload: object) -> OAuthDynamicClient:
+    if not isinstance(payload, Mapping) or set(payload) != _DYNAMIC_CLIENT_FIELDS:
+        raise ValueError("OAuth dynamic client fields are invalid")
+    if payload.get("version") != 1:
+        raise ValueError("OAuth dynamic client version is invalid")
+    scopes_raw = payload.get("scopes")
+    if not isinstance(scopes_raw, list) or not all(
+        isinstance(item, str) for item in scopes_raw
+    ):
+        raise ValueError("OAuth dynamic client scopes are invalid")
+    return OAuthDynamicClient(
+        client_id=payload.get("client_id"),  # type: ignore[arg-type]
+        client_secret=payload.get("client_secret"),  # type: ignore[arg-type]
+        registration_access_token=payload.get("registration_access_token"),  # type: ignore[arg-type]
+        registered_at=payload.get("registered_at"),  # type: ignore[arg-type]
+        expires_at=payload.get("expires_at"),  # type: ignore[arg-type]
+        issuer=payload.get("issuer"),  # type: ignore[arg-type]
+        resource=payload.get("resource"),  # type: ignore[arg-type]
+        redirect_uri=payload.get("redirect_uri"),  # type: ignore[arg-type]
+        scopes=frozenset(scopes_raw),
+    )
+
+
+def _validate_dynamic_client(client: OAuthDynamicClient) -> None:
+    if not isinstance(client, OAuthDynamicClient):
+        raise TypeError("OAuth dynamic client is invalid")
+    # Re-run dataclass validation to protect against unsafe object construction
+    # and future mutable fields.
+    OAuthDynamicClient(
+        client_id=client.client_id,
+        client_secret=client.client_secret,
+        registration_access_token=client.registration_access_token,
+        registered_at=client.registered_at,
+        expires_at=client.expires_at,
+        issuer=client.issuer,
+        resource=client.resource,
+        redirect_uri=client.redirect_uri,
+        scopes=client.scopes,
     )
 
 
