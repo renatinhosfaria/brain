@@ -111,6 +111,10 @@ class BrainSettings:
     display_name_ttl_hours: int = 24
     history_budget_chars: int = 12_000
     message_max_chars: int = 2_000
+    ctwa_raw_max_bytes: int = 4 * 1024 * 1024
+    ctwa_raw_max_depth: int = 32
+    ctwa_raw_max_nodes: int = 10_000
+    context_response_max_bytes: int = 32 * 1024 * 1024
     busy_retries: int = 2
     busy_timeout_seconds: float = 1.0
 
@@ -125,6 +129,16 @@ class BrainSettings:
             raise ValueError("history budget is too small")
         if self.message_max_chars < 64:
             raise ValueError("message limit is too small")
+        for value in (
+            self.ctwa_raw_max_bytes,
+            self.ctwa_raw_max_depth,
+            self.ctwa_raw_max_nodes,
+            self.context_response_max_bytes,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("raw attribution limits must be positive")
+        if self.context_response_max_bytes < self.ctwa_raw_max_bytes:
+            raise ValueError("context response maximum must cover raw attribution")
         if self.busy_retries < 0 or self.busy_retries > 5:
             raise ValueError("busy_retries must be between 0 and 5")
         if self.busy_timeout_seconds <= 0:
@@ -296,6 +310,28 @@ class BrainSettings:
             message_max_chars=int(
                 os.environ.get(
                     "BRAIN_MESSAGE_MAX_CHARS", server.get("message_max_chars", 2_000)
+                )
+            ),
+            ctwa_raw_max_bytes=int(
+                os.environ.get(
+                    "BRAIN_CTWA_RAW_MAX_BYTES",
+                    server.get("ctwa_raw_max_bytes", 4 * 1024 * 1024),
+                )
+            ),
+            ctwa_raw_max_depth=int(
+                os.environ.get(
+                    "BRAIN_CTWA_RAW_MAX_DEPTH", server.get("ctwa_raw_max_depth", 32)
+                )
+            ),
+            ctwa_raw_max_nodes=int(
+                os.environ.get(
+                    "BRAIN_CTWA_RAW_MAX_NODES", server.get("ctwa_raw_max_nodes", 10_000)
+                )
+            ),
+            context_response_max_bytes=int(
+                os.environ.get(
+                    "BRAIN_CONTEXT_RESPONSE_MAX_BYTES",
+                    server.get("context_response_max_bytes", 32 * 1024 * 1024),
                 )
             ),
             busy_retries=int(
