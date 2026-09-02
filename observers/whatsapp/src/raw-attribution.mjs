@@ -14,6 +14,9 @@ export class RawAttributionError extends Error {
 
 const fail = (code) => { throw new RawAttributionError(code); };
 const isObject = (value) => value !== null && typeof value === 'object';
+const define = (object, key, value) => {
+  Object.defineProperty(object, key, { value, enumerable: true, writable: true, configurable: true });
+};
 
 function checkedLimits(limits) {
   if (limits === null || typeof limits !== 'object') fail('raw_type');
@@ -54,7 +57,10 @@ function encodeValue(value, depth, state) {
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'string') return checkString(value);
   if (typeof value === 'number') {
-    if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value)) || Object.is(value, -0)) fail('raw_type');
+    if (!Number.isFinite(value) || Object.is(value, -0)) fail('raw_type');
+    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+      return { $type: 'integer', encoding: 'decimal', data: value.toString(10) };
+    }
     return value;
   }
   if (typeof value === 'bigint') return { $type: 'integer', encoding: 'decimal', data: value.toString(10) };
@@ -76,13 +82,14 @@ function encodeValue(value, depth, state) {
         if (!entry) fail('raw_accessor');
         out.push(encodeValue(entry[1], depth + 1, state));
       }
-      if (entries.some(([key]) => !/^\d+$/.test(key) || Number(key) >= value.length)) fail('raw_type');
+      if (entries.length !== value.length ||
+          entries.some(([key], index) => key !== String(index))) fail('raw_type');
       return out;
     }
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) fail('raw_type');
     const out = {};
-    for (const [key, child] of ownEntries(value)) out[key] = encodeValue(child, depth + 1, state);
+    for (const [key, child] of ownEntries(value)) define(out, key, encodeValue(child, depth + 1, state));
     return out;
   } finally { state.seen.delete(value); }
 }
@@ -121,7 +128,9 @@ function validateValue(value, depth, state) {
       if (entries.length !== 3 || (tag[1] !== 'bytes' && tag[1] !== 'integer')) fail('raw_tag');
       const encoding = entries.find(([key]) => key === 'encoding')?.[1];
       const data = entries.find(([key]) => key === 'data')?.[1];
-      if (tag[1] === 'bytes' && encoding === 'base64' && typeof data === 'string' && /^[A-Za-z0-9+/]*={0,2}$/.test(data)) return;
+      if (tag[1] === 'bytes' && encoding === 'base64' && typeof data === 'string' &&
+          data.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(data) &&
+          Buffer.from(data, 'base64').toString('base64') === data) return;
       if (tag[1] === 'integer' && encoding === 'decimal' && typeof data === 'string' && /^-?(?:0|[1-9]\d*)$/.test(data)) return;
       fail('raw_tag');
     }
@@ -144,7 +153,7 @@ function canonicalValue(value) {
       : { $type: 'integer', encoding, data };
   }
   const out = {};
-  for (const [key, child] of entries) out[key] = canonicalValue(child);
+  for (const [key, child] of entries) define(out, key, canonicalValue(child));
   return out;
 }
 

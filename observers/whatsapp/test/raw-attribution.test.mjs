@@ -56,7 +56,31 @@ test('rejects unsafe values with stable codes', () => {
 
 test('rejects invalid encoded tags and oversized output', () => {
   rejectsCode(() => validateEncodedRawAttribution({ $type: 'bytes', encoding: 'hex', data: '00' }), 'raw_tag');
+  for (const data of ['A', 'AA=']) {
+    rejectsCode(() => validateEncodedRawAttribution({ $type: 'bytes', encoding: 'base64', data }), 'raw_tag');
+  }
   rejectsCode(() => encodeRawAttribution({ value: 'x'.repeat(4 * 1024 * 1024 + 1) }), 'raw_size');
+});
+
+test('preserves unsafe integer numbers as decimal tags', () => {
+  assert.deepEqual(encodeRawAttribution(9007199254740992).value, {
+    $type: 'integer', encoding: 'decimal', data: '9007199254740992',
+  });
+});
+
+test('preserves an own __proto__ field', () => {
+  const input = {};
+  Object.defineProperty(input, '__proto__', { value: { kept: true }, enumerable: true });
+  const encoded = encodeRawAttribution(input).value;
+  assert.equal(Object.prototype.hasOwnProperty.call(encoded, '__proto__'), true);
+  assert.deepEqual(encoded['__proto__'], { kept: true });
+});
+
+test('rejects malformed array index keys', () => {
+  const malformed = [null];
+  Object.defineProperty(malformed, '00', { value: null, enumerable: true });
+  rejectsCode(() => encodeRawAttribution(malformed), 'raw_type');
+  rejectsCode(() => validateEncodedRawAttribution(malformed), 'raw_tag');
 });
 
 test('error class is exported', () => {
