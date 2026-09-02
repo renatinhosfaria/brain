@@ -58,6 +58,103 @@ _SCHEMA = (
         updated_at REAL NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS meta_ads_catalog (
+        account_id TEXT NOT NULL,
+        ad_id TEXT NOT NULL,
+        ad_name TEXT NOT NULL,
+        ad_status TEXT,
+        ad_effective_status TEXT,
+        adset_id TEXT,
+        adset_name TEXT,
+        adset_status TEXT,
+        campaign_id TEXT NOT NULL,
+        campaign_name TEXT NOT NULL,
+        campaign_status TEXT,
+        creative_id TEXT,
+        creative_name TEXT,
+        metadata_complete INTEGER NOT NULL
+            CHECK (metadata_complete IN (0, 1)),
+        fetched_at REAL NOT NULL,
+        last_seen_at REAL NOT NULL,
+        PRIMARY KEY (account_id, ad_id),
+        CHECK ((adset_id IS NULL) = (adset_name IS NULL)),
+        CHECK ((creative_id IS NULL) = (creative_name IS NULL))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ctwa_meta_attributions (
+        event_id TEXT PRIMARY KEY
+            REFERENCES transport_events(event_id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        ctwa_clid TEXT,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed')),
+        matched_ad_id TEXT,
+        match_method TEXT,
+        metadata_complete INTEGER NOT NULL CHECK (metadata_complete IN (0, 1)),
+        confirmed_at REAL,
+        last_attempt_at REAL,
+        last_error_code TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        CHECK (
+            last_error_code IS NULL
+            OR last_error_code IN (
+                'meta_timeout', 'meta_rate_limited', 'meta_server_unavailable',
+                'meta_auth_unavailable', 'meta_required_tool_unavailable',
+                'meta_not_found', 'meta_incomplete_result', 'meta_account_mismatch',
+                'meta_invalid_response'
+            )
+        ),
+        CHECK (
+            status = 'pending'
+            OR (
+                matched_ad_id = source_id
+                AND match_method = 'source_id_exact'
+                AND confirmed_at IS NOT NULL
+            )
+        ),
+        CHECK (
+            status = 'pending'
+            OR matched_ad_id IS NOT NULL
+        )
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meta_attribution_jobs (
+        account_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        next_attempt_at REAL NOT NULL,
+        lease_until REAL,
+        last_error_code TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (account_id, source_id),
+        CHECK (
+            last_error_code IS NULL
+            OR last_error_code IN (
+                'meta_timeout', 'meta_rate_limited', 'meta_server_unavailable',
+                'meta_auth_unavailable', 'meta_required_tool_unavailable',
+                'meta_not_found', 'meta_incomplete_result', 'meta_account_mismatch',
+                'meta_invalid_response'
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meta_attribution_jobs_due
+    ON meta_attribution_jobs(next_attempt_at, lease_until)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ctwa_meta_attributions_lookup
+    ON ctwa_meta_attributions(account_id, source_id, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_meta_ads_catalog_gc
+    ON meta_ads_catalog(last_seen_at)
+    """,
 )
 
 
