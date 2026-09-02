@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -222,6 +223,37 @@ class TransportIngestTests(unittest.TestCase):
             "unknownNested": ["preserve", {"unexpected": True}],
         }
 
+    def enable_meta_attribution(self) -> None:
+        """Rebuild the real service with staging enabled, without any live lookup."""
+        self.settings = replace(
+            self.settings,
+            meta_attribution_enabled=True,
+            meta_ad_account_id="act_1598606388477916",
+            meta_ads_mcp_access_token="fixture-meta-token",
+        )
+        self.service = BrainService(self.settings)
+        self.api = TransportAPI(self.service)
+
+    def meta_ctwa_capture(
+        self,
+        *,
+        source_id: str = "120200000000001",
+        ctwa_clid: str = "clid-exact",
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        raw = {
+            **self.raw_ctwa(),
+            "sourceId": source_id,
+            "ctwaClid": ctwa_clid,
+        }
+        normalized = {
+            **self.normalized_ctwa_for_raw(),
+            "source_id_length": len(source_id),
+            "source_id_hmac": self.runtime_ids.opaque_hmac(source_id),
+            "ctwa_clid_length": len(ctwa_clid),
+            "ctwa_clid_hmac": self.runtime_ids.opaque_hmac(ctwa_clid),
+        }
+        return raw, normalized
+
     def normalized_ctwa_for_raw(self) -> dict[str, object]:
         url = "https://instagram.com/ad?utm=ctwa"
         return {
@@ -275,6 +307,144 @@ class TransportIngestTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         stored = self.rows("transport_events")[0]["external_ad_reply_raw_json"]
         self.assertEqual(json.loads(stored), raw)
+
+    def test_eligible_v2_ctwa_stages_one_pending_meta_job_with_exact_raw_source_id(
+        self,
+    ) -> None:
+        """Dropping decoded sourceId at ingest would make exact Meta resolution impossible."""
+        self.enable_meta_attribution()
+        raw, normalized = self.meta_ctwa_capture()
+
+        response = self.post(
+            self.envelope(
+                message_id="meta-eligible",
+                transport_kind="ctwa_candidate",
+                external=normalized,
+                observer_event_version=2,
+                raw=raw,
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        attribution = self.rows("ctwa_meta_attributions")
+        jobs = self.rows("meta_attribution_jobs")
+        self.assertEqual(len(attribution), 1)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(attribution[0]["source_id"], "120200000000001")
+        self.assertEqual(jobs[0]["source_id"], "120200000000001")
+        stored = self.rows("transport_events")[0]["external_ad_reply_raw_json"]
+        self.assertEqual(json.loads(stored), raw)
+
+    def test_ineligible_or_legacy_events_do_not_create_meta_attribution_work(
+        self,
+    ) -> None:
+        """Treating a non-exact source as an ad would fabricate attribution work."""
+        self.enable_meta_attribution()
+        post_raw, post_normalized = self.meta_ctwa_capture()
+        post_raw["sourceType"] = "post"
+        post_normalized["source_type"] = "post"
+
+        missing_raw, missing_normalized = self.meta_ctwa_capture()
+        missing_raw.pop("sourceId")
+        missing_normalized.update(
+            {
+                "source_id_present": False,
+                "source_id_length": None,
+                "source_id_hmac": None,
+            }
+        )
+
+        malformed_raw, malformed_normalized = self.meta_ctwa_capture(
+            source_id="not-a-decimal-ad-id"
+        )
+        cases = (
+            self.envelope(message_id="meta-ordinary"),
+            self.envelope(
+                message_id="meta-post",
+                transport_kind="ordinary_inbound",
+                external=post_normalized,
+                observer_event_version=2,
+                raw=post_raw,
+            ),
+            self.envelope(
+                message_id="meta-missing-source",
+                transport_kind="ctwa_candidate",
+                external=missing_normalized,
+                observer_event_version=2,
+                raw=missing_raw,
+            ),
+            self.envelope(
+                message_id="meta-malformed-source",
+                transport_kind="ctwa_candidate",
+                external=malformed_normalized,
+                observer_event_version=2,
+                raw=malformed_raw,
+            ),
+            self.envelope(
+                message_id="meta-legacy",
+                transport_kind="ctwa_candidate",
+                external=self.ctwa(),
+            ),
+        )
+
+        for payload in cases:
+            with self.subTest(event_id=payload["event_id"]):
+                self.assertEqual(self.post(payload).status_code, 200)
+        self.assertEqual(self.rows("ctwa_meta_attributions"), [])
+        self.assertEqual(self.rows("meta_attribution_jobs"), [])
+
+    def test_eligible_replay_stages_one_meta_attribution_and_conflict_stays_rejected(
+        self,
+    ) -> None:
+        """Staging before duplicate validation would turn a conflict into side effects."""
+        self.enable_meta_attribution()
+        raw, normalized = self.meta_ctwa_capture()
+        payload = self.envelope(
+            message_id="meta-replay",
+            transport_kind="ctwa_candidate",
+            external=normalized,
+            observer_event_version=2,
+            raw=raw,
+        )
+
+        first = self.post(payload)
+        replay = self.post(payload)
+        changed_raw = {**raw, "unknownNested": ["changed"]}
+        conflict = self.post({**payload, "external_ad_reply_raw": changed_raw})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.json()["duplicate"])
+        self.assertEqual(conflict.status_code, 400)
+        self.assertEqual(len(self.rows("transport_events")), 1)
+        self.assertEqual(len(self.rows("ctwa_meta_attributions")), 1)
+        self.assertEqual(len(self.rows("meta_attribution_jobs")), 1)
+
+    def test_meta_staging_error_rolls_back_transport_event_before_ack(self) -> None:
+        """Committing the event before staging would make pending work irrecoverable."""
+        self.enable_meta_attribution()
+        raw, normalized = self.meta_ctwa_capture()
+        meta_attribution = self.service.meta_attribution
+        assert meta_attribution is not None
+        payload = self.envelope(
+            message_id="meta-stage-failure",
+            transport_kind="ctwa_candidate",
+            external=normalized,
+            observer_event_version=2,
+            raw=raw,
+        )
+
+        with patch.object(
+            meta_attribution,
+            "stage_event",
+            side_effect=sqlite3.OperationalError("staging failed"),
+        ):
+            response = self.post(payload)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.rows("transport_events"), [])
+        self.assertEqual(self.rows("ctwa_meta_attributions"), [])
+        self.assertEqual(self.rows("meta_attribution_jobs"), [])
 
     def test_v2_rejects_integer_valued_unsafe_raw_floats(self) -> None:
         for index, value in enumerate((9007199254740992.0, 1e20)):
@@ -394,7 +564,8 @@ class TransportIngestTests(unittest.TestCase):
         stored = self.rows("transport_events")
         self.assertEqual(len(stored), 1)
         self.assertEqual(
-            json.loads(stored[0]["external_ad_reply_raw_json"]), original["external_ad_reply_raw"]
+            json.loads(stored[0]["external_ad_reply_raw_json"]),
+            original["external_ad_reply_raw"],
         )
 
     def test_v2_raw_must_match_normalized_external_metadata(self) -> None:
@@ -445,7 +616,9 @@ class TransportIngestTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(self.rows("transport_events")[0]["external_ad_reply_raw_json"])
+        self.assertIsNone(
+            self.rows("transport_events")[0]["external_ad_reply_raw_json"]
+        )
 
     def test_show_ad_attribution_is_not_required_for_ctwa(self) -> None:
         response = self.post(
@@ -537,9 +710,7 @@ class TransportIngestTests(unittest.TestCase):
                 self.assertEqual(self.post(payload).status_code, 400)
 
     def test_oversized_declared_length_is_rejected_before_reading(self) -> None:
-        response = self.post(
-            self.envelope(), declared_length=5 * 1024 * 1024 + 1
-        )
+        response = self.post(self.envelope(), declared_length=5 * 1024 * 1024 + 1)
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.rows("transport_events"), [])
 
@@ -576,7 +747,9 @@ class TransportIngestTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.rows("transport_events"), [])
 
-    def test_json_integer_past_python_limit_is_rejected_at_the_http_boundary(self) -> None:
+    def test_json_integer_past_python_limit_is_rejected_at_the_http_boundary(
+        self,
+    ) -> None:
         body = b'{"value":' + b"1" * 5_000 + b"}"
 
         response = self.post(body)
@@ -748,9 +921,7 @@ class RetentionTests(TransportIngestTests):
     def test_expired_display_name_is_deleted_not_merely_hidden(self) -> None:
         self.post(self.envelope(display_name="Maria Silva"))
         self.service.runtime.write(
-            lambda conn: conn.execute(
-                "UPDATE contact_ephemera SET expires_at = 1.0"
-            )
+            lambda conn: conn.execute("UPDATE contact_ephemera SET expires_at = 1.0")
         )
         self.service.transport_service._retention_ran_at = 0.0
 
@@ -820,6 +991,66 @@ class RetentionTests(TransportIngestTests):
         rows = self.rows("transport_events")
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["external_ad_reply_raw_json"])
+
+    def test_transport_retention_cascades_meta_event_and_prunes_orphaned_work(
+        self,
+    ) -> None:
+        """An orphaned retry job would keep resolving a lead Brain has deleted."""
+        self.enable_meta_attribution()
+        raw, normalized = self.meta_ctwa_capture()
+        response = self.post(
+            self.envelope(
+                message_id="old-meta-event",
+                transport_kind="ctwa_candidate",
+                external=normalized,
+                observer_event_version=2,
+                raw=raw,
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        event_id = response.json()["event_id"]
+        now = time.time()
+        old_event_at = now - (self.settings.transport_retention_days + 1) * 86_400
+        self.service.runtime.write(
+            lambda conn: (
+                conn.execute(
+                    "UPDATE transport_events SET created_at = ? WHERE event_id = ?",
+                    (old_event_at, event_id),
+                ),
+                conn.execute(
+                    "INSERT INTO meta_ads_catalog "
+                    "(account_id, ad_id, ad_name, campaign_id, campaign_name, "
+                    "metadata_complete, fetched_at, last_seen_at) "
+                    "VALUES (?, ?, 'Old ad', ?, 'Old campaign', 0, ?, ?)",
+                    (
+                        "1598606388477916",
+                        "120200000000001",
+                        "120400000000001",
+                        now - 89 * 86_400,
+                        now - 89 * 86_400,
+                    ),
+                ),
+            )
+        )
+        self.service.transport_service._retention_ran_at = 0.0
+
+        self.service.transport_service.apply_retention(now)
+
+        self.assertEqual(self.rows("transport_events"), [])
+        self.assertEqual(self.rows("ctwa_meta_attributions"), [])
+        self.assertEqual(self.rows("meta_attribution_jobs"), [])
+        self.assertEqual(len(self.rows("meta_ads_catalog")), 1)
+
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "UPDATE meta_ads_catalog SET last_seen_at = ?",
+                (now - 91 * 86_400,),
+            )
+        )
+        meta_attribution = self.service.meta_attribution
+        assert meta_attribution is not None
+        self.assertEqual(meta_attribution.apply_retention(now), 1)
+        self.assertEqual(self.rows("meta_ads_catalog"), [])
 
     def test_retention_is_throttled_between_passes(self) -> None:
         self.post(self.envelope(message_id="one", body="um"))

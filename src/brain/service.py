@@ -24,6 +24,9 @@ from .authorization import (
 from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
+from .meta_ads_mcp import MetaAdsMcpClient
+from .meta_ads_store import MetaAdsStore
+from .meta_attribution import MetaAttributionService
 from .projection import ProjectedMessage, project_rows
 from .raw_attribution import (
     RawAttributionLimits,
@@ -107,10 +110,21 @@ class BrainService:
         if settings.transport_hmac_secret:
             self.runtime_ids = RuntimeIds(settings.transport_hmac_secret)
             self.runtime.initialize()
+        self.meta_attribution: MetaAttributionService | None = None
+        if settings.meta_attribution_enabled:
+            store = MetaAdsStore(settings.meta_ad_account_id)
+            client = MetaAdsMcpClient(settings)
+            self.meta_attribution = MetaAttributionService(
+                settings,
+                self.runtime,
+                store,
+                client,
+            )
         self.transport_service = TransportService(
             settings,
             self.runtime,
             self.runtime_ids,
+            self.meta_attribution,
         )
         self.schema = SchemaGuard(self.state, self.kanban)
         self.authorizer = Authorizer(settings, self.state, self.kanban)
