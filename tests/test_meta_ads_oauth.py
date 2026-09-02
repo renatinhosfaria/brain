@@ -35,6 +35,7 @@ from brain.meta_ads_oauth import (
     _client_configuration_from_mapping,
     _fetch_json,
     _post_form,
+    _post_json,
 )
 
 AUTH_METADATA = {
@@ -200,6 +201,166 @@ class MetaAdsOAuthTests(unittest.TestCase):
         self.assertEqual(query["resource"], [META_ADS_MCP_RESOURCE])
         self.assertNotIn("ads_management", query["scope"][0])
         self.assertNotIn("very-secret-app-secret", repr(request))
+
+    def test_register_dynamic_client_posts_minimal_payload(self) -> None:
+        captured: list[tuple[str, dict[str, object]]] = []
+
+        def register(url: str, payload: dict[str, object]) -> object:
+            captured.append((url, payload))
+            return {
+                "client_id": "dynamic-client-id",
+                "redirect_uris": [DEFAULT_REDIRECT_URI],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+                "scope": "ads_read",
+                "client_id_issued_at": 1_700_000_000,
+            }
+
+        oauth = MetaAdsOAuth(
+            client_id=None,
+            store_path=self.store,
+            key_path=self.key,
+            metadata_fetcher=self._metadata,
+            registration_requester=register,
+            now=lambda: 1_700_000_000.0,
+        )
+        client = oauth.register_dynamic_client()
+
+        self.assertEqual(client.client_id, "dynamic-client-id")
+        self.assertEqual(client.scopes, frozenset({"ads_read"}))
+        self.assertEqual(
+            captured,
+            [
+                (
+                    "https://mcp.facebook.com/oauth/register",
+                    {
+                        "redirect_uris": [DEFAULT_REDIRECT_URI],
+                        "grant_types": ["authorization_code", "refresh_token"],
+                        "response_types": ["code"],
+                        "token_endpoint_auth_method": "none",
+                        "client_name": "Brain Meta Ads MCP",
+                        "scope": "ads_read",
+                    },
+                )
+            ],
+        )
+
+    def test_register_dynamic_client_rejects_overgrant(self) -> None:
+        for response in (
+            {"client_id": "dynamic", "scope": "ads_read ads_management"},
+            {"client_id": "dynamic", "redirect_uris": ["http://evil/callback"]},
+            {
+                "client_id": "dynamic",
+                "token_endpoint_auth_method": "client_secret_post",
+            },
+            {"client_id": "dynamic", "grant_types": ["authorization_code"]},
+            {"client_id": "dynamic", "response_types": ["token"]},
+        ):
+            with self.subTest(response=response):
+                oauth = MetaAdsOAuth(
+                    client_id=None,
+                    store_path=self.store,
+                    key_path=self.key,
+                    metadata_fetcher=self._metadata,
+                    registration_requester=lambda _url, _payload, response=response: (
+                        response
+                    ),
+                )
+                with self.assertRaisesRegex(OAuthError, "^oauth_registration_invalid$"):
+                    oauth.register_dynamic_client()
+
+    def test_authorization_url_registers_and_reuses_dynamic_client(self) -> None:
+        registrations = 0
+
+        def register(_url: str, _payload: dict[str, object]) -> object:
+            nonlocal registrations
+            registrations += 1
+            return {"client_id": "dynamic-client-id", "scope": "ads_read"}
+
+        oauth = MetaAdsOAuth(
+            client_id=None,
+            store_path=self.store,
+            key_path=self.key,
+            metadata_fetcher=self._metadata,
+            registration_requester=register,
+        )
+        first = oauth.authorization_url()
+        second = oauth.authorization_url()
+        self.assertEqual(registrations, 1)
+        self.assertEqual(
+            parse_qs(urlparse(first.url).query)["client_id"], ["dynamic-client-id"]
+        )
+        self.assertEqual(
+            parse_qs(urlparse(second.url).query)["client_id"], ["dynamic-client-id"]
+        )
+
+    def test_post_json_never_follows_redirects_and_rejects_oversized_response(
+        self,
+    ) -> None:
+        target_requests: list[bytes] = []
+
+        class _Target(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                target_requests.append(
+                    self.rfile.read(int(self.headers["Content-Length"]))
+                )
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        class _Redirect(BaseHTTPRequestHandler):
+            target_port = 0
+
+            def do_POST(self) -> None:
+                self.send_response(307)
+                self.send_header(
+                    "Location", f"http://127.0.0.1:{self.target_port}/target"
+                )
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        class _Oversized(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Length", str(64 * 1024 + 1))
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        with (
+            HTTPServer(("127.0.0.1", 0), _Target) as target,
+            HTTPServer(("127.0.0.1", 0), _Redirect) as redirect,
+            HTTPServer(("127.0.0.1", 0), _Oversized) as oversized,
+        ):
+            _Redirect.target_port = target.server_port
+            threads = [
+                threading.Thread(target=server.serve_forever, daemon=True)
+                for server in (target, redirect, oversized)
+            ]
+            for thread in threads:
+                thread.start()
+            try:
+                with self.assertRaises(HTTPError):
+                    _post_json(
+                        f"http://127.0.0.1:{redirect.server_port}/register",
+                        {"client_name": "test"},
+                    )
+                self.assertEqual(target_requests, [])
+                with self.assertRaises(ValueError):
+                    _post_json(
+                        f"http://127.0.0.1:{oversized.server_port}/register",
+                        {"client_name": "test"},
+                    )
+            finally:
+                for server in (target, redirect, oversized):
+                    server.shutdown()
 
     def test_callback_is_one_shot_and_validates_state_and_code(self) -> None:
         request = self.oauth.authorization_url()

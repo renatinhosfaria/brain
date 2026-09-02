@@ -44,6 +44,8 @@ _AAD = b"brain-meta-ads-oauth-v1"
 _MAX_ENVELOPE_BYTES = 64 * 1024
 _MAX_KEY_BYTES = 64
 _MAX_HTTP_JSON_BYTES = 64 * 1024
+_DYNAMIC_CLIENT_NAME = "Brain Meta Ads MCP"
+_MAX_DYNAMIC_CLIENT_NAME_BYTES = 128
 _ENVELOPE_FIELDS = frozenset({"version", "nonce", "ciphertext"})
 _CREDENTIAL_FIELDS = frozenset(
     {
@@ -67,6 +69,7 @@ _CLIENT_CONFIGURATION_FIELDS = frozenset(
 
 MetadataFetcher = Callable[[str], object]
 TokenRequester = Callable[[str, dict[str, str]], object]
+RegistrationRequester = Callable[[str, dict[str, object]], object]
 CredentialState = Literal["missing", "ready", "expiring", "expired", "degraded"]
 
 
@@ -95,6 +98,8 @@ class OAuthError(Exception):
         {
             "oauth_metadata_invalid",
             "oauth_metadata_unavailable",
+            "oauth_registration_invalid",
+            "oauth_registration_unavailable",
             "oauth_callback_invalid",
             "oauth_token_invalid",
             "oauth_invalid_grant",
@@ -426,17 +431,25 @@ class MetaAdsOAuth:
     def __init__(
         self,
         *,
-        client_id: str,
+        client_id: str | None,
         client_secret: str | None = None,
         store_path: Path = DEFAULT_STORE_PATH,
         key_path: Path = DEFAULT_KEY_PATH,
         redirect_uri: str = DEFAULT_REDIRECT_URI,
         metadata_fetcher: MetadataFetcher | None = None,
         token_requester: TokenRequester | None = None,
+        registration_requester: RegistrationRequester | None = None,
+        dynamic_client: OAuthDynamicClient | None = None,
         now: Callable[[], float] = time.time,
     ) -> None:
-        if not _safe_secret_text(client_id) or (
-            client_secret is not None and not _safe_secret_text(client_secret)
+        if (
+            (client_id is None and client_secret is not None)
+            or (client_id is not None and not _safe_secret_text(client_id))
+            or (client_secret is not None and not _safe_secret_text(client_secret))
+        ):
+            raise ValueError("OAuth client credentials are invalid")
+        if dynamic_client is not None and (
+            client_id is not None and client_id != dynamic_client.client_id
         ):
             raise ValueError("OAuth client credentials are invalid")
         if redirect_uri != DEFAULT_REDIRECT_URI:
@@ -448,6 +461,12 @@ class MetaAdsOAuth:
         self._redirect_uri = redirect_uri
         self._metadata_fetcher = metadata_fetcher or _fetch_json
         self._token_requester = token_requester or _post_form
+        self._registration_requester = registration_requester or (
+            lambda url, payload: _post_json(
+                url, payload, allowed_hosts={"mcp.facebook.com"}
+            )
+        )
+        self._dynamic_client = dynamic_client
         self._now = now
         self._metadata: OAuthMetadata | None = None
 
@@ -460,6 +479,7 @@ class MetaAdsOAuth:
         redirect_uri: str = DEFAULT_REDIRECT_URI,
         metadata_fetcher: MetadataFetcher | None = None,
         token_requester: TokenRequester | None = None,
+        registration_requester: RegistrationRequester | None = None,
         now: Callable[[], float] = time.time,
     ) -> MetaAdsOAuth:
         """Open a configured app without sending a request to Meta."""
@@ -487,6 +507,7 @@ class MetaAdsOAuth:
                 redirect_uri=redirect_uri,
                 metadata_fetcher=metadata_fetcher,
                 token_requester=token_requester,
+                registration_requester=registration_requester,
                 now=now,
             )
         except OAuthError:
@@ -521,6 +542,9 @@ class MetaAdsOAuth:
 
     def authorization_url(self) -> OAuthAuthorizationRequest:
         metadata = self._metadata or self.discover()
+        client_id = self._client_id
+        if client_id is None:
+            client_id = self.ensure_dynamic_client().client_id
         # A published optional scope is not evidence that it is required.
         # Keep the consent request to the minimum read-only permission; an
         # operator can make any future elevation explicit and auditable.
@@ -531,7 +555,7 @@ class MetaAdsOAuth:
         query = urlencode(
             {
                 "response_type": "code",
-                "client_id": self._client_id,
+                "client_id": client_id,
                 "redirect_uri": self._redirect_uri,
                 "state": state,
                 "code_challenge": challenge,
@@ -546,6 +570,56 @@ class MetaAdsOAuth:
             code_verifier=verifier,
             requested_scopes=frozenset(scopes),
         )
+
+    def ensure_dynamic_client(self) -> OAuthDynamicClient:
+        """Return a valid registration, creating one when necessary."""
+        metadata = self._metadata or self.discover()
+        client = self._dynamic_client
+        if client is not None and (
+            client.issuer != metadata.issuer
+            or client.resource != metadata.resource
+            or client.redirect_uri != self._redirect_uri
+            or client.scopes != frozenset({"ads_read"})
+            or (client.expires_at is not None and client.expires_at <= self._now())
+        ):
+            client = None
+        if client is None:
+            client = self.register_dynamic_client()
+            self._dynamic_client = client
+        self._client_id = client.client_id
+        return client
+
+    def register_dynamic_client(self) -> OAuthDynamicClient:
+        """Register the fixed public Brain client with the discovered server."""
+        metadata = self._metadata or self.discover()
+        payload: dict[str, object] = {
+            "redirect_uris": [self._redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "client_name": _DYNAMIC_CLIENT_NAME,
+            "scope": "ads_read",
+        }
+        try:
+            response = self._registration_requester(
+                metadata.registration_endpoint, payload
+            )
+            if not isinstance(response, Mapping):
+                raise TypeError
+            client = _dynamic_client_from_registration(
+                response,
+                metadata,
+                redirect_uri=self._redirect_uri,
+                now=self._now(),
+            )
+        except OAuthError:
+            raise
+        except (TypeError, ValueError):
+            raise OAuthError("oauth_registration_invalid") from None
+        except Exception:  # noqa: BLE001 - adapters may raise arbitrary transport errors
+            raise OAuthError("oauth_registration_unavailable") from None
+        self._dynamic_client = client
+        return client
 
     def exchange_code(
         self, code: str, request: OAuthAuthorizationRequest
@@ -1034,6 +1108,41 @@ def _post_form(url: str, form: dict[str, str]) -> object:
         return _read_http_json(response)
 
 
+def _post_json(
+    url: str,
+    payload: Mapping[str, object],
+    *,
+    allowed_hosts: set[str] | None = None,
+) -> object:
+    """POST a bounded JSON object without following redirects.
+
+    Endpoint allowlisting is supplied by the caller because the generic helper
+    is also useful with local HTTP fixtures. Production DCR calls always pass
+    the metadata-derived Meta allowlist before reaching this helper.
+    """
+    if allowed_hosts is not None and not _allowed_https_url(url, allowed_hosts):
+        raise ValueError("OAuth endpoint is not allowlisted")
+    try:
+        body = json.dumps(
+            payload, separators=(",", ":"), sort_keys=True, ensure_ascii=True
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise ValueError("OAuth request is invalid") from None
+    if len(body) > _MAX_HTTP_JSON_BYTES:
+        raise ValueError("OAuth request is too large")
+    request = Request(
+        url,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with _NO_REDIRECT_OPENER.open(request, timeout=10) as response:
+        return _read_http_json(response)
+
+
 def _strict_json_object(value: bytes) -> dict[str, object]:
     parsed = json.loads(value.decode("utf-8"))
     if not isinstance(parsed, dict):
@@ -1109,6 +1218,77 @@ def _optional_secret(value: object) -> str | None:
     if value is None:
         return None
     return value if _safe_secret_text(value) else None
+
+
+def _dynamic_client_from_registration(
+    payload: Mapping[str, object],
+    metadata: OAuthMetadata,
+    *,
+    redirect_uri: str,
+    now: float,
+) -> OAuthDynamicClient:
+    """Validate an RFC 7591 response while retaining only secret fields."""
+    if not _finite_number(now) or now <= 0:
+        raise ValueError
+    client_id = _required_secret(payload, "client_id")
+    client_secret = _registration_optional_secret(payload, "client_secret")
+    registration_access_token = _registration_optional_secret(
+        payload, "registration_access_token"
+    )
+
+    redirect_uris = payload.get("redirect_uris")
+    if redirect_uris is not None and redirect_uris != [redirect_uri]:
+        raise ValueError
+    grant_types = payload.get("grant_types")
+    if grant_types is not None and grant_types != [
+        "authorization_code",
+        "refresh_token",
+    ]:
+        raise ValueError
+    response_types = payload.get("response_types")
+    if response_types is not None and response_types != ["code"]:
+        raise ValueError
+    if payload.get("token_endpoint_auth_method", "none") != "none":
+        raise ValueError
+    if payload.get("scope") is not None and _response_scopes(
+        payload.get("scope"), frozenset({"ads_read"})
+    ) != frozenset({"ads_read"}):
+        raise ValueError
+
+    issued_at = payload.get("client_id_issued_at", now)
+    if not _finite_number(issued_at) or float(issued_at) <= 0:
+        raise ValueError
+    expiry_value = payload.get("client_secret_expires_at")
+    if expiry_value is None:
+        expiry_value = payload.get("client_expires_at")
+    if expiry_value is None or expiry_value == 0:
+        expires_at = None
+    elif not _finite_number(expiry_value) or float(expiry_value) <= 0:
+        raise ValueError
+    else:
+        expires_at = float(expiry_value)
+    return OAuthDynamicClient(
+        client_id=client_id,
+        client_secret=client_secret,
+        registration_access_token=registration_access_token,
+        registered_at=float(issued_at),
+        expires_at=expires_at,
+        issuer=metadata.issuer,
+        resource=metadata.resource,
+        redirect_uri=redirect_uri,
+        scopes=frozenset({"ads_read"}),
+    )
+
+
+def _registration_optional_secret(
+    payload: Mapping[str, object], field_name: str
+) -> str | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not _safe_secret_text(value):
+        raise ValueError
+    return value
 
 
 def _positive_seconds(value: object) -> float:
