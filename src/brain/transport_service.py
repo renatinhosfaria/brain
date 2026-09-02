@@ -13,6 +13,13 @@ from typing import Any
 
 from .config import BrainSettings
 from .errors import DatabaseUnavailable
+from .raw_attribution import (
+    RawAttributionError,
+    RawAttributionLimits,
+    assert_raw_matches_normalized,
+    canonicalize_raw_attribution,
+    decode_canonical_raw_attribution,
+)
 from .runtime_db import RuntimeDatabase
 
 # One pass an hour is far finer than either limit it enforces (24 hours and
@@ -32,6 +39,7 @@ _HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 
 _TOP_LEVEL_FIELDS = frozenset(
     {
+        "observer_event_version",
         "event_id",
         "observer_device_id",
         "received_at",
@@ -44,6 +52,7 @@ _TOP_LEVEL_FIELDS = frozenset(
         "native_type",
         "transport_kind",
         "external_ad_reply",
+        "external_ad_reply_raw",
     }
 )
 _REQUIRED_FIELDS = frozenset(
@@ -100,9 +109,14 @@ class TransportEnvelope:
     native_type: str
     transport_kind: str
     external_ad_reply: dict[str, Any] | None
+    external_ad_reply_raw_json: str | None
 
     @classmethod
-    def parse(cls, payload: object) -> TransportEnvelope:
+    def parse(
+        cls,
+        payload: object,
+        raw_limits: RawAttributionLimits | None = None,
+    ) -> TransportEnvelope:
         if not isinstance(payload, dict):
             raise TransportRequestError("payload must be an object")
         keys = set(payload)
@@ -144,9 +158,29 @@ class TransportEnvelope:
         }:
             raise TransportRequestError("transport_kind is invalid")
         display_name = _sanitize_display_name(payload.get("display_name"))
+        version = payload.get("observer_event_version")
+        is_v2 = type(version) is int and version == 2
+        has_version = "observer_event_version" in payload
+        has_external = "external_ad_reply" in payload
+        has_raw = "external_ad_reply_raw" in payload
+        if (
+            (has_version and not is_v2)
+            or (not is_v2 and has_raw)
+            or (is_v2 and has_external != has_raw)
+        ):
+            raise TransportRequestError("observer event version is invalid")
         if "external_ad_reply" in payload and payload["external_ad_reply"] is None:
             raise TransportRequestError("external_ad_reply is invalid")
         external = _parse_external(payload.get("external_ad_reply"))
+        raw_json = None
+        if has_raw:
+            try:
+                raw_json = canonicalize_raw_attribution(
+                    payload["external_ad_reply_raw"],
+                    raw_limits or RawAttributionLimits(),
+                )
+            except RawAttributionError:
+                raise TransportRequestError("external_ad_reply_raw is invalid") from None
         expected_kind = _expected_transport_kind(external)
         if transport_kind != expected_kind:
             raise TransportRequestError("transport_kind disagrees with metadata")
@@ -164,6 +198,7 @@ class TransportEnvelope:
             native_type=native_type,
             transport_kind=transport_kind,
             external_ad_reply=external,
+            external_ad_reply_raw_json=raw_json,
         )
 
 
@@ -338,9 +373,24 @@ class TransportService:
         self._retention_ran_at = 0.0
 
     def ingest(self, payload: object) -> dict[str, object]:
-        envelope = TransportEnvelope.parse(payload)
+        raw_limits = RawAttributionLimits(
+            max_bytes=self.settings.ctwa_raw_max_bytes,
+            max_depth=self.settings.ctwa_raw_max_depth,
+            max_nodes=self.settings.ctwa_raw_max_nodes,
+        )
+        envelope = TransportEnvelope.parse(payload, raw_limits)
         if self.transport_ids is None:
             raise TransportIdentityUnavailable("transport IDs are unavailable")
+        if envelope.external_ad_reply_raw_json is not None:
+            try:
+                raw = decode_canonical_raw_attribution(
+                    envelope.external_ad_reply_raw_json, raw_limits
+                )
+                assert_raw_matches_normalized(
+                    raw, envelope.external_ad_reply, self.transport_ids
+                )
+            except RawAttributionError:
+                raise TransportRequestError("raw attribution disagrees with metadata") from None
         identity = verify_transport_identity(
             remote_jid_hmac=envelope.remote_jid_hmac,
             contact_key=envelope.contact_key or None,
@@ -422,7 +472,8 @@ class TransportService:
             "source_type, source_app, source_id_present, source_id_length, source_id_hmac, "
             "source_url_hostname, source_url_length, source_url_hmac, ctwa_clid_present, "
             "ctwa_clid_length, ctwa_clid_hmac, show_ad_attribution, "
-            "click_to_whatsapp_call, contains_auto_reply FROM transport_events "
+            "click_to_whatsapp_call, contains_auto_reply, external_ad_reply_raw_json "
+            "FROM transport_events "
             "WHERE event_id = ?",
             (envelope.event_id,),
         ).fetchone()
@@ -439,8 +490,9 @@ class TransportService:
             "native_type, transport_kind, source_type, source_app, source_id_present, "
             "source_id_length, source_id_hmac, source_url_hostname, source_url_length, "
             "source_url_hmac, ctwa_clid_present, ctwa_clid_length, ctwa_clid_hmac, "
-            "show_ad_attribution, click_to_whatsapp_call, contains_auto_reply, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "show_ad_attribution, click_to_whatsapp_call, contains_auto_reply, "
+            "external_ad_reply_raw_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             values,
         )
         self._persist_ephemera(conn, envelope, ingestion_now)
@@ -494,6 +546,7 @@ class TransportService:
             TransportService._database_bool(external.get("show_ad_attribution")),
             TransportService._database_bool(external.get("click_to_whatsapp_call")),
             TransportService._database_bool(external.get("contains_auto_reply")),
+            envelope.external_ad_reply_raw_json,
         )
         return (
             envelope.event_id,

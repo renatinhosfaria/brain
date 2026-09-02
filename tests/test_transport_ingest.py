@@ -81,6 +81,8 @@ class TransportIngestTests(unittest.TestCase):
         contact_key: str | None = "provided",
         transport_kind: str = "ordinary_inbound",
         external: dict[str, object] | None = None,
+        observer_event_version: int | None = None,
+        raw: object | None = None,
         display_name: str | None = None,
     ) -> dict[str, object]:
         event = event_id or self.runtime_ids.event_id("observer-a", message_id)
@@ -103,6 +105,10 @@ class TransportIngestTests(unittest.TestCase):
             payload["display_name"] = display_name
         if external is not None:
             payload["external_ad_reply"] = external
+        if observer_event_version is not None:
+            payload["observer_event_version"] = observer_event_version
+        if raw is not None:
+            payload["external_ad_reply_raw"] = raw
         return payload
 
     @staticmethod
@@ -198,6 +204,43 @@ class TransportIngestTests(unittest.TestCase):
             "contains_auto_reply": auto_reply,
         }
 
+    def raw_ctwa(self) -> dict[str, object]:
+        return {
+            "sourceType": "ad",
+            "sourceApp": "instagram",
+            "sourceId": "source-id",
+            "sourceUrl": "https://instagram.com/ad?utm=ctwa",
+            "ctwaClid": "ctwa-clid",
+            "showAdAttribution": False,
+            "clickToWhatsappCall": True,
+            "containsAutoReply": False,
+            "thumbnail": {
+                "$type": "bytes",
+                "encoding": "base64",
+                "data": "cmF3LXRodW1ibmFpbA==",
+            },
+            "unknownNested": ["preserve", {"unexpected": True}],
+        }
+
+    def normalized_ctwa_for_raw(self) -> dict[str, object]:
+        url = "https://instagram.com/ad?utm=ctwa"
+        return {
+            "source_type": "ad",
+            "source_app": "instagram",
+            "source_id_present": True,
+            "source_id_length": 9,
+            "source_id_hmac": self.runtime_ids.opaque_hmac("source-id"),
+            "source_url_hostname": "instagram.com",
+            "source_url_length": 33,
+            "source_url_hmac": self.runtime_ids.opaque_hmac(url),
+            "ctwa_clid_present": True,
+            "ctwa_clid_length": 9,
+            "ctwa_clid_hmac": self.runtime_ids.opaque_hmac("ctwa-clid"),
+            "show_ad_attribution": False,
+            "click_to_whatsapp_call": True,
+            "contains_auto_reply": False,
+        }
+
     def test_safe_ordinary_event_persists_once(self) -> None:
         response = self.post(self.envelope())
         self.assertEqual(response.status_code, 200)
@@ -216,6 +259,110 @@ class TransportIngestTests(unittest.TestCase):
         self.assertEqual(
             self.rows("transport_events")[0]["transport_kind"], "ctwa_candidate"
         )
+
+    def test_v2_ctwa_persists_the_exact_canonical_raw_capture(self) -> None:
+        raw = self.raw_ctwa()
+        response = self.post(
+            self.envelope(
+                message_id="v2-raw",
+                transport_kind="ctwa_candidate",
+                external=self.normalized_ctwa_for_raw(),
+                observer_event_version=2,
+                raw=raw,
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        stored = self.rows("transport_events")[0]["external_ad_reply_raw_json"]
+        self.assertEqual(json.loads(stored), raw)
+
+    def test_v2_raw_replay_is_idempotent(self) -> None:
+        payload = self.envelope(
+            message_id="v2-replay",
+            transport_kind="ctwa_candidate",
+            external=self.normalized_ctwa_for_raw(),
+            observer_event_version=2,
+            raw=self.raw_ctwa(),
+        )
+
+        first = self.post(payload)
+        second = self.post(payload)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertFalse(first.json()["duplicate"])
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.json()["duplicate"])
+        self.assertEqual(len(self.rows("transport_events")), 1)
+
+    def test_changed_v2_raw_conflicts_and_preserves_the_original(self) -> None:
+        original = self.envelope(
+            message_id="v2-conflict",
+            transport_kind="ctwa_candidate",
+            external=self.normalized_ctwa_for_raw(),
+            observer_event_version=2,
+            raw=self.raw_ctwa(),
+        )
+        self.assertEqual(self.post(original).status_code, 200)
+        changed_raw = self.raw_ctwa()
+        changed_raw["unknownNested"] = ["changed"]
+        conflict = {**original, "external_ad_reply_raw": changed_raw}
+
+        self.assertEqual(self.post(conflict).status_code, 400)
+        stored = self.rows("transport_events")
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(
+            json.loads(stored[0]["external_ad_reply_raw_json"]), original["external_ad_reply_raw"]
+        )
+
+    def test_v2_raw_must_match_normalized_external_metadata(self) -> None:
+        mismatched = self.normalized_ctwa_for_raw()
+        mismatched["source_id_length"] = 8
+
+        response = self.post(
+            self.envelope(
+                message_id="v2-mismatch",
+                transport_kind="ctwa_candidate",
+                external=mismatched,
+                observer_event_version=2,
+                raw=self.raw_ctwa(),
+            )
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rows("transport_events"), [])
+
+    def test_v2_ctwa_requires_its_raw_capture(self) -> None:
+        response = self.post(
+            self.envelope(
+                message_id="v2-missing-raw",
+                transport_kind="ctwa_candidate",
+                external=self.normalized_ctwa_for_raw(),
+                observer_event_version=2,
+            )
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rows("transport_events"), [])
+
+    def test_only_integer_version_2_marks_a_v2_envelope(self) -> None:
+        response = self.post(
+            self.envelope(observer_event_version=2.0)  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rows("transport_events"), [])
+
+    def test_legacy_v1_ctwa_remains_accepted_without_raw_capture(self) -> None:
+        response = self.post(
+            self.envelope(
+                message_id="legacy-v1",
+                transport_kind="ctwa_candidate",
+                external=self.ctwa(),
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.rows("transport_events")[0]["external_ad_reply_raw_json"])
 
     def test_show_ad_attribution_is_not_required_for_ctwa(self) -> None:
         response = self.post(
@@ -307,7 +454,9 @@ class TransportIngestTests(unittest.TestCase):
                 self.assertEqual(self.post(payload).status_code, 400)
 
     def test_oversized_declared_length_is_rejected_before_reading(self) -> None:
-        response = self.post(self.envelope(), declared_length=16_385)
+        response = self.post(
+            self.envelope(), declared_length=5 * 1024 * 1024 + 1
+        )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.rows("transport_events"), [])
 
@@ -317,8 +466,19 @@ class TransportIngestTests(unittest.TestCase):
         )
 
     def test_oversized_streamed_body_is_rejected(self) -> None:
-        chunks = [b"{" + b"a" * 16_384 + b"}"]
+        chunks = [b"{" + b"a" * (5 * 1024 * 1024) + b"}"]
         response = self.post(b"ignored", chunks=chunks)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.rows("transport_events"), [])
+
+    def test_body_over_five_mebibytes_is_rejected_before_json_parsing(self) -> None:
+        chunks = [b"x" * (5 * 1024 * 1024 + 1)]
+        with patch(
+            "brain.transport_api.json.loads",
+            side_effect=AssertionError("oversized body must not be parsed"),
+        ):
+            response = self.post(b"ignored", chunks=chunks)
+
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.rows("transport_events"), [])
 
@@ -536,6 +696,31 @@ class RetentionTests(TransportIngestTests):
             ).fetchone()[0]
         )
         self.assertEqual(remaining, 1)
+
+    def test_retention_deletes_events_that_contain_raw_attribution(self) -> None:
+        self.post(
+            self.envelope(
+                message_id="old-raw",
+                transport_kind="ctwa_candidate",
+                external=self.normalized_ctwa_for_raw(),
+                observer_event_version=2,
+                raw=self.raw_ctwa(),
+            )
+        )
+        cutoff_days = self.service.settings.transport_retention_days
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "UPDATE transport_events SET created_at = ?",
+                (time.time() - (cutoff_days + 1) * 86_400,),
+            )
+        )
+        self.service.transport_service._retention_ran_at = 0.0
+
+        self.post(self.envelope(message_id="new", body="recente"))
+
+        rows = self.rows("transport_events")
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["external_ad_reply_raw_json"])
 
     def test_retention_is_throttled_between_passes(self) -> None:
         self.post(self.envelope(message_id="one", body="um"))

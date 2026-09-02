@@ -15,7 +15,7 @@ from .transport_service import (
     TransportRequestError,
 )
 
-_MAX_BODY_BYTES = 16_384
+_MAX_BODY_BYTES = 5 * 1024 * 1024
 
 
 class TransportAPI:

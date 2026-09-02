@@ -70,6 +70,49 @@ class RuntimeDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(kept, "event-kept")
 
+    def test_initialize_adds_raw_json_to_a_legacy_transport_table(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE transport_events ("
+                "event_id TEXT PRIMARY KEY, observer_device_id TEXT NOT NULL, "
+                "contact_key TEXT, direction TEXT NOT NULL, received_at REAL NOT NULL, "
+                "message_timestamp REAL, body_hmac TEXT, body_length INTEGER, "
+                "native_type TEXT, transport_kind TEXT NOT NULL, source_type TEXT, "
+                "source_app TEXT, source_id_present INTEGER, source_id_length INTEGER, "
+                "source_id_hmac TEXT, source_url_hostname TEXT, source_url_length INTEGER, "
+                "source_url_hmac TEXT, ctwa_clid_present INTEGER, ctwa_clid_length INTEGER, "
+                "ctwa_clid_hmac TEXT, show_ad_attribution INTEGER, "
+                "click_to_whatsapp_call INTEGER, contains_auto_reply INTEGER, "
+                "created_at REAL NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO transport_events "
+                "(event_id, observer_device_id, direction, received_at, transport_kind, "
+                "created_at) VALUES ('legacy-event', 'observer-a', 'inbound', 1.0, "
+                "'ordinary_inbound', 1.0)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.initialize()
+
+        columns = self.runtime.read(
+            lambda conn: {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(transport_events)")
+            }
+        )
+        self.assertIn("external_ad_reply_raw_json", columns)
+        row = self.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT event_id, external_ad_reply_raw_json FROM transport_events"
+            ).fetchone()
+        )
+        self.assertEqual(tuple(row), ("legacy-event", None))
+
     def test_wal_foreign_keys_and_writable_runtime_connection(self) -> None:
         self.initialize()
 
