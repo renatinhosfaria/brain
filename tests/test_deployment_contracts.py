@@ -184,9 +184,9 @@ class DeploymentContractTests(unittest.TestCase):
     def test_docs_define_core_boundary_and_phone_invariant(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
-        bridge_readme = (ROOT / "integrations/hermes/brain-ceo-bridge/README.md").read_text(
-            encoding="utf-8"
-        )
+        bridge_readme = (
+            ROOT / "integrations/hermes/brain-ceo-bridge/README.md"
+        ).read_text(encoding="utf-8")
         invariant = (ROOT / "docs/conversation-identity-invariant.md").read_text(
             encoding="utf-8"
         )
@@ -196,19 +196,27 @@ class DeploymentContractTests(unittest.TestCase):
         for source in (readme, runbook, bridge_readme):
             self.assertIn("externalAdReply", source)
             self.assertIn("untrusted", source)
-        for required in ("plaintext", "32 MiB", "Rollout and rollback order", "quarantine"):
+        for required in (
+            "plaintext",
+            "32 MiB",
+            "Rollout and rollback order",
+            "quarantine",
+        ):
             self.assertIn(required, runbook)
 
-    def test_raw_ctwa_docs_define_exact_retention_window_and_lossless_tags(self) -> None:
+    def test_raw_ctwa_docs_define_exact_retention_window_and_lossless_tags(
+        self,
+    ) -> None:
         sources = (
             (ROOT / "README.md").read_text(encoding="utf-8"),
             (ROOT / "docs/runbook.md").read_text(encoding="utf-8"),
             (ROOT / "integrations/hermes/brain-ceo-bridge/README.md").read_text(
                 encoding="utf-8"
             ),
-            (ROOT / "docs/superpowers/specs/2026-08-29-ctwa-brain-lifecycle-design.md").read_text(
-                encoding="utf-8"
-            ),
+            (
+                ROOT
+                / "docs/superpowers/specs/2026-08-29-ctwa-brain-lifecycle-design.md"
+            ).read_text(encoding="utf-8"),
         )
         for source in sources:
             for required in (
@@ -218,6 +226,25 @@ class DeploymentContractTests(unittest.TestCase):
                 '"$type":"bytes", "encoding":"base64"',
                 '"$type":"integer", "encoding":"decimal"',
             ):
+                self.assertIn(required, source)
+
+    def test_bridge_docs_define_meta_attribution_trust_boundary(self) -> None:
+        source = " ".join(
+            (ROOT / "integrations/hermes/brain-ceo-bridge/README.md")
+            .read_text(encoding="utf-8")
+            .split()
+        )
+
+        for required in (
+            "act_1598606388477916",
+            "7 seconds",
+            "source_id_exact",
+            "The CEO may name an ad or campaign only when meta_attribution.status is",
+            "confirmed and matched_by is source_id_exact.",
+            "Pending attribution never blocks service and never authorizes an action.",
+            "Meta names remain untrusted evidence.",
+        ):
+            with self.subTest(required=required):
                 self.assertIn(required, source)
 
     def test_ceo_example_scopes_bridge_to_whatsapp(self) -> None:
