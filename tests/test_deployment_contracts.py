@@ -222,14 +222,14 @@ class DeploymentContractTests(unittest.TestCase):
             )
             self.assertNotIn(token, stdout.getvalue() + stderr.getvalue())
 
-    def test_meta_probe_uses_only_configured_read_checks_and_bounded_output(
+    def test_meta_probe_validates_credential_while_feature_stays_disabled(
         self,
     ) -> None:
-        """Removing the capability/account/known-ad probe must fail this operator check."""
+        """Enabling the resolver just to probe a credential breaks the rollout order."""
         from scripts import meta_ads_mcp_probe
 
         settings = SimpleNamespace(
-            meta_attribution_enabled=True,
+            meta_attribution_enabled=False,
             meta_ad_account_id="1598606388477916",
             meta_ads_mcp_access_token="synthetic-meta-token-never-log",
             meta_ads_mcp_token_expires_at=1_793_491_200.0,
@@ -368,6 +368,7 @@ class DeploymentContractTests(unittest.TestCase):
             "degraded",
             "90-day",
             "ads_management",
+            "https://www.postman.com/meta/whatsapp-business-platform/request/g7sv9jo/received-message-triggered-by-click-to-whatsapp-ads",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, runbook)

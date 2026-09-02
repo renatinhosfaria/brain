@@ -100,7 +100,8 @@ evidence; never paste them into chat, tickets, command arguments, or logs.
 Meta's official references are the [Ads MCP overview](https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-overview),
 [setup and authentication](https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-get-started),
 [tool inventory](https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-tools-ad-creation-and-management),
-and [MCP security guidance](https://developers.facebook.com/documentation/mcp).
+[MCP security guidance](https://developers.facebook.com/documentation/mcp), and
+the [WhatsApp Click-to-WhatsApp received-message reference](https://www.postman.com/meta/whatsapp-business-platform/request/g7sv9jo/received-message-triggered-by-click-to-whatsapp-ads).
 
 A `401` or `403` usually indicates a wrong business user, expired token, or
 missing Ads MCP scope such as `ads_management`; diagnose the configuration and

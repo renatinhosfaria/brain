@@ -27,8 +27,7 @@ def main(
     try:
         settings = BrainSettings.from_env()
         if (
-            not settings.meta_attribution_enabled
-            or not settings.meta_ads_mcp_access_token
+            not settings.meta_ads_mcp_access_token
             or settings.meta_ads_mcp_token_expires_at is None
             or canonical_account_id(settings.meta_ad_account_id) != "1598606388477916"
         ):
