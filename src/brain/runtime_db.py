@@ -128,6 +128,7 @@ _SCHEMA = (
         attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
         next_attempt_at REAL NOT NULL,
         lease_until REAL,
+        lease_token TEXT,
         last_error_code TEXT,
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
@@ -193,6 +194,14 @@ class RuntimeDatabase:
                     conn.execute(
                         "ALTER TABLE transport_events "
                         "ADD COLUMN external_ad_reply_raw_json TEXT"
+                    )
+                job_columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(meta_attribution_jobs)")
+                }
+                if "lease_token" not in job_columns:
+                    conn.execute(
+                        "ALTER TABLE meta_attribution_jobs ADD COLUMN lease_token TEXT"
                     )
                 conn.commit()
             except BaseException:

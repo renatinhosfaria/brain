@@ -189,7 +189,9 @@ class MetaAdsStoreTests(unittest.TestCase):
                 conn, self.observed.source_id, now=131.0, lease_seconds=30.0
             )
         )
-        self.assertEqual((first, excluded, recovered), (True, False, True))
+        self.assertIsInstance(first, str)
+        self.assertIsNone(excluded)
+        self.assertIsInstance(recovered, str)
 
     def test_failure_uses_bounded_retry_and_auth_circuit(self) -> None:
         """A failed Meta call must remain pending but cannot retry in a tight loop."""
@@ -199,14 +201,30 @@ class MetaAdsStoreTests(unittest.TestCase):
                 conn, "waevt_one", self.observed, now=100.0
             )
         )
-        self.write(
+        self.assertFalse(
+            self.write(
+                lambda conn: self.store.fail_job(
+                    conn,
+                    self.observed.source_id,
+                    now=100.0,
+                    error_code="meta_timeout",
+                    lease_token="no-current-owner",
+                )
+            )
+        )
+        first_token = self.write(
             lambda conn: self.store.claim_job(
                 conn, self.observed.source_id, now=100.0, lease_seconds=30.0
             )
         )
+        self.assertIsInstance(first_token, str)
         self.write(
             lambda conn: self.store.fail_job(
-                conn, self.observed.source_id, now=100.0, error_code="meta_not_found"
+                conn,
+                self.observed.source_id,
+                now=100.0,
+                error_code="meta_not_found",
+                lease_token=first_token,
             )
         )
         next_attempt, errors = self.runtime.read(
@@ -228,19 +246,19 @@ class MetaAdsStoreTests(unittest.TestCase):
                 )
             )
         )
-        self.assertTrue(
-            self.write(
-                lambda conn: self.store.claim_job(
-                    conn, self.observed.source_id, now=160.0, lease_seconds=30.0
-                )
+        second_token = self.write(
+            lambda conn: self.store.claim_job(
+                conn, self.observed.source_id, now=160.0, lease_seconds=30.0
             )
         )
+        self.assertIsInstance(second_token, str)
         self.write(
             lambda conn: self.store.fail_job(
                 conn,
                 self.observed.source_id,
                 now=160.0,
                 error_code="meta_auth_unavailable",
+                lease_token=second_token,
             )
         )
         circuit_until = self.runtime.read(
@@ -249,6 +267,115 @@ class MetaAdsStoreTests(unittest.TestCase):
             ).fetchone()[0]
         )
         self.assertEqual(circuit_until, 3760.0)
+
+    def test_retry_after_larger_than_normal_cap_remains_the_next_attempt(self) -> None:
+        """An upstream Retry-After must outrank local backoff capping."""
+        self.write(lambda conn: self._event(conn, "waevt_one"))
+        self.write(
+            lambda conn: self.store.stage_event(
+                conn, "waevt_one", self.observed, now=100.0
+            )
+        )
+        lease_token = self.write(
+            lambda conn: self.store.claim_job(
+                conn, self.observed.source_id, now=100.0, lease_seconds=30.0
+            )
+        )
+        self.assertIsInstance(lease_token, str)
+
+        self.assertTrue(
+            self.write(
+                lambda conn: self.store.fail_job(
+                    conn,
+                    self.observed.source_id,
+                    now=100.0,
+                    error_code="meta_rate_limited",
+                    retry_after_seconds=172_800.0,
+                    lease_token=lease_token,
+                )
+            )
+        )
+        next_attempt = self.runtime.read(
+            lambda conn: conn.execute(
+                "SELECT next_attempt_at FROM meta_attribution_jobs"
+            ).fetchone()[0]
+        )
+        self.assertEqual(next_attempt, 172_900.0)
+
+    def test_only_current_lease_owner_can_complete_a_failed_job(self) -> None:
+        """A stale resolver must not clear a newer worker's lease or retry state."""
+        self.write(lambda conn: self._event(conn, "waevt_one"))
+        self.write(
+            lambda conn: self.store.stage_event(
+                conn, "waevt_one", self.observed, now=100.0
+            )
+        )
+        first_token = self.write(
+            lambda conn: self.store.claim_job(
+                conn, self.observed.source_id, now=100.0, lease_seconds=30.0
+            )
+        )
+        self.assertIsInstance(first_token, str)
+        current_token = self.write(
+            lambda conn: self.store.claim_job(
+                conn, self.observed.source_id, now=130.0, lease_seconds=30.0
+            )
+        )
+        self.assertIsInstance(current_token, str)
+        self.assertNotEqual(first_token, current_token)
+
+        self.assertFalse(
+            self.write(
+                lambda conn: self.store.fail_job(
+                    conn,
+                    self.observed.source_id,
+                    now=130.0,
+                    error_code="meta_timeout",
+                    lease_token="unknown-owner",
+                )
+            )
+        )
+        self.assertFalse(
+            self.write(
+                lambda conn: self.store.fail_job(
+                    conn,
+                    self.observed.source_id,
+                    now=130.0,
+                    error_code="meta_timeout",
+                    lease_token=first_token,
+                )
+            )
+        )
+        state_before_current_owner = self.runtime.read(
+            lambda conn: tuple(
+                conn.execute(
+                    "SELECT attempt_count, lease_token, lease_until, last_error_code "
+                    "FROM meta_attribution_jobs"
+                ).fetchone()
+            )
+        )
+        self.assertEqual(state_before_current_owner, (0, current_token, 160.0, None))
+
+        self.assertTrue(
+            self.write(
+                lambda conn: self.store.fail_job(
+                    conn,
+                    self.observed.source_id,
+                    now=130.0,
+                    error_code="meta_timeout",
+                    lease_token=current_token,
+                )
+            )
+        )
+        state_after_current_owner = self.runtime.read(
+            lambda conn: tuple(
+                conn.execute(
+                    "SELECT attempt_count, lease_token, lease_until, last_error_code "
+                    "FROM meta_attribution_jobs"
+                ).fetchone()
+            )
+        )
+        self.assertEqual(state_after_current_owner, (1, None, None, "meta_timeout"))
 
     def test_catalog_refresh_updates_metadata_without_rebinding_confirmation(
         self,

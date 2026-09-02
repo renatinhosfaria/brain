@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import secrets
 import sqlite3
 
 from .meta_ads_models import (
@@ -139,18 +140,21 @@ class MetaAdsStore:
         now: float,
         *,
         lease_seconds: float,
-    ) -> bool:
+    ) -> str | None:
         now = _finite(now, "now")
         lease_seconds = _finite(lease_seconds, "lease_seconds")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         ObservedAttribution(source_id, None)
+        lease_token = secrets.token_urlsafe(24)
         claimed = conn.execute(
-            "UPDATE meta_attribution_jobs SET lease_until = ?, updated_at = ? "
+            "UPDATE meta_attribution_jobs SET lease_until = ?, lease_token = ?, "
+            "updated_at = ? "
             "WHERE account_id = ? AND source_id = ? AND next_attempt_at <= ? "
             "AND (lease_until IS NULL OR lease_until <= ?)",
             (
                 now + lease_seconds,
+                lease_token,
                 now,
                 self.account_id,
                 source_id,
@@ -159,13 +163,13 @@ class MetaAdsStore:
             ),
         ).rowcount
         if claimed != 1:
-            return False
+            return None
         conn.execute(
             "UPDATE ctwa_meta_attributions SET last_attempt_at = ?, updated_at = ? "
             "WHERE account_id = ? AND source_id = ? AND status = 'pending'",
             (now, now, self.account_id, source_id),
         )
-        return True
+        return lease_token
 
     def fail_job(
         self,
@@ -174,6 +178,7 @@ class MetaAdsStore:
         now: float,
         error_code: str,
         *,
+        lease_token: str,
         retry_after_seconds: float | None = None,
         jitter_seconds: float = 0.0,
     ) -> bool:
@@ -181,6 +186,8 @@ class MetaAdsStore:
         ObservedAttribution(source_id, None)
         if error_code not in META_ERROR_CODES:
             raise ValueError("error_code is invalid")
+        if not isinstance(lease_token, str) or not lease_token:
+            raise ValueError("lease_token is required")
         jitter_seconds = _finite(jitter_seconds, "jitter_seconds")
         if abs(jitter_seconds) > MAX_JITTER_SECONDS:
             raise ValueError("jitter_seconds exceeds the bounded range")
@@ -191,8 +198,9 @@ class MetaAdsStore:
 
         job = conn.execute(
             "SELECT attempt_count FROM meta_attribution_jobs "
-            "WHERE account_id = ? AND source_id = ?",
-            (self.account_id, source_id),
+            "WHERE account_id = ? AND source_id = ? AND lease_token = ? "
+            "AND lease_until > ?",
+            (self.account_id, source_id, lease_token, now),
         ).fetchone()
         if job is None:
             return False
@@ -200,13 +208,17 @@ class MetaAdsStore:
         delay = RETRY_DELAYS_SECONDS[min(attempt_count, len(RETRY_DELAYS_SECONDS) - 1)]
         if error_code == "meta_auth_unavailable":
             delay = max(delay, AUTH_CIRCUIT_SECONDS)
-        if retry_after_seconds is not None:
-            delay = max(delay, retry_after_seconds)
-        delay = min(86_400.0, max(0.0, delay + jitter_seconds))
-        conn.execute(
+        normal_delay = min(86_400.0, max(0.0, delay + jitter_seconds))
+        delay = (
+            retry_after_seconds
+            if retry_after_seconds is not None and retry_after_seconds > normal_delay
+            else normal_delay
+        )
+        updated = conn.execute(
             "UPDATE meta_attribution_jobs SET attempt_count = ?, next_attempt_at = ?, "
-            "lease_until = NULL, last_error_code = ?, updated_at = ? "
-            "WHERE account_id = ? AND source_id = ?",
+            "lease_until = NULL, lease_token = NULL, last_error_code = ?, updated_at = ? "
+            "WHERE account_id = ? AND source_id = ? AND lease_token = ? "
+            "AND lease_until > ?",
             (
                 attempt_count + 1,
                 now + delay,
@@ -214,8 +226,12 @@ class MetaAdsStore:
                 now,
                 self.account_id,
                 source_id,
+                lease_token,
+                now,
             ),
-        )
+        ).rowcount
+        if updated != 1:
+            return False
         conn.execute(
             "UPDATE ctwa_meta_attributions SET last_error_code = ?, updated_at = ? "
             "WHERE account_id = ? AND source_id = ? AND status = 'pending'",
