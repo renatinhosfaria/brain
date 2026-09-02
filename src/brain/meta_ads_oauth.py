@@ -43,6 +43,7 @@ ALLOWED_SCOPES = frozenset({"ads_read", "ads_mcp_management"})
 _AAD = b"brain-meta-ads-oauth-v1"
 _MAX_ENVELOPE_BYTES = 64 * 1024
 _MAX_KEY_BYTES = 64
+_MAX_HTTP_JSON_BYTES = 64 * 1024
 _ENVELOPE_FIELDS = frozenset({"version", "nonce", "ciphertext"})
 _CREDENTIAL_FIELDS = frozenset(
     {
@@ -151,7 +152,7 @@ class OAuthCredentials:
         if self.refresh_expires_at is not None and self.refresh_expires_at <= current:
             return "expired"
         if self.access_expires_at <= current:
-            return "expired"
+            return "expiring"
         if self.access_expires_at - current <= 600:
             return "expiring"
         return "ready"
@@ -349,6 +350,10 @@ class OAuthCredentialProvider:
             self._state = "degraded"
             return None
         if self._credentials is None:
+            self._state = "missing"
+        elif self._state == "degraded":
+            # A valid envelope may have been atomically replaced by an
+            # operator in another process after a transient read failure.
             self._state = "missing"
         elif (
             self._invalidated_access_token is not None
@@ -909,6 +914,9 @@ def _client_configuration_from_mapping(
 ) -> OAuthClientConfiguration:
     if (
         set(payload) != _CLIENT_CONFIGURATION_FIELDS
+        or not isinstance(payload.get("version"), int)
+        or isinstance(payload.get("version"), bool)
+        or payload.get("version") != 1
         or payload.get("kind") != "client_configuration"
     ):
         raise ValueError("OAuth client configuration fields are invalid")
@@ -942,10 +950,26 @@ def _credentials_from_mapping(payload: Mapping[str, object]) -> OAuthCredentials
     )
 
 
+def _read_http_json(response: object) -> object:
+    headers = getattr(response, "headers", None)
+    content_length = None if headers is None else headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared = int(content_length)
+        except (TypeError, ValueError):
+            raise ValueError("OAuth response size is invalid") from None
+        if declared < 0 or declared > _MAX_HTTP_JSON_BYTES:
+            raise ValueError("OAuth response is too large")
+    body = response.read(_MAX_HTTP_JSON_BYTES + 1)  # type: ignore[attr-defined]
+    if len(body) > _MAX_HTTP_JSON_BYTES:
+        raise ValueError("OAuth response is too large")
+    return json.loads(body.decode("utf-8"))
+
+
 def _fetch_json(url: str) -> object:
     request = Request(url, headers={"Accept": "application/json"})
     with _NO_REDIRECT_OPENER.open(request, timeout=10) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return _read_http_json(response)
 
 
 def _post_form(url: str, form: dict[str, str]) -> object:
@@ -959,7 +983,7 @@ def _post_form(url: str, form: dict[str, str]) -> object:
         method="POST",
     )
     with _NO_REDIRECT_OPENER.open(request, timeout=10) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return _read_http_json(response)
 
 
 def _strict_json_object(value: bytes) -> dict[str, object]:

@@ -260,7 +260,10 @@ class MetaAdsMcpClient:
         self._validate_source_id(source_id)
         self._validate_now(now)
         timeout_seconds = self._context_timeout(timeout_seconds)
-        return self._run_with_oauth_retry(self._get_ad, source_id, now, timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        return self._run_with_oauth_retry(
+            self._get_ad, source_id, now, timeout_seconds, deadline
+        )
 
     def list_ads(self, now: float, full: bool) -> list[MetaAdRecord]:
         self._validate_now(now)
@@ -600,11 +603,15 @@ class MetaAdsMcpClient:
             raise MetaAdsError("meta_account_mismatch")
 
     async def _get_ad(
-        self, source_id: str, now: float, timeout_seconds: float
+        self, source_id: str, now: float, timeout_seconds: float, deadline: float
     ) -> MetaAdRecord:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MetaAdsError("meta_timeout")
+        effective_timeout = min(timeout_seconds, remaining)
         try:
-            with anyio.fail_after(timeout_seconds):
-                async with self._session(timeout_seconds) as session:
+            with anyio.fail_after(effective_timeout):
+                async with self._session(effective_timeout) as session:
                     capabilities = await self._probe_session(session)
                     records = await self._read_entity_pages(
                         session,

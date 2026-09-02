@@ -55,6 +55,8 @@ def _create_key(path: Path) -> None:
 
 
 def _configure(args: argparse.Namespace) -> int:
+    if os.path.lexists(args.store_path):
+        raise OAuthError("oauth_credentials_unavailable")
     client_id = _read_secret("Meta app client ID: ")
     client_secret = _read_secret("Meta app secret (optional): ") or None
     _create_key(args.key_path)

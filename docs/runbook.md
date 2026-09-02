@@ -143,7 +143,9 @@ arguments, environment variables, tickets, logs, or the CEO context.
    `/etc/brain` and its files as root-only. The `brain.service` unit may write
    only that credentials directory plus the runtime directory.
 3. On the Brain host run `scripts/meta_ads_oauth.py configure`; it prompts for
-   the app ID and optional secret without accepting either in argv.
+   the app ID and optional secret without accepting either in argv. It refuses
+   to replace an existing encrypted envelope; use `clear` first for deliberate
+   reconfiguration.
 4. From the operator workstation create `ssh -N -L 8766:127.0.0.1:8766
    root@brain-host`, then run `scripts/meta_ads_oauth.py login` on the host and
    open only its printed authorization URL. The callback is one-shot.

@@ -15,6 +15,7 @@ from dataclasses import replace
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -29,6 +30,8 @@ from brain.meta_ads_oauth import (
     OAuthCredentialProvider,
     OAuthCredentials,
     OAuthError,
+    _client_configuration_from_mapping,
+    _fetch_json,
     _post_form,
 )
 
@@ -236,6 +239,31 @@ class MetaAdsOAuthTests(unittest.TestCase):
             self.oauth.load_credentials().refresh_token, "rotated-refresh-token"
         )
 
+    def test_provider_refreshes_an_expired_access_token_when_refresh_is_valid(
+        self,
+    ) -> None:
+        credentials = OAuthCredentials(
+            client_id="app-client-id",
+            client_secret=None,
+            access_token="expired-access-token",
+            refresh_token="refresh-token-value",
+            access_expires_at=1_699_999_900.0,
+            refresh_expires_at=1_700_003_600.0,
+            scopes=frozenset({"ads_read"}),
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            created_at=1_700_000_000.0,
+            updated_at=1_700_000_000.0,
+        )
+        self.oauth.save_credentials(credentials)
+        provider = OAuthCredentialProvider(self.oauth)
+
+        self.assertEqual(provider.status(1_700_000_000.0), "expiring")
+        self.assertEqual(
+            provider.access_token(1_700_000_000.0), "refreshed-access-token"
+        )
+        self.assertEqual(len(self.calls), 1)
+
     def test_provider_fingerprint_uses_the_shared_null_separator(self) -> None:
         credentials = OAuthCredentials(
             client_id="app-client-id",
@@ -304,6 +332,36 @@ class MetaAdsOAuthTests(unittest.TestCase):
                 hashlib.sha256,
             ).hexdigest(),
         )
+
+    def test_provider_clears_degraded_state_after_valid_external_replacement(
+        self,
+    ) -> None:
+        credentials = OAuthCredentials(
+            client_id="app-client-id",
+            client_secret=None,
+            access_token="access-token-value",
+            refresh_token="refresh-token-value",
+            access_expires_at=1_700_003_600.0,
+            refresh_expires_at=None,
+            scopes=frozenset({"ads_read"}),
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            created_at=1_700_000_000.0,
+            updated_at=1_700_000_000.0,
+        )
+        replacement = replace(credentials, access_token="replacement-access-token")
+        self.oauth.save_credentials(credentials)
+        provider = OAuthCredentialProvider(self.oauth)
+
+        with patch.object(
+            self.oauth,
+            "load_credentials",
+            side_effect=OAuthError("oauth_credentials_invalid"),
+        ):
+            self.assertEqual(provider.status(1_700_000_000.0), "degraded")
+
+        self.oauth.save_credentials(replacement)
+        self.assertEqual(provider.status(1_700_000_000.0), "ready")
 
     def test_provider_async_refresh_abandons_a_blocked_thread_at_the_budget(
         self,
@@ -522,6 +580,78 @@ class MetaAdsOAuthTests(unittest.TestCase):
                     finally:
                         for server in (target, redirect):
                             server.shutdown()
+
+    def test_http_json_helpers_reject_oversized_declared_responses(self) -> None:
+        class _Oversized(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Length", str(64 * 1024 + 1))
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def do_POST(self) -> None:
+                self.do_GET()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        with HTTPServer(("127.0.0.1", 0), _Oversized) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with self.assertRaises(ValueError):
+                    _fetch_json(f"http://127.0.0.1:{server.server_port}/metadata")
+                with self.assertRaises(ValueError):
+                    _post_form(
+                        f"http://127.0.0.1:{server.server_port}/token", {"code": "x"}
+                    )
+            finally:
+                server.shutdown()
+                worker.join(timeout=2)
+
+    def test_configure_refuses_to_replace_existing_credentials(self) -> None:
+        credentials = OAuthCredentials(
+            client_id="app-client-id",
+            client_secret=None,
+            access_token="access-token-value",
+            refresh_token="refresh-token-value",
+            access_expires_at=1_700_003_600.0,
+            refresh_expires_at=None,
+            scopes=frozenset({"ads_read"}),
+            issuer=META_ADS_MCP_RESOURCE,
+            resource=META_ADS_MCP_RESOURCE,
+            created_at=1_700_000_000.0,
+            updated_at=1_700_000_000.0,
+        )
+        self.oauth.save_credentials(credentials)
+        from scripts import meta_ads_oauth as oauth_cli
+
+        with patch.object(
+            oauth_cli,
+            "_read_secret",
+            side_effect=["app-client-id", ""],
+        ) as read_secret:
+            with self.assertRaisesRegex(OAuthError, "^oauth_credentials_unavailable$"):
+                oauth_cli._configure(
+                    SimpleNamespace(store_path=self.store, key_path=self.key)
+                )
+            read_secret.assert_not_called()
+        self.assertEqual(self.oauth.load_credentials(), credentials)
+
+    def test_client_configuration_requires_version_one(self) -> None:
+        valid = {
+            "version": 1,
+            "kind": "client_configuration",
+            "client_id": "app-client-id",
+            "client_secret": None,
+            "configured_at": 1_700_000_000.0,
+        }
+        for version in (0, True, 2):
+            with self.subTest(version=version):
+                payload = dict(valid)
+                payload["version"] = version
+                with self.assertRaises(ValueError):
+                    _client_configuration_from_mapping(payload)
 
     def test_rejects_non_default_https_ports(self) -> None:
         for key, value in (

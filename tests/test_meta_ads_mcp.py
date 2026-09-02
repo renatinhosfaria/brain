@@ -262,6 +262,43 @@ class MetaAdsMcpClientTests(unittest.TestCase):
 
         anyio.run(resolve)
 
+    def test_oauth_retry_preserves_the_original_get_ad_deadline(self) -> None:
+        class _Provider:
+            def __init__(self) -> None:
+                self.invalidations = 0
+
+            def access_token(self, now: float) -> str:
+                return "oauth-token"
+
+            def invalidate(self) -> None:
+                self.invalidations += 1
+
+        class _SlowAuthFailureSession(_FakeSession):
+            async def initialize(self) -> None:
+                await anyio.sleep(0.06)
+                raise MetaAdsError("meta_auth_unavailable")
+
+        provider = _Provider()
+        sessions: list[_SlowAuthFailureSession] = []
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[_SlowAuthFailureSession]:
+            session = _SlowAuthFailureSession(_tools())
+            sessions.append(session)
+            async with session:
+                yield session
+
+        client = MetaAdsMcpClient(
+            self._settings(meta_ads_mcp_auth_mode="oauth"),
+            session_factory=factory,
+            credential_provider=provider,
+        )
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_timeout$"):
+            client.get_ad("120200000000001", now=1.0, timeout_seconds=0.1)
+        self.assertEqual(provider.invalidations, 1)
+        self.assertEqual(len(sessions), 2)
+
     def _probe_session(
         self,
         tools: list[mcp_types.Tool] | None = None,
