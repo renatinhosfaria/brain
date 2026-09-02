@@ -86,6 +86,7 @@ MetadataFetcher = Callable[[str], object]
 TokenRequester = Callable[[str, dict[str, str]], object]
 RegistrationRequester = Callable[[str, dict[str, object]], object]
 CredentialState = Literal["missing", "ready", "expiring", "expired", "degraded"]
+RegistrationState = Literal["missing", "ready", "expired", "degraded"]
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -139,6 +140,7 @@ class OAuthMetadata:
     token_endpoint: str
     registration_endpoint: str
     scopes_supported: frozenset[str]
+    authorization_response_iss_parameter_supported: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,8 @@ class OAuthAuthorizationRequest:
     state: str = field(repr=False)
     code_verifier: str = field(repr=False)
     requested_scopes: frozenset[str]
+    expected_issuer: str = field(default=META_ADS_MCP_RESOURCE, repr=False)
+    require_issuer: bool = field(default=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -259,6 +263,13 @@ class OAuthCallback:
         if (
             state is None
             or code is None
+            or (
+                self._request.require_issuer
+                and (
+                    _single_query_value(query.get("iss"))
+                    != self._request.expected_issuer
+                )
+            )
             or not secrets.compare_digest(state, self._request.state)
         ):
             raise OAuthError("oauth_callback_invalid")
@@ -335,6 +346,10 @@ class OAuthCredentialProvider:
     def access_token(self, now: float) -> str:
         with self._lock:
             credentials = self._load()
+            registration_state = self._oauth.registration_state(now)
+            if registration_state != "ready":
+                self._state = registration_state
+                raise OAuthError("oauth_credentials_unavailable")
             if credentials is None:
                 raise OAuthError("oauth_credentials_unavailable")
             if (
@@ -386,6 +401,10 @@ class OAuthCredentialProvider:
     def status(self, now: float) -> CredentialState:
         with self._lock:
             credentials = self._load()
+            registration_state = self._oauth.registration_state(now)
+            if registration_state != "ready":
+                self._state = registration_state
+                return self._state
             if credentials is None:
                 return self._state
             if self._state == "degraded":
@@ -486,6 +505,7 @@ class MetaAdsOAuth:
         # Static client credentials remain supported for the explicit token
         # fallback.  Keep the compatibility registration in memory only; new
         # envelopes are always written as a DCR-shaped v2 payload.
+        self._static_client_fallback = dynamic_client is None and client_id is not None
         if dynamic_client is None and client_id is not None:
             dynamic_client = OAuthDynamicClient(
                 client_id=client_id,
@@ -642,6 +662,8 @@ class MetaAdsOAuth:
             state=state,
             code_verifier=verifier,
             requested_scopes=frozenset(scopes),
+            expected_issuer=metadata.issuer,
+            require_issuer=metadata.authorization_response_iss_parameter_supported,
         )
 
     def ensure_dynamic_client(self) -> OAuthDynamicClient:
@@ -727,9 +749,15 @@ class MetaAdsOAuth:
             or credentials.resource != META_ADS_MCP_RESOURCE
         ):
             raise OAuthError("oauth_credentials_invalid")
-        form = self._base_form(
-            "refresh_token", client_secret=registration.client_secret
-        )
+        if (
+            registration.expires_at is not None
+            and registration.expires_at <= self._now()
+        ):
+            raise OAuthError("oauth_credentials_unavailable")
+        # DCR registered this client with token_endpoint_auth_method=none.
+        # Any returned client_secret is retained encrypted for diagnostics or
+        # future protocol changes, but is never sent as token authentication.
+        form = self._base_form("refresh_token")
         form["refresh_token"] = credentials.refresh_token
         payload = self._request_token(metadata.token_endpoint, form)
         if payload.get("error") == "invalid_grant":
@@ -768,6 +796,20 @@ class MetaAdsOAuth:
             raise
         except (InvalidTag, OSError, TypeError, ValueError, json.JSONDecodeError):
             raise OAuthError("oauth_credentials_invalid") from None
+
+    def registration_state(self, now: float) -> RegistrationState:
+        """Report registration validity without initiating DCR."""
+        try:
+            registration = self._dynamic_client or self.load_registration()
+        except OAuthError:
+            return "degraded"
+        if registration is None:
+            return "missing"
+        if not _finite_number(now):
+            return "degraded"
+        if registration.expires_at is not None and registration.expires_at <= now:
+            return "expired"
+        return "ready"
 
     def save_credentials(self, credentials: OAuthCredentials) -> None:
         _validate_credentials(credentials)
@@ -906,7 +948,7 @@ class MetaAdsOAuth:
             "client_id": self._client_id,
             "resource": META_ADS_MCP_RESOURCE,
         }
-        secret = self._client_secret if client_secret is None else client_secret
+        secret = self._client_secret if self._static_client_fallback else client_secret
         if secret is not None:
             form["client_secret"] = secret
         return form
@@ -1091,6 +1133,9 @@ def _parse_metadata(payload: object) -> OAuthMetadata:
     token_endpoint = payload.get("token_endpoint")
     registration_endpoint = payload.get("registration_endpoint")
     scopes = payload.get("scopes_supported", ())
+    issuer_parameter_supported = payload.get(
+        "authorization_response_iss_parameter_supported", False
+    )
     methods = payload.get("code_challenge_methods_supported", ())
     grants = payload.get("grant_types_supported", ())
     responses = payload.get("response_types_supported", ())
@@ -1105,6 +1150,7 @@ def _parse_metadata(payload: object) -> OAuthMetadata:
         or "S256" not in _string_set(methods)
         or not _string_set(grants).issuperset({"authorization_code", "refresh_token"})
         or "code" not in _string_set(responses)
+        or not isinstance(issuer_parameter_supported, bool)
     ):
         raise OAuthError("oauth_metadata_invalid")
     return OAuthMetadata(
@@ -1114,6 +1160,7 @@ def _parse_metadata(payload: object) -> OAuthMetadata:
         token_endpoint=cast(str, token_endpoint),
         registration_endpoint=cast(str, registration_endpoint),
         scopes_supported=frozenset(_string_set(scopes) & ALLOWED_SCOPES),
+        authorization_response_iss_parameter_supported=issuer_parameter_supported,
     )
 
 
