@@ -350,7 +350,42 @@ test('normalizer preserves Task 1 body and CTWA behavior with identity integrati
   assert.equal(safe.body_length, Array.from(body).length);
   assert.equal(safe.transport_kind, 'ctwa_candidate');
   assert.equal(safe.external_ad_reply.source_id_hmac, IDS.opaqueHmac('synthetic-source'));
+  assert.deepEqual(safe.external_ad_reply_raw, {
+    clickToWhatsappCall: true,
+    sourceId: 'synthetic-source',
+    sourceType: 'ad',
+  });
   assert.equal(JSON.stringify(safe).includes(body), false);
+});
+
+test('unknown raw attribution fields do not affect CTWA classification or identity evidence', () => {
+  const base = message({}, {
+    message: {
+      extendedTextMessage: {
+        text: 'synthetic body',
+        contextInfo: {
+          externalAdReply: { sourceType: 'ad', sourceId: 'known-signal' },
+        },
+      },
+    },
+  });
+  const withUnknown = structuredClone(base);
+  withUnknown.message.extendedTextMessage.contextInfo.externalAdReply.unrecognizedNested = {
+    identity: OTHER_PHONE,
+    arbitrary: ['field'],
+  };
+
+  const expected = normalizeInboundMessage(base, 1_800_000_001, IDS, 'observer-a');
+  const actual = normalizeInboundMessage(withUnknown, 1_800_000_001, IDS, 'observer-a');
+
+  assert.equal(actual.transport_kind, expected.transport_kind);
+  assert.equal(actual.remote_jid_hmac, expected.remote_jid_hmac);
+  assert.equal(actual.contact_key, expected.contact_key);
+  assert.deepEqual(actual.external_ad_reply, expected.external_ad_reply);
+  assert.deepEqual(actual.external_ad_reply_raw.unrecognizedNested, {
+    arbitrary: ['field'],
+    identity: OTHER_PHONE,
+  });
 });
 
 test('test directories never target real Hermes or observer session paths', async () => {

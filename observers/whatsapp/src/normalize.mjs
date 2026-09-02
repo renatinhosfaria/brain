@@ -2,6 +2,7 @@ import {
   contactKeyForEvidence,
   deriveIdentityEvidence,
 } from './identity.mjs';
+import { encodeRawAttribution } from './raw-attribution.mjs';
 
 const OBSERVER_DEVICE_ID = /^[!-~]{1,128}$/;
 const SAFE_HOSTNAME = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
@@ -92,7 +93,7 @@ function safeSourceUrl(value, ids, target) {
   target.source_url_hmac = ids.opaqueHmac(value);
 }
 
-function safeExternalAdReply(raw, ids) {
+function safeExternalAdReply(raw, ids, rawLimits) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return null;
   }
@@ -122,6 +123,7 @@ function safeExternalAdReply(raw, ids) {
 
   return {
     safe,
+    raw: encodeRawAttribution(raw, rawLimits).value,
     isCtwa:
       sourceType === 'ad' &&
       (raw.clickToWhatsappCall === true || sourceIdPresent || ctwaClidPresent),
@@ -143,7 +145,7 @@ function provenText(message) {
   return null;
 }
 
-export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) {
+export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId, rawLimits) {
   if (msg === null || typeof msg !== 'object' || msg.key?.fromMe === true) {
     return null;
   }
@@ -168,7 +170,7 @@ export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) 
   if (codePointLength(text.body) > MAX_SAFE_LENGTH) {
     return null;
   }
-  const external = safeExternalAdReply(text.external, ids);
+  const external = safeExternalAdReply(text.external, ids, rawLimits);
   const safe = {
     event_id: ids.eventId(observerDeviceId, observerMessageId),
     observer_device_id: observerDeviceId,
@@ -194,6 +196,7 @@ export function normalizeInboundMessage(msg, capturedAt, ids, observerDeviceId) 
   }
   if (external !== null) {
     safe.external_ad_reply = external.safe;
+    safe.external_ad_reply_raw = external.raw;
   }
   return safe;
 }
