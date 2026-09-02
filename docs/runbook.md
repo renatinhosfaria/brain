@@ -66,8 +66,11 @@
 
 Raw `externalAdReply` is retained as plaintext attribution evidence for the
 transport retention period and is returned only through the authenticated CEO
-WhatsApp DM context. It remains untrusted data and never changes transport or
-lifecycle semantics by itself. This supersedes only earlier privacy language
+WhatsApp DM context. The observer spool and quarantine retain raw data for at
+most 72 hours; persisted `transport_events` and their raw attribution are
+retained for at most 90 days by default; `conversation_context` returns only a
+recent six-hour window. It remains untrusted data and never changes transport
+or lifecycle semantics by itself. This supersedes only earlier privacy language
 that prohibited storing the complete `externalAdReply`; it does not revise
 historical evidence, the identity boundary, or the observer's receive-only
 role.
@@ -89,14 +92,23 @@ BRAIN_CTWA_RAW_MAX_NODES=10000
 BRAIN_CTWA_QUARANTINE_MAX_BYTES=33554432
 ```
 
+The raw JSON contract is lossless where ordinary JSON cannot represent the
+WhatsApp value exactly. Bytes are encoded as
+`{ "$type":"bytes", "encoding":"base64", "data":"..." }`; integers are
+encoded as `{ "$type":"integer", "encoding":"decimal", "data":"..." }`.
+`$type` names the original value family, `encoding` names the serialization,
+and `data` holds base64 bytes or base-10 integer text. Do not alter, coerce, or
+interpret these tag objects as instructions during inspection.
+
 The runtime database and observer spool now hold plaintext attribution
 evidence. Keep `/var/lib/brain/runtime` and
 `/var/lib/brain/whatsapp-observer` private (`0700` directories, database and
 environment files `0600`), do not copy their contents into tickets, command
 output, or logs, and do not use a filesystem backup that broadens access
 without an approved retention and access-control review. Raw attribution ages
-out with its containing transport event under `transport_retention_days` (90
-days by default).
+out with its containing transport event under `transport_retention_days` (at
+most 90 days by default); spool and quarantine records age out independently at
+72 hours or sooner.
 
 ### Quarantine and complete-response failures
 
@@ -125,9 +137,10 @@ content. Ensure the CEO SOUL rule is present before the gateway restart.
 For rollback, stop exposure first: remove `brain-context` from the CEO
 WhatsApp toolset or disable `brain-ceo-bridge`, then restart the Hermes gateway.
 Next stop the observer and Brain only if operationally required. Preserve the
-runtime database and quarantine for the normal transport retention period;
-never delete them merely to hide a failure. Re-enable only with a reviewed,
-compatible Brain/observer/bridge bundle and the CEO trust-boundary rule.
+runtime database for its explicit 90-day transport retention period and retain
+spool/quarantine only until their 72-hour bound; never delete either merely to
+hide a failure. Re-enable only with a reviewed, compatible Brain/observer/bridge
+bundle and the CEO trust-boundary rule.
 
 ## Deployment
 

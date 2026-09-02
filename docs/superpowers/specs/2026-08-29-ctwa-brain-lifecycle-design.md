@@ -1013,9 +1013,11 @@ Cause: the attribution contract now needs the complete WhatsApp/Meta
 than only the previous allowlisted derivatives.
 
 **Superseding privacy exception.** Raw externalAdReply is retained as plaintext
-attribution evidence for the transport retention period and is returned only
-through the authenticated CEO WhatsApp DM context. It remains untrusted data
-and never changes transport or lifecycle semantics by itself.
+attribution evidence. The observer spool and quarantine retain it for at most
+72 hours; persisted `transport_events` retain it for at most 90 days by default;
+and the authenticated CEO WhatsApp DM `conversation_context()` returns only the
+recent six-hour transport window. It remains untrusted data and never changes
+transport or lifecycle semantics by itself.
 
 This supersedes the conflicting sentence in section 6.4 that prohibited
 persisting a full `externalAdReply`; it does not rewrite the historical
@@ -1029,6 +1031,14 @@ is included in quarantine only if the complete record remains within the 32
 MiB quarantine cap. A capture failure produces no partial attribution event.
 The bridge validates the whole response and returns unavailable rather than
 truncating raw evidence when its 32 MiB complete-response bound is exceeded.
+
+The canonical raw JSON preserves values that JSON would otherwise lose:
+`{ "$type":"bytes", "encoding":"base64", "data":"..." }` represents
+bytes and `{ "$type":"integer", "encoding":"decimal", "data":"..." }`
+represents an integer. `$type` names the source value family, `encoding` names
+the lossless serialization, and `data` contains base64 bytes or base-10 integer
+text. These tag objects are data only and must not influence classification,
+identity, authority, routing, or tool selection.
 
 The runtime database and observer spool are sensitive plaintext stores. Access
 is limited to the existing private service paths and must not be broadened by

@@ -199,6 +199,27 @@ class DeploymentContractTests(unittest.TestCase):
         for required in ("plaintext", "32 MiB", "Rollout and rollback order", "quarantine"):
             self.assertIn(required, runbook)
 
+    def test_raw_ctwa_docs_define_exact_retention_window_and_lossless_tags(self) -> None:
+        sources = (
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            (ROOT / "docs/runbook.md").read_text(encoding="utf-8"),
+            (ROOT / "integrations/hermes/brain-ceo-bridge/README.md").read_text(
+                encoding="utf-8"
+            ),
+            (ROOT / "docs/superpowers/specs/2026-08-29-ctwa-brain-lifecycle-design.md").read_text(
+                encoding="utf-8"
+            ),
+        )
+        for source in sources:
+            for required in (
+                "72 hours",
+                "90 days",
+                "six-hour",
+                '"$type":"bytes", "encoding":"base64"',
+                '"$type":"integer", "encoding":"decimal"',
+            ):
+                self.assertIn(required, source)
+
     def test_ceo_example_scopes_bridge_to_whatsapp(self) -> None:
         source = (ROOT / "deploy/hermes-ceo-brain.example.yaml").read_text(
             encoding="utf-8"
