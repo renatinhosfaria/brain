@@ -18,6 +18,7 @@ export class HealthState {
   #now;
   #permanentFailureCount = 0;
   #purgedEventCount = 0;
+  #rawCaptureFailureCount = 0;
   #retryPending = false;
   #spool;
   #unresolvedIdentityCount = 0;
@@ -66,6 +67,10 @@ export class HealthState {
     this.#permanentFailureCount += 1;
   }
 
+  incrementRawCaptureFailure() {
+    this.#rawCaptureFailureCount += 1;
+  }
+
   addPurgedEvents(count) {
     this.#purgedEventCount += nonnegativeInteger(count, 'purged count');
   }
@@ -97,6 +102,7 @@ export class HealthState {
         outbox_oldest_age_seconds: 0,
         unresolved_identity_count: this.#unresolvedIdentityCount,
         permanent_failure_count: this.#permanentFailureCount,
+        raw_capture_failure_count: this.#rawCaptureFailureCount,
         purged_event_count: this.#purgedEventCount,
       };
     }
@@ -106,7 +112,8 @@ export class HealthState {
       this.#whatsapp === 'connecting' ||
       this.#retryPending ||
       eventIds.length > 0 ||
-      this.#permanentFailureCount > 0;
+      this.#permanentFailureCount > 0 ||
+      this.#rawCaptureFailureCount > 0;
     return {
       status: unavailable ? 'unavailable' : degraded ? 'degraded' : 'ok',
       whatsapp: this.#whatsapp,
@@ -114,6 +121,7 @@ export class HealthState {
       outbox_oldest_age_seconds: oldestAge,
       unresolved_identity_count: this.#unresolvedIdentityCount,
       permanent_failure_count: this.#permanentFailureCount,
+      raw_capture_failure_count: this.#rawCaptureFailureCount,
       purged_event_count: this.#purgedEventCount,
     };
   }
@@ -153,6 +161,7 @@ export function createHealthServer({
         outbox_oldest_age_seconds: 0,
         unresolved_identity_count: 0,
         permanent_failure_count: 0,
+        raw_capture_failure_count: 0,
         purged_event_count: 0,
       };
     }

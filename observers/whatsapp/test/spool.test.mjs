@@ -75,14 +75,21 @@ function safeEvent(messageId = RAW_MESSAGE_ID, capturedAt = CAPTURED_AT) {
       fromMe: false,
     },
   });
-  return normalizeInboundMessage(raw, capturedAt, IDS, 'observer-spool-test');
+  return {
+    ...normalizeInboundMessage(raw, capturedAt, IDS, 'observer-spool-test'),
+    observer_event_version: 2,
+  };
 }
 
-async function withSpool(callback, initialNow = CAPTURED_AT + 10) {
+async function withSpool(
+  callback,
+  initialNow = CAPTURED_AT + 10,
+  spoolOptions = {},
+) {
   const testRoot = await mkdtemp(path.join(HERE, '.spool-test-'));
   const rootDir = path.join(testRoot, 'outbox');
   let now = initialNow;
-  const spool = new SafeSpool(rootDir, { now: () => now });
+  const spool = new SafeSpool(rootDir, { ...spoolOptions, now: () => now });
   try {
     return await callback({
       rootDir,
@@ -171,7 +178,172 @@ test('root is 0700 and an event is atomically installed as event_id.json mode 06
   });
 });
 
-test('privacy fixture leaves no raw transport value in any outbox byte', async () => {
+test('new spool records are v2 and retain raw attribution', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent('raw-v2');
+    await spool.put(event);
+    const filename = path.join(rootDir, `${event.event_id}.json`);
+    const wrapper = JSON.parse(await readFile(filename, 'utf8'));
+
+    assert.equal(wrapper.spool_version, 2);
+    assert.deepEqual(wrapper.event.external_ad_reply_raw, event.external_ad_reply_raw);
+    assert.deepEqual(await spool.read(event.event_id), event);
+  });
+});
+
+test('valid v1 spool records without raw attribution remain readable', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent('legacy-v1');
+    delete event.observer_event_version;
+    delete event.external_ad_reply_raw;
+    const wrapper = {
+      spool_version: 1,
+      spooled_at: CAPTURED_AT + 10,
+      display_name_expires_at: event.received_at + 24 * 60 * 60,
+      event,
+    };
+    await mkdir(rootDir, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(rootDir, `${event.event_id}.json`), JSON.stringify(wrapper), {
+      mode: 0o600,
+    });
+
+    assert.deepEqual(await spool.read(event.event_id), event);
+
+    wrapper.event = {
+      ...event,
+      observer_event_version: 2,
+      external_ad_reply_raw: safeEvent('legacy-v1').external_ad_reply_raw,
+    };
+    await writeFile(
+      path.join(rootDir, `${event.event_id}.json`),
+      JSON.stringify(wrapper),
+      { mode: 0o600 },
+    );
+    await assert.rejects(spool.read(event.event_id), /record|event/i);
+  });
+});
+
+test('quarantine is private, conflict-safe, and purged with events', async () => {
+  await withSpool(async ({ rootDir, spool, setNow }) => {
+    const event = safeEvent('quarantine');
+    await spool.quarantine({
+      event_id: event.event_id,
+      captured_at: CAPTURED_AT,
+      reason: 'raw_depth',
+      external_ad_reply_raw: event.external_ad_reply_raw,
+    });
+    const quarantineDir = path.join(rootDir, 'quarantine');
+    const target = path.join(quarantineDir, `${event.event_id}.json`);
+    const record = JSON.parse(await readFile(target, 'utf8'));
+
+    assert.equal((await lstat(quarantineDir)).mode & 0o777, 0o700);
+    assert.equal((await lstat(target)).mode & 0o777, 0o600);
+    assert.deepEqual(record, {
+      quarantine_version: 1,
+      event_id: event.event_id,
+      captured_at: CAPTURED_AT,
+      reason: 'raw_depth',
+      external_ad_reply_raw: event.external_ad_reply_raw,
+    });
+    await assert.rejects(
+      spool.quarantine({ ...record, reason: 'raw_size' }),
+      /conflict/i,
+    );
+
+    setNow(CAPTURED_AT + 72 * 60 * 60 + 1);
+    assert.deepEqual(await spool.purgeOlderThan(CAPTURED_AT + 1), {
+      events: 0,
+      quarantine: 1,
+    });
+    assert.deepEqual(await readdir(quarantineDir), []);
+  });
+});
+
+test('quarantine publication is atomic and leaves no temporary file', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent('quarantine-atomic');
+    const quarantineDir = path.join(rootDir, 'quarantine');
+    const target = path.join(quarantineDir, `${event.event_id}.json`);
+
+    await withSynchronizedPublications(1, async ({ release, waitForPublications }) => {
+      const publication = spool.quarantine({
+        event_id: event.event_id,
+        captured_at: CAPTURED_AT,
+        reason: 'raw_size',
+        external_ad_reply_raw: event.external_ad_reply_raw,
+      });
+      await waitForPublications(1);
+      await assert.rejects(readFile(target), (error) => error?.code === 'ENOENT');
+      await release();
+      assert.deepEqual(await publication, {
+        event_id: event.event_id,
+        duplicate: false,
+      });
+    });
+
+    assert.deepEqual(await readdir(quarantineDir), [`${event.event_id}.json`]);
+  });
+});
+
+test('quarantine enforces its complete record byte limit', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent('quarantine-limit');
+    await assert.rejects(
+      spool.quarantine({
+        event_id: event.event_id,
+        captured_at: CAPTURED_AT,
+        reason: 'raw_size',
+        external_ad_reply_raw: { sourceId: 'x'.repeat(180) },
+      }),
+      /quarantine record/i,
+    );
+    assert.deepEqual(await readdir(rootDir).catch(() => []), []);
+  }, CAPTURED_AT + 10, {
+    rawLimits: { maxBytes: 32, maxDepth: 32, maxNodes: 10_000 },
+    quarantineMaxBytes: 256,
+  });
+});
+
+test('quarantine rejects a symlink directory and symlink record target', async () => {
+  await withSpool(async ({ rootDir, spool, testRoot }) => {
+    await spool.list();
+    const outsideDir = path.join(testRoot, 'outside-quarantine');
+    await mkdir(outsideDir, { mode: 0o700 });
+    await symlink(outsideDir, path.join(rootDir, 'quarantine'));
+
+    const first = safeEvent('quarantine-directory-link');
+    await assert.rejects(
+      spool.quarantine({
+        event_id: first.event_id,
+        captured_at: CAPTURED_AT,
+        reason: 'raw_type',
+      }),
+      /quarantine|symlink/i,
+    );
+    assert.deepEqual(await readdir(outsideDir), []);
+  });
+
+  await withSpool(async ({ rootDir, spool, testRoot }) => {
+    await spool.purgeOlderThan(CAPTURED_AT);
+    const outside = path.join(testRoot, 'outside-record.json');
+    await writeFile(outside, 'outside-stays');
+    const event = safeEvent('quarantine-record-link');
+    const target = path.join(rootDir, 'quarantine', `${event.event_id}.json`);
+    await symlink(outside, target);
+
+    await assert.rejects(
+      spool.quarantine({
+        event_id: event.event_id,
+        captured_at: CAPTURED_AT,
+        reason: 'raw_type',
+      }),
+      /conflict|regular file|symlink/i,
+    );
+    assert.equal(await readFile(outside, 'utf8'), 'outside-stays');
+  });
+});
+
+test('privacy fixture persists only the requested raw attribution subtree', async () => {
   await withSpool(async ({ rootDir, spool }) => {
     const event = safeEvent();
     await spool.put(event);
@@ -190,16 +362,61 @@ test('privacy fixture leaves no raw transport value in any outbox byte', async (
       RAW_LID,
       RAW_PHONE,
       RAW_MESSAGE_ID,
-      RAW_SOURCE_ID,
-      RAW_CTWA_CLID,
-      RAW_SOURCE_URL,
       RAW_PUSH_NAME,
-      'raw-thumbnail-unique',
       'raw-context-tree-unique',
     ]) {
       assert.equal(serialized.includes(raw), false, raw);
     }
+    for (const retained of [
+      RAW_SOURCE_ID,
+      RAW_CTWA_CLID,
+      RAW_SOURCE_URL,
+      'cmF3LXRodW1ibmFpbC11bmlxdWU=',
+    ]) {
+      assert.equal(serialized.includes(retained), true, retained);
+    }
     assert.equal(serialized.includes('RawPushName'), true);
+  });
+});
+
+test('v2 events reject missing companions and invalid encoded raw attribution', async () => {
+  await withSpool(async ({ rootDir, spool }) => {
+    const event = safeEvent('v2-companions');
+    const withoutRaw = { ...event };
+    delete withoutRaw.external_ad_reply_raw;
+    const withoutNormalized = { ...event };
+    delete withoutNormalized.external_ad_reply;
+
+    for (const invalid of [
+      withoutRaw,
+      withoutNormalized,
+      {
+        ...event,
+        external_ad_reply_raw: {
+          $type: 'bytes',
+          encoding: 'hex',
+          data: '00',
+        },
+      },
+    ]) {
+      await assert.rejects(spool.put(invalid), /safe event/i);
+    }
+    await assert.rejects(lstat(rootDir), (error) => error?.code === 'ENOENT');
+
+    const ordinaryWithExternal = {
+      ...event,
+      transport_kind: 'ordinary_inbound',
+      external_ad_reply: {
+        source_type: 'catalog',
+        source_id_present: true,
+        source_id_length: 1,
+        source_id_hmac: 'a'.repeat(64),
+      },
+    };
+    assert.deepEqual(await spool.put(ordinaryWithExternal), {
+      event_id: event.event_id,
+      duplicate: false,
+    });
   });
 });
 
@@ -538,7 +755,10 @@ test('purge uses immutable spooled_at cutoff and replay does not extend retentio
     await spool.put(oldEvent);
 
     const cutoff = CAPTURED_AT + retention + 300 - retention;
-    assert.equal(await spool.purgeOlderThan(cutoff), 1);
+    assert.deepEqual(await spool.purgeOlderThan(cutoff), {
+      events: 1,
+      quarantine: 0,
+    });
     assert.deepEqual(await spool.list(), [newEvent.event_id]);
   });
 });
@@ -552,7 +772,10 @@ test('purge ignores symlinks and non-regular files', async () => {
     await symlink(outside, path.join(rootDir, `${linkedId}.json`));
     await mkdir(path.join(rootDir, `${IDS.eventId('observer-spool-test', 'directory')}.json`));
 
-    assert.equal(await spool.purgeOlderThan(Number.MAX_SAFE_INTEGER), 0);
+    assert.deepEqual(await spool.purgeOlderThan(Number.MAX_SAFE_INTEGER), {
+      events: 0,
+      quarantine: 0,
+    });
     assert.equal(await readFile(outside, 'utf8'), 'outside-stays');
   });
 });

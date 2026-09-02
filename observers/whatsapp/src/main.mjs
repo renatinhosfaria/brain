@@ -9,6 +9,11 @@ import {
   persistLidMapping as defaultPersistLidMapping,
 } from './identity.mjs';
 import { normalizeInboundMessage } from './normalize.mjs';
+import {
+  DEFAULT_RAW_ATTRIBUTION_LIMITS,
+  encodeRawAttribution,
+  RawAttributionError,
+} from './raw-attribution.mjs';
 import { SafeSpool } from './spool.mjs';
 
 const OBSERVER_ROOT = '/var/lib/brain/whatsapp-observer';
@@ -16,6 +21,7 @@ const RETENTION_SECONDS = 72 * 60 * 60;
 const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_RETRY_MAX_MS = 60_000;
 const DEFAULT_RETRY_ATTEMPTS = 6;
+const DEFAULT_QUARANTINE_MAX_BYTES = 32 * 1024 * 1024;
 
 function requiredText(value, name) {
   if (
@@ -90,6 +96,31 @@ export function loadObserverConfig(env = process.env) {
   ) {
     throw new TypeError('BRAIN_URL must use localhost HTTP');
   }
+  const quarantineMaxBytes = integerSetting(
+    env.BRAIN_CTWA_QUARANTINE_MAX_BYTES ?? String(DEFAULT_QUARANTINE_MAX_BYTES),
+    'BRAIN_CTWA_QUARANTINE_MAX_BYTES',
+    { minimum: 1, maximum: DEFAULT_QUARANTINE_MAX_BYTES },
+  );
+  const rawLimits = {
+    maxBytes: integerSetting(
+      env.BRAIN_CTWA_RAW_MAX_BYTES ??
+        String(DEFAULT_RAW_ATTRIBUTION_LIMITS.maxBytes),
+      'BRAIN_CTWA_RAW_MAX_BYTES',
+      { minimum: 1, maximum: quarantineMaxBytes },
+    ),
+    maxDepth: integerSetting(
+      env.BRAIN_CTWA_RAW_MAX_DEPTH ??
+        String(DEFAULT_RAW_ATTRIBUTION_LIMITS.maxDepth),
+      'BRAIN_CTWA_RAW_MAX_DEPTH',
+      { minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    ),
+    maxNodes: integerSetting(
+      env.BRAIN_CTWA_RAW_MAX_NODES ??
+        String(DEFAULT_RAW_ATTRIBUTION_LIMITS.maxNodes),
+      'BRAIN_CTWA_RAW_MAX_NODES',
+      { minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    ),
+  };
   return {
     brainUrl,
     deviceId: requiredText(
@@ -103,6 +134,8 @@ export function loadObserverConfig(env = process.env) {
       'BRAIN_OBSERVER_TOKEN',
     ),
     outboxDir,
+    quarantineMaxBytes,
+    rawLimits,
     sessionDir,
     transportSecret: decodeTransportSecret(env.BRAIN_TRANSPORT_HMAC_SECRET),
   };
@@ -231,7 +264,7 @@ function validateRuntimeOptions(options) {
   }
   for (const [objectName, methods] of [
     ['authState', ['saveCreds']],
-    ['spool', ['put', 'list', 'read', 'ack', 'expireDisplayNames', 'purgeOlderThan']],
+    ['spool', ['put', 'quarantine', 'list', 'read', 'ack', 'expireDisplayNames', 'purgeOlderThan']],
     ['client', ['ingest']],
     [
       'healthState',
@@ -241,6 +274,7 @@ function validateRuntimeOptions(options) {
         'setFatal',
         'incrementUnresolvedIdentity',
         'incrementPermanentFailure',
+        'incrementRawCaptureFailure',
         'addPurgedEvents',
       ],
     ],
@@ -275,6 +309,8 @@ export async function runObserver({
   disconnectReasons,
   now,
   sleep,
+  rawLimits = DEFAULT_RAW_ATTRIBUTION_LIMITS,
+  quarantineMaxBytes = DEFAULT_QUARANTINE_MAX_BYTES,
   retryBaseMs = DEFAULT_RETRY_BASE_MS,
   retryMaxMs = DEFAULT_RETRY_MAX_MS,
   retryMaxAttempts = DEFAULT_RETRY_ATTEMPTS,
@@ -315,6 +351,22 @@ export async function runObserver({
     reconnectMaxAttempts,
     'reconnectMaxAttempts',
     { minimum: 0, maximum: 100 },
+  );
+  let checkedRawLimits;
+  try {
+    encodeRawAttribution(null, rawLimits);
+    checkedRawLimits = {
+      maxBytes: rawLimits.maxBytes,
+      maxDepth: rawLimits.maxDepth,
+      maxNodes: rawLimits.maxNodes,
+    };
+  } catch {
+    throw new TypeError('observer raw attribution limits are invalid');
+  }
+  const quarantineMaximum = integerSetting(
+    quarantineMaxBytes,
+    'quarantineMaxBytes',
+    { minimum: checkedRawLimits.maxBytes, maximum: DEFAULT_QUARANTINE_MAX_BYTES },
   );
   const reasons = disconnectReasons ?? {};
   const fatalReasons = new Set([
@@ -393,7 +445,7 @@ export async function runObserver({
     }
     await spool.expireDisplayNames(current);
     const purged = await spool.purgeOlderThan(current - RETENTION_SECONDS);
-    healthState.addPurgedEvents(purged);
+    healthState.addPurgedEvents(purged.events);
     const eventIds = await spool.list();
     const pending = [];
     for (const eventId of eventIds) {
@@ -463,10 +515,66 @@ export async function runObserver({
       const mapping = await persistLidMapping(observerSessionDir, evidence);
       mappingStatus = mapping?.status ?? 'retryable';
     }
-    const safeEvent = normalize(message, now(), ids, observerDeviceId);
+    const capturedAt = now();
+    let safeEvent;
+    try {
+      safeEvent = normalize(
+        message,
+        capturedAt,
+        ids,
+        observerDeviceId,
+        checkedRawLimits,
+      );
+    } catch (error) {
+      if (!(error instanceof RawAttributionError)) {
+        throw error;
+      }
+      const eventId = ids.eventId(observerDeviceId, message.key.id);
+      let externalAdReplyRaw = null;
+      try {
+        const externalAdReply =
+          message.message?.extendedTextMessage?.contextInfo?.externalAdReply;
+        if (externalAdReply !== undefined) {
+          const encoded = encodeRawAttribution(externalAdReply, {
+            ...checkedRawLimits,
+            maxBytes: quarantineMaximum,
+          }).value;
+          const candidateRecord = {
+            quarantine_version: 1,
+            event_id: eventId,
+            captured_at: capturedAt,
+            reason: error.code,
+            external_ad_reply_raw: encoded,
+          };
+          if (
+            Buffer.byteLength(JSON.stringify(candidateRecord), 'utf8') <=
+            quarantineMaximum
+          ) {
+            externalAdReplyRaw = encoded;
+          }
+        }
+      } catch (quarantineError) {
+        if (!(quarantineError instanceof RawAttributionError)) {
+          throw quarantineError;
+        }
+      }
+      await spool.quarantine({
+        event_id: eventId,
+        captured_at: capturedAt,
+        reason: error.code,
+        external_ad_reply_raw: externalAdReplyRaw,
+      });
+      healthState.incrementRawCaptureFailure();
+      logFailure('raw_attribution_capture_failed', {
+        name: 'RawAttributionError',
+        message: error.code,
+      });
+      return;
+    }
     if (safeEvent === null) {
       return;
     }
+    safeEvent = { ...safeEvent, observer_event_version: 2 };
     if (
       mappingStatus !== null &&
       !['written', 'unchanged'].includes(mappingStatus)
@@ -666,7 +774,10 @@ export async function bootstrapObserver(env = process.env) {
   const qrModule = await import('qrcode-terminal');
   const auth = await baileys.useMultiFileAuthState(config.sessionDir);
   const ids = new TransportIds(config.transportSecret);
-  const spool = new SafeSpool(config.outboxDir);
+  const spool = new SafeSpool(config.outboxDir, {
+    quarantineMaxBytes: config.quarantineMaxBytes,
+    rawLimits: config.rawLimits,
+  });
   const client = new BrainClient({
     baseUrl: config.brainUrl,
     token: config.observerToken,
@@ -697,6 +808,8 @@ export async function bootstrapObserver(env = process.env) {
     observerSessionDir: config.sessionDir,
     persistLidMapping: defaultPersistLidMapping,
     renderQr: (value) => qr.generate(value, { small: true }),
+    rawLimits: config.rawLimits,
+    quarantineMaxBytes: config.quarantineMaxBytes,
     sleep: abortableDelay,
     spool,
   });

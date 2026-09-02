@@ -16,21 +16,39 @@ const TOKEN = 'observer-token-must-never-leak';
 const RAW_PAYLOAD_MARKER = 'payload-marker-must-never-leak';
 
 function safeEvent(messageId = 'brain-client-message') {
-  return normalizeInboundMessage(
-    {
-      key: {
-        id: messageId,
-        remoteJid: '15551234567@s.whatsapp.net',
-        fromMe: false,
+  return {
+    ...normalizeInboundMessage(
+      {
+        key: {
+          id: messageId,
+          remoteJid: '15551234567@s.whatsapp.net',
+          fromMe: false,
+        },
+        messageTimestamp: 2_000_000_000,
+        pushName: RAW_PAYLOAD_MARKER,
+        message: { conversation: 'synthetic body' },
       },
-      messageTimestamp: 2_000_000_000,
-      pushName: RAW_PAYLOAD_MARKER,
-      message: { conversation: 'synthetic body' },
+      2_000_000_001,
+      IDS,
+      'observer-client-test',
+    ),
+    observer_event_version: 2,
+  };
+}
+
+function rawSafeEvent(messageId = 'brain-client-raw-message') {
+  const event = safeEvent(messageId);
+  return {
+    ...event,
+    external_ad_reply: {
+      source_type: 'ad',
+      source_id_present: true,
+      source_id_length: 1,
+      source_id_hmac: 'a'.repeat(64),
     },
-    2_000_000_001,
-    IDS,
-    'observer-client-test',
-  );
+    external_ad_reply_raw: { sourceType: 'ad', sourceId: 'raw-preserved' },
+    transport_kind: 'ctwa_candidate',
+  };
 }
 
 async function withServer(handler, callback) {
@@ -103,6 +121,98 @@ test('POST uses exact route, bearer token, JSON content type, and exact safe bod
       event_id: event.event_id,
       duplicate: false,
     });
+  });
+});
+
+test('v2 raw attribution passes through byte-for-byte as validated', async () => {
+  const event = rawSafeEvent();
+  await withServer(async (request, response) => {
+    const received = JSON.parse(await requestBody(request));
+    assert.deepEqual(received.external_ad_reply_raw, event.external_ad_reply_raw);
+    jsonResponse(response, 200, {
+      status: 'ok',
+      event_id: event.event_id,
+      duplicate: false,
+    });
+  }, async (baseUrl) => {
+    const client = new BrainClient({ baseUrl, token: TOKEN, timeoutMs: 1_000 });
+    await client.ingest(event);
+  });
+});
+
+test('default request maximum accepts a raw event larger than the legacy limit', async () => {
+  const event = rawSafeEvent('client-expanded-default');
+  event.external_ad_reply_raw.unknownFutureField = 'x'.repeat(20_000);
+  await withServer(async (request, response) => {
+    const received = JSON.parse(await requestBody(request));
+    assert.equal(received.external_ad_reply_raw.unknownFutureField.length, 20_000);
+    jsonResponse(response, 200, {
+      status: 'ok',
+      event_id: event.event_id,
+      duplicate: false,
+    });
+  }, async (baseUrl) => {
+    const client = new BrainClient({ baseUrl, token: TOKEN, timeoutMs: 1_000 });
+    await client.ingest(event);
+  });
+});
+
+test('request maximum is injectable and reports a non-sensitive error', async () => {
+  const event = rawSafeEvent('client-over-limit');
+  const client = new BrainClient({
+    baseUrl: 'http://127.0.0.1:1',
+    token: TOKEN,
+    timeoutMs: 1_000,
+    maxRequestBytes: 1,
+  });
+  await assert.rejects(client.ingest(event), (error) => {
+    assert.equal(error instanceof TypeError, true);
+    assert.match(error.message, /payload/i);
+    assert.equal(error.message.includes('raw-preserved'), false);
+    assert.equal(error.message.includes(TOKEN), false);
+    return true;
+  });
+});
+
+test('invalid raw attribution and missing v2 companions are rejected before HTTP', async () => {
+  const event = rawSafeEvent('client-invalid-raw');
+  let requests = 0;
+  await withServer((_request, response) => {
+    requests += 1;
+    response.end();
+  }, async (baseUrl) => {
+    const client = new BrainClient({ baseUrl, token: TOKEN, timeoutMs: 1_000 });
+    const missingRaw = { ...event };
+    delete missingRaw.external_ad_reply_raw;
+    const malformedRaw = {
+      ...event,
+      external_ad_reply_raw: {
+        $type: 'bytes',
+        encoding: 'hex',
+        data: '00',
+      },
+    };
+    for (const invalid of [missingRaw, malformedRaw]) {
+      await assert.rejects(client.ingest(invalid), /event payload/i);
+    }
+    assert.equal(requests, 0);
+  });
+});
+
+test('legacy v1 events without a version or raw companion remain deliverable', async () => {
+  const event = rawSafeEvent('client-legacy-v1');
+  delete event.observer_event_version;
+  delete event.external_ad_reply_raw;
+  await withServer(async (request, response) => {
+    assert.deepEqual(JSON.parse(await requestBody(request)), event);
+    jsonResponse(response, 200, {
+      status: 'ok',
+      event_id: event.event_id,
+      duplicate: false,
+    });
+  }, async (baseUrl) => {
+    const client = new BrainClient({ baseUrl, token: TOKEN, timeoutMs: 1_000 });
+    await client.ingest(event);
   });
 });
 
@@ -317,6 +427,18 @@ test('timeout configuration is bounded and URL resolution cannot be changed by e
       }),
     /URL/i,
   );
+  for (const maxRequestBytes of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () =>
+        new BrainClient({
+          baseUrl: 'http://127.0.0.1:7777',
+          token: TOKEN,
+          timeoutMs: 1_000,
+          maxRequestBytes,
+        }),
+      /request|payload|bytes/i,
+    );
+  }
 });
 
 test('ingest performs one attempt only and does not implement an internal retry loop', async () => {

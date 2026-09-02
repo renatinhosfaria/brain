@@ -73,6 +73,7 @@ test('GET /health returns stable JSON and another path is 404', async () => {
       outbox_oldest_age_seconds: 0,
       unresolved_identity_count: 0,
       permanent_failure_count: 0,
+      raw_capture_failure_count: 0,
       purged_event_count: 0,
     });
 
@@ -98,6 +99,7 @@ test('pending safe events degrade health and expose only aggregate metrics', asy
   state.incrementUnresolvedIdentity();
   state.addPurgedEvents(2);
   state.incrementPermanentFailure();
+  state.incrementRawCaptureFailure();
 
   await withServer(state, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/health`);
@@ -109,6 +111,7 @@ test('pending safe events degrade health and expose only aggregate metrics', asy
     assert.equal(payload.outbox_oldest_age_seconds, 300);
     assert.equal(payload.unresolved_identity_count, 1);
     assert.equal(payload.permanent_failure_count, 1);
+    assert.equal(payload.raw_capture_failure_count, 1);
     assert.equal(payload.purged_event_count, 2);
     for (const marker of RAW_MARKERS) {
       assert.equal(body.includes(marker), false, marker);

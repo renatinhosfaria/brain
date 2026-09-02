@@ -1,8 +1,11 @@
+import { validateEncodedRawAttribution } from './raw-attribution.mjs';
+
 const EVENT_ID = /^waevt_[0-9a-f]{64}$/;
 const ROUTE = '/internal/transport/events';
 const MAX_TIMEOUT_MS = 60_000;
-const MAX_REQUEST_BYTES = 16_384;
+const DEFAULT_MAX_REQUEST_BYTES = 5 * 1024 * 1024;
 const EVENT_FIELDS = new Set([
+  'observer_event_version',
   'event_id',
   'observer_device_id',
   'received_at',
@@ -15,6 +18,7 @@ const EVENT_FIELDS = new Set([
   'native_type',
   'transport_kind',
   'external_ad_reply',
+  'external_ad_reply_raw',
 ]);
 const EXTERNAL_FIELDS = new Set([
   'source_type',
@@ -52,7 +56,11 @@ export class BrainClientError extends Error {
   }
 }
 
-function requestPayload(safeEvent) {
+function invalidPayload() {
+  throw new TypeError('Brain event payload is invalid');
+}
+
+function requestPayload(safeEvent, maximumBytes) {
   if (
     safeEvent === null ||
     typeof safeEvent !== 'object' ||
@@ -70,19 +78,44 @@ function requestPayload(safeEvent) {
           (field) => !EXTERNAL_FIELDS.has(field),
         )))
   ) {
-    throw new TypeError('Brain event payload is invalid');
+    invalidPayload();
+  }
+  const isV2 = safeEvent.observer_event_version === 2;
+  const hasVersion = Object.hasOwn(safeEvent, 'observer_event_version');
+  const hasExternal = Object.hasOwn(safeEvent, 'external_ad_reply');
+  const hasRaw = Object.hasOwn(safeEvent, 'external_ad_reply_raw');
+  if (
+    (hasVersion && !isV2) ||
+    (!isV2 && hasRaw) ||
+    (isV2 && hasExternal !== hasRaw)
+  ) {
+    invalidPayload();
+  }
+  if (hasRaw) {
+    try {
+      const rawDescriptor = Object.getOwnPropertyDescriptor(
+        safeEvent,
+        'external_ad_reply_raw',
+      );
+      if (rawDescriptor === undefined || !('value' in rawDescriptor)) {
+        invalidPayload();
+      }
+      validateEncodedRawAttribution(rawDescriptor.value);
+    } catch {
+      invalidPayload();
+    }
   }
   let body;
   try {
     body = JSON.stringify(safeEvent);
   } catch {
-    throw new TypeError('Brain event payload is invalid');
+    invalidPayload();
   }
-  if (
-    typeof body !== 'string' ||
-    Buffer.byteLength(body, 'utf8') > MAX_REQUEST_BYTES
-  ) {
-    throw new TypeError('Brain event payload is invalid');
+  if (typeof body !== 'string') {
+    invalidPayload();
+  }
+  if (Buffer.byteLength(body, 'utf8') > maximumBytes) {
+    throw new TypeError('Brain event payload exceeds request size limit');
   }
   return body;
 }
@@ -109,10 +142,17 @@ function retryableStatus(status) {
 export class BrainClient {
   #endpoint;
   #fetch;
+  #maxRequestBytes;
   #timeoutMs;
   #token;
 
-  constructor({ baseUrl, token, timeoutMs, fetchImpl = globalThis.fetch }) {
+  constructor({
+    baseUrl,
+    token,
+    timeoutMs,
+    fetchImpl = globalThis.fetch,
+    maxRequestBytes = DEFAULT_MAX_REQUEST_BYTES,
+  }) {
     let parsed;
     try {
       parsed = new URL(baseUrl);
@@ -147,14 +187,18 @@ export class BrainClient {
     if (typeof fetchImpl !== 'function') {
       throw new TypeError('Brain fetch implementation is invalid');
     }
+    if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes <= 0) {
+      throw new TypeError('Brain request size limit is invalid');
+    }
     this.#endpoint = new URL(ROUTE, parsed);
     this.#fetch = fetchImpl;
+    this.#maxRequestBytes = maxRequestBytes;
     this.#timeoutMs = timeoutMs;
     this.#token = token;
   }
 
   async ingest(safeEvent) {
-    const body = requestPayload(safeEvent);
+    const body = requestPayload(safeEvent, this.#maxRequestBytes);
     const eventId = safeEvent.event_id;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);

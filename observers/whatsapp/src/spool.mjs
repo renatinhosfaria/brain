@@ -12,6 +12,10 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  DEFAULT_RAW_ATTRIBUTION_LIMITS,
+  validateEncodedRawAttribution,
+} from './raw-attribution.mjs';
 
 const EVENT_ID = /^waevt_[0-9a-f]{64}$/;
 const EVENT_FILE = /^(waevt_[0-9a-f]{64})\.json$/;
@@ -31,6 +35,8 @@ const TOP_LEVEL_FIELDS = new Set([
   'native_type',
   'transport_kind',
   'external_ad_reply',
+  'external_ad_reply_raw',
+  'observer_event_version',
 ]);
 const REQUIRED_FIELDS = [
   'event_id',
@@ -64,10 +70,20 @@ const WRAPPER_FIELDS = new Set([
   'display_name_expires_at',
   'event',
 ]);
+const QUARANTINE_FIELDS = new Set([
+  'quarantine_version',
+  'event_id',
+  'captured_at',
+  'reason',
+  'external_ad_reply_raw',
+]);
 const DISPLAY_NAME_TTL_SECONDS = 24 * 60 * 60;
 const MAX_SAFE_LENGTH = 10_000_000;
-const MAX_EVENT_BYTES = 16_384;
-const MAX_RECORD_BYTES = 32_768;
+const MAX_EVENT_BYTES = 5 * 1024 * 1024;
+const MAX_RECORD_BYTES = MAX_EVENT_BYTES + 65_536;
+const DEFAULT_QUARANTINE_MAX_BYTES = 32 * 1024 * 1024;
+const QUARANTINE_DIRECTORY = 'quarantine';
+const QUARANTINE_REASON = /^[a-z][a-z0-9_]{0,63}$/;
 
 function invalidSafeEvent() {
   throw new TypeError('safe event is invalid');
@@ -180,7 +196,14 @@ function expectedTransportKind(external) {
     : 'ordinary_inbound';
 }
 
-function validateSafeEvent(input) {
+function validateSafeEvent(input, rawLimits, { requireV2 = false } = {}) {
+  try {
+    if (isObject(input) && Object.hasOwn(input, 'external_ad_reply_raw')) {
+      validateEncodedRawAttribution(input.external_ad_reply_raw, rawLimits);
+    }
+  } catch {
+    invalidSafeEvent();
+  }
   let event;
   try {
     event = structuredClone(input);
@@ -227,12 +250,34 @@ function validateSafeEvent(input) {
   ) {
     invalidSafeEvent();
   }
+  const isV2 = event.observer_event_version === 2;
+  if (
+    (Object.hasOwn(event, 'observer_event_version') && !isV2) ||
+    (requireV2 && !isV2)
+  ) {
+    invalidSafeEvent();
+  }
+  const hasExternal = Object.hasOwn(event, 'external_ad_reply');
+  const hasRaw = Object.hasOwn(event, 'external_ad_reply_raw');
+  if (!isV2 && hasRaw) {
+    invalidSafeEvent();
+  }
+  if (isV2 && hasExternal !== hasRaw) {
+    invalidSafeEvent();
+  }
   let external;
-  if (Object.hasOwn(event, 'external_ad_reply')) {
+  if (hasExternal) {
     if (event.external_ad_reply === null) {
       invalidSafeEvent();
     }
     external = validateExternal(event.external_ad_reply);
+  }
+  if (hasRaw) {
+    try {
+      validateEncodedRawAttribution(event.external_ad_reply_raw, rawLimits);
+    } catch {
+      invalidSafeEvent();
+    }
   }
   if (event.transport_kind !== expectedTransportKind(external)) {
     invalidSafeEvent();
@@ -256,19 +301,24 @@ function withoutDisplayName(event) {
   return copy;
 }
 
-function validateWrapper(input) {
+function validateWrapper(input, rawLimits) {
   if (
     !isObject(input) ||
     !exactKeys(input, WRAPPER_FIELDS) ||
     Object.keys(input).length !== WRAPPER_FIELDS.size ||
-    input.spool_version !== 1 ||
+    ![1, 2].includes(input.spool_version) ||
     !finitePositive(input.spooled_at) ||
     (input.display_name_expires_at !== null &&
       !finitePositive(input.display_name_expires_at))
   ) {
     throw new Error('spool record is invalid');
   }
-  const event = validateSafeEvent(input.event);
+  const event = validateSafeEvent(input.event, rawLimits, {
+    requireV2: input.spool_version === 2,
+  });
+  if (input.spool_version === 1 && Object.hasOwn(event, 'observer_event_version')) {
+    throw new Error('spool record is invalid');
+  }
   const hasDisplay = typeof event.display_name === 'string';
   if (
     hasDisplay !== (input.display_name_expires_at !== null) ||
@@ -279,11 +329,55 @@ function validateWrapper(input) {
     throw new Error('spool record is invalid');
   }
   return {
-    spool_version: 1,
+    spool_version: input.spool_version,
     spooled_at: input.spooled_at,
     display_name_expires_at: input.display_name_expires_at,
     event,
   };
+}
+
+function validateQuarantineRecord(input, rawLimits, maximumBytes) {
+  try {
+    if (
+      isObject(input) &&
+      input.external_ad_reply_raw !== null
+    ) {
+      validateEncodedRawAttribution(input.external_ad_reply_raw, rawLimits);
+    }
+  } catch {
+    throw new TypeError('quarantine record is invalid');
+  }
+  let record;
+  try {
+    record = structuredClone(input);
+  } catch {
+    throw new TypeError('quarantine record is invalid');
+  }
+  if (
+    !isObject(record) ||
+    !exactKeys(record, QUARANTINE_FIELDS) ||
+    Object.keys(record).length !== QUARANTINE_FIELDS.size ||
+    record.quarantine_version !== 1 ||
+    typeof record.event_id !== 'string' ||
+    !EVENT_ID.test(record.event_id) ||
+    !finitePositive(record.captured_at) ||
+    typeof record.reason !== 'string' ||
+    !QUARANTINE_REASON.test(record.reason) ||
+    !Object.hasOwn(record, 'external_ad_reply_raw')
+  ) {
+    throw new TypeError('quarantine record is invalid');
+  }
+  if (record.external_ad_reply_raw !== null) {
+    try {
+      validateEncodedRawAttribution(record.external_ad_reply_raw, rawLimits);
+    } catch {
+      throw new TypeError('quarantine record is invalid');
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(record), 'utf8') > maximumBytes) {
+    throw new TypeError('quarantine record is invalid');
+  }
+  return record;
 }
 
 async function syncDirectory(rootDir) {
@@ -302,9 +396,19 @@ async function syncDirectory(rootDir) {
 
 export class SafeSpool {
   #now;
+  #quarantineMaxBytes;
+  #quarantineLimits;
   #rootDir;
+  #rawLimits;
 
-  constructor(rootDir, { now = () => Date.now() / 1000 } = {}) {
+  constructor(
+    rootDir,
+    {
+      now = () => Date.now() / 1000,
+      rawLimits = DEFAULT_RAW_ATTRIBUTION_LIMITS,
+      quarantineMaxBytes = DEFAULT_QUARANTINE_MAX_BYTES,
+    } = {},
+  ) {
     if (
       typeof rootDir !== 'string' ||
       !path.isAbsolute(rootDir) ||
@@ -316,6 +420,25 @@ export class SafeSpool {
     }
     this.#rootDir = rootDir;
     this.#now = now;
+    try {
+      validateEncodedRawAttribution(null, rawLimits);
+    } catch {
+      throw new TypeError('raw attribution limits are invalid');
+    }
+    if (
+      !Number.isSafeInteger(quarantineMaxBytes) ||
+      quarantineMaxBytes < rawLimits.maxBytes ||
+      quarantineMaxBytes > DEFAULT_QUARANTINE_MAX_BYTES
+    ) {
+      throw new TypeError('quarantine size limit is invalid');
+    }
+    this.#rawLimits = {
+      maxBytes: rawLimits.maxBytes,
+      maxDepth: rawLimits.maxDepth,
+      maxNodes: rawLimits.maxNodes,
+    };
+    this.#quarantineMaxBytes = quarantineMaxBytes;
+    this.#quarantineLimits = { ...this.#rawLimits, maxBytes: quarantineMaxBytes };
   }
 
   #clock() {
@@ -345,14 +468,40 @@ export class SafeSpool {
     await chmod(this.#rootDir, 0o700);
   }
 
-  #target(eventId) {
-    return path.join(this.#rootDir, `${validateEventId(eventId)}.json`);
+  #quarantineDir() {
+    return path.join(this.#rootDir, QUARANTINE_DIRECTORY);
   }
 
-  async #atomicWrite(eventId, wrapper, replaceExisting) {
-    const target = this.#target(eventId);
+  async #ensureQuarantineRoot() {
+    await this.#ensureRoot();
+    const quarantineDir = this.#quarantineDir();
+    try {
+      const metadata = await lstat(quarantineDir);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error('quarantine root must be a real directory, not a symlink');
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw error;
+      }
+      await mkdir(quarantineDir, { mode: 0o700 });
+      const metadata = await lstat(quarantineDir);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error('quarantine root creation is unsafe');
+      }
+    }
+    await chmod(quarantineDir, 0o700);
+    return quarantineDir;
+  }
+
+  #target(eventId, directory = this.#rootDir) {
+    return path.join(directory, `${validateEventId(eventId)}.json`);
+  }
+
+  async #atomicWrite(directory, eventId, wrapper, replaceExisting) {
+    const target = this.#target(eventId, directory);
     const temp = path.join(
-      this.#rootDir,
+      directory,
       `.${eventId}.${randomBytes(12).toString('hex')}.tmp`,
     );
     let handle;
@@ -394,25 +543,30 @@ export class SafeSpool {
         }
       }
       if (syncNeeded) {
-        await syncDirectory(this.#rootDir);
+        await syncDirectory(directory);
       }
     }
   }
 
-  async #readRecord(eventId) {
-    const target = this.#target(eventId);
+  async #readRecord(eventId, {
+    directory = this.#rootDir,
+    maximumBytes = MAX_RECORD_BYTES,
+    validate = (value) => validateWrapper(value, this.#rawLimits),
+    unavailable = 'spool record is unavailable',
+  } = {}) {
+    const target = this.#target(eventId, directory);
     let handle;
     try {
       const metadata = await lstat(target);
       if (metadata.isSymbolicLink() || !metadata.isFile()) {
         throw new Error('spool record is not a regular file or is a symlink');
       }
-      if (metadata.size > MAX_RECORD_BYTES) {
+      if (metadata.size > maximumBytes) {
         throw new Error('spool record is too large');
       }
       handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
       const opened = await handle.stat();
-      if (!opened.isFile() || opened.size > MAX_RECORD_BYTES) {
+      if (!opened.isFile() || opened.size > maximumBytes) {
         throw new Error('spool record is not a regular file');
       }
       const raw = await handle.readFile();
@@ -422,14 +576,14 @@ export class SafeSpool {
       } catch {
         throw new Error('spool record JSON is invalid');
       }
-      const wrapper = validateWrapper(parsed);
-      if (wrapper.event.event_id !== eventId) {
+      const wrapper = validate(parsed);
+      if (wrapper.event_id !== undefined ? wrapper.event_id !== eventId : wrapper.event.event_id !== eventId) {
         throw new Error('spool record event_id is invalid');
       }
       return wrapper;
     } catch (error) {
       if (error?.code === 'ENOENT') {
-        throw new Error('spool record is unavailable');
+        throw new Error(unavailable);
       }
       throw error;
     } finally {
@@ -437,8 +591,62 @@ export class SafeSpool {
     }
   }
 
+  async #readQuarantineRecord(eventId, quarantineDir = this.#quarantineDir()) {
+    return this.#readRecord(eventId, {
+      directory: quarantineDir,
+      maximumBytes: this.#quarantineMaxBytes,
+      validate: (value) => validateQuarantineRecord(
+        value,
+        this.#quarantineLimits,
+        this.#quarantineMaxBytes,
+      ),
+      unavailable: 'quarantine record is unavailable',
+    });
+  }
+
+  async #publishQuarantineAtomically(record) {
+    const quarantineDir = await this.#ensureQuarantineRoot();
+    const target = this.#target(record.event_id, quarantineDir);
+    try {
+      const metadata = await lstat(target);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new Error('event_id conflicts with a non-regular quarantine record');
+      }
+      const existing = await this.#readQuarantineRecord(
+        record.event_id,
+        quarantineDir,
+      );
+      if (!isDeepStrictEqual(existing, record)) {
+        throw new Error('event_id conflicts with an existing quarantine record');
+      }
+      return { event_id: record.event_id, duplicate: true };
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw error;
+      }
+    }
+
+    if (await this.#atomicWrite(
+      quarantineDir,
+      record.event_id,
+      record,
+      false,
+    )) {
+      return { event_id: record.event_id, duplicate: false };
+    }
+
+    const existing = await this.#readQuarantineRecord(
+      record.event_id,
+      quarantineDir,
+    );
+    if (!isDeepStrictEqual(existing, record)) {
+      throw new Error('event_id conflicts with an existing quarantine record');
+    }
+    return { event_id: record.event_id, duplicate: true };
+  }
+
   async put(safeEvent) {
-    const event = validateSafeEvent(safeEvent);
+    const event = validateSafeEvent(safeEvent, this.#rawLimits, { requireV2: true });
     await this.#ensureRoot();
     const now = this.#clock();
     const target = this.#target(event.event_id);
@@ -459,6 +667,7 @@ export class SafeSpool {
         existing.display_name_expires_at <= now
       ) {
         await this.#atomicWrite(
+          this.#rootDir,
           event.event_id,
           {
             ...existing,
@@ -485,12 +694,12 @@ export class SafeSpool {
       }
     }
     const wrapper = {
-      spool_version: 1,
+      spool_version: 2,
       spooled_at: now,
       display_name_expires_at: displayExpiry,
       event: storedEvent,
     };
-    if (await this.#atomicWrite(event.event_id, wrapper, false)) {
+    if (await this.#atomicWrite(this.#rootDir, event.event_id, wrapper, false)) {
       return { event_id: event.event_id, duplicate: false };
     }
 
@@ -527,7 +736,7 @@ export class SafeSpool {
         display_name_expires_at: null,
         event: withoutDisplayName(wrapper.event),
       };
-      await this.#atomicWrite(eventId, wrapper, true);
+      await this.#atomicWrite(this.#rootDir, eventId, wrapper, true);
     }
     return structuredClone(wrapper.event);
   }
@@ -552,6 +761,26 @@ export class SafeSpool {
     }
   }
 
+  async quarantine({
+    event_id,
+    captured_at,
+    reason,
+    external_ad_reply_raw = null,
+  }) {
+    const record = validateQuarantineRecord(
+      {
+        quarantine_version: 1,
+        event_id,
+        captured_at,
+        reason,
+        external_ad_reply_raw,
+      },
+      this.#quarantineLimits,
+      this.#quarantineMaxBytes,
+    );
+    return this.#publishQuarantineAtomically(record);
+  }
+
   async expireDisplayNames(now = this.#clock()) {
     if (!finitePositive(now)) {
       throw new TypeError('expiry cutoff is invalid');
@@ -570,6 +799,7 @@ export class SafeSpool {
         wrapper.display_name_expires_at <= now
       ) {
         await this.#atomicWrite(
+          this.#rootDir,
           match[1],
           {
             ...wrapper,
@@ -590,7 +820,7 @@ export class SafeSpool {
     }
     await this.#ensureRoot();
     const entries = await readdir(this.#rootDir, { withFileTypes: true });
-    let purged = 0;
+    let events = 0;
     for (const entry of entries) {
       const match = entry.isFile() ? EVENT_FILE.exec(entry.name) : null;
       if (match === null) {
@@ -599,12 +829,29 @@ export class SafeSpool {
       const wrapper = await this.#readRecord(match[1]);
       if (wrapper.spooled_at < cutoff) {
         await unlink(this.#target(match[1]));
-        purged += 1;
+        events += 1;
       }
     }
-    if (purged > 0) {
+    let quarantine = 0;
+    const quarantineDir = await this.#ensureQuarantineRoot();
+    const quarantineEntries = await readdir(quarantineDir, { withFileTypes: true });
+    for (const entry of quarantineEntries) {
+      const match = entry.isFile() ? EVENT_FILE.exec(entry.name) : null;
+      if (match === null) {
+        continue;
+      }
+      const record = await this.#readQuarantineRecord(match[1], quarantineDir);
+      if (record.captured_at < cutoff) {
+        await unlink(this.#target(match[1], quarantineDir));
+        quarantine += 1;
+      }
+    }
+    if (events > 0) {
       await syncDirectory(this.#rootDir);
     }
-    return purged;
+    if (quarantine > 0) {
+      await syncDirectory(quarantineDir);
+    }
+    return { events, quarantine };
   }
 }
