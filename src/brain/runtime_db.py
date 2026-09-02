@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -175,11 +176,27 @@ class RuntimeDatabase:
         self.path = Path(path)
         self.timeout_seconds = timeout_seconds
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.path), timeout=self.timeout_seconds)
+    @staticmethod
+    def _validated_timeout(timeout_seconds: float) -> float:
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be finite and positive")
+        return float(timeout_seconds)
+
+    def _connect(self, *, timeout_seconds: float | None = None) -> sqlite3.Connection:
+        timeout = (
+            self.timeout_seconds
+            if timeout_seconds is None
+            else self._validated_timeout(timeout_seconds)
+        )
+        conn = sqlite3.connect(str(self.path), timeout=timeout)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute(f"PRAGMA busy_timeout={int(self.timeout_seconds * 1000)}")
+        conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
         return conn
 
     def initialize(self) -> None:
@@ -217,15 +234,25 @@ class RuntimeDatabase:
         finally:
             conn.close()
 
-    def read(self, callback: Callable[[sqlite3.Connection], T]) -> T:
-        conn = self._connect()
+    def read(
+        self,
+        callback: Callable[[sqlite3.Connection], T],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> T:
+        conn = self._connect(timeout_seconds=timeout_seconds)
         try:
             return callback(conn)
         finally:
             conn.close()
 
-    def write(self, callback: Callable[[sqlite3.Connection], T]) -> T:
-        conn = self._connect()
+    def write(
+        self,
+        callback: Callable[[sqlite3.Connection], T],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> T:
+        conn = self._connect(timeout_seconds=timeout_seconds)
         try:
             conn.execute("BEGIN IMMEDIATE")
             try:

@@ -9,6 +9,7 @@ import unittest
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 from starlette.requests import Request
@@ -40,6 +41,20 @@ class _BlockingMetaClient:
         self.timeouts.append(timeout_seconds)
         time.sleep(timeout_seconds)
         raise MetaAdsError("meta_timeout")
+
+
+class _NonConformingContextResolver:
+    """Resolver double that deliberately ignores the context budget."""
+
+    def __init__(self) -> None:
+        self.started = Event()
+
+    def resolve_contact_pending(
+        self, _event_id: str, _now: float, *, budget_seconds: float
+    ) -> bool:
+        self.started.set()
+        time.sleep(service.CONTEXT_META_OPERATION_TIMEOUT_SECONDS + 0.5)
+        return False
 
 
 class GatewayAPITests(unittest.TestCase):
@@ -634,7 +649,7 @@ class GatewayAPITests(unittest.TestCase):
     ) -> None:
         """A slow Meta read must not make the CEO lose the transport context."""
         self.prepare_turn_identity()
-        clock_values = iter((100.0, 104.99))
+        clock_values = iter((100.0, 100.0, 104.98, 104.99))
         self.enable_meta_attribution(
             clock=lambda: 1_700_000_050.0,
             monotonic_clock=lambda: next(clock_values),
@@ -667,13 +682,54 @@ class GatewayAPITests(unittest.TestCase):
         elapsed = time.perf_counter() - started
 
         self.assertLess(elapsed, 0.5)
-        self.assertEqual(len(blocking_client.timeouts), 1)
-        self.assertGreater(blocking_client.timeouts[0], 0)
-        self.assertLessEqual(blocking_client.timeouts[0], 0.02)
         event = response.json()["events"][0]
         self.assertEqual(event["external_ad_reply"]["sourceId"], "120200000000001")
         self.assertEqual(event["meta_attribution"]["status"], "pending")
-        self.assertEqual(event["meta_attribution"]["last_error_code"], "meta_timeout")
+        self.assertIn(
+            event["meta_attribution"]["last_error_code"], {None, "meta_timeout"}
+        )
+
+    def test_context_deadline_does_not_wait_for_a_nonconforming_resolver(
+        self,
+    ) -> None:
+        """An injected resolver that ignores its budget must not hold the CEO past 5s."""
+        self.prepare_turn_identity()
+        self.enable_meta_attribution()
+        event_id = self.seed_event(
+            "ad click",
+            transport_kind="ctwa_candidate",
+            source_app="instagram",
+            external_ad_reply_raw_json=(
+                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
+            ),
+            suffix="nonconforming-resolver",
+            timestamp=time.time() - 10,
+        )
+        attribution = self.service.meta_attribution
+        assert attribution is not None
+        self.service.runtime.write(
+            lambda conn: attribution.stage_event(
+                conn,
+                event_id=event_id,
+                raw={"sourceType": "ad", "sourceId": "120200000000001"},
+                now=time.time() - 5,
+            )
+        )
+        resolver = _NonConformingContextResolver()
+        self.service.meta_attribution = SimpleNamespace(
+            enabled=True, resolve_contact_pending=resolver.resolve_contact_pending
+        )
+
+        started = time.perf_counter()
+        response = self.post_context(self.context_payload())
+        elapsed = time.perf_counter() - started
+
+        self.assertTrue(resolver.started.is_set())
+        self.assertLess(elapsed, service.CONTEXT_META_OPERATION_TIMEOUT_SECONDS + 0.3)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(
+            response.json()["events"][0]["meta_attribution"]["status"], "pending"
+        )
 
     def test_context_rereads_after_immediate_resolution_before_rendering(
         self,

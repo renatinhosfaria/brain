@@ -74,6 +74,17 @@ class RuntimeDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(kept, "event-kept")
 
+    def test_read_accepts_a_narrower_operation_timeout(self) -> None:
+        """A context deadline must not silently use the normal one-second DB wait."""
+        self.initialize()
+
+        value = self.runtime.read(
+            lambda conn: conn.execute("SELECT 1").fetchone()[0],
+            timeout_seconds=0.01,
+        )
+
+        self.assertEqual(value, 1)
+
     def test_initialize_creates_meta_attribution_schema_and_indexes(self) -> None:
         """Removing a durable attribution field must break the runtime contract."""
         self.initialize()

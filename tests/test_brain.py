@@ -492,6 +492,51 @@ class BrainFixture(unittest.TestCase):
         self.assertEqual(health.meta_ads_attribution, "degraded")
         self.assertEqual(health.meta_ads_credential, "valid")
 
+    def test_context_downgrades_null_catalog_name_in_a_confirmed_row(self) -> None:
+        """Stringifying NULL catalog fields would fabricate a named Meta ad."""
+        payload = BrainService._meta_attribution_from_row(
+            {
+                "meta_source_id": "120200000000001",
+                "meta_ctwa_clid": None,
+                "meta_job_source_id": None,
+                "meta_last_attempt_at": None,
+                "meta_last_error_code": None,
+                "meta_status": "confirmed",
+                "meta_match_method": "source_id_exact",
+                "meta_matched_ad_id": "120200000000001",
+                "meta_account_id": "1598606388477916",
+                "catalog_account_id": "1598606388477916",
+                "meta_metadata_complete": 0,
+                "catalog_metadata_complete": 0,
+                "catalog_ad_id": "120200000000001",
+                "catalog_ad_name": None,
+                "catalog_ad_status": None,
+                "catalog_ad_effective_status": None,
+                "catalog_adset_id": None,
+                "catalog_adset_name": None,
+                "catalog_adset_status": None,
+                "catalog_campaign_id": "120400000000001",
+                "catalog_campaign_name": "September",
+                "catalog_campaign_status": None,
+                "catalog_creative_id": None,
+                "catalog_creative_name": None,
+                "catalog_fetched_at": 100.0,
+                "meta_confirmed_at": 101.0,
+            }
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "status": "pending",
+                "source_id": "120200000000001",
+                "ctwa_clid": None,
+                "last_attempt_at": None,
+                "retry_scheduled": False,
+                "last_error_code": "meta_invalid_response",
+            },
+        )
+
     def test_health_runtime_is_unavailable_without_runtime_configuration(self) -> None:
         settings = BrainSettings(
             state_db=self.state_path,
