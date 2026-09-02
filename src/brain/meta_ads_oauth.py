@@ -803,14 +803,26 @@ class MetaAdsOAuth:
     def _decrypt_payload(self) -> dict[str, object]:
         ciphertext = self._read_private_file(self._store_path, _MAX_ENVELOPE_BYTES)
         outer = _strict_json_object(ciphertext)
-        if set(outer) != _ENVELOPE_FIELDS or outer.get("version") not in {1, 2}:
+        outer_version = outer.get("version")
+        if set(outer) != _ENVELOPE_FIELDS or outer_version not in {1, 2}:
             raise TypeError
         nonce = _decode_base64(outer["nonce"])
         encrypted = _decode_base64(outer["ciphertext"])
         if len(nonce) != 12 or not encrypted:
             raise ValueError
         plaintext = AESGCM(self._read_key()).decrypt(nonce, encrypted, _AAD)
-        return _strict_json_object(plaintext)
+        payload = _strict_json_object(plaintext)
+        if outer_version == 1:
+            # Version 1 is decrypted only far enough to identify the old
+            # pre-registered shape; no other v1 content may be interpreted.
+            if payload.get("kind") != "client_configuration":
+                raise ValueError("OAuth legacy envelope payload is invalid")
+            return payload
+        if payload.get("version") != 2:
+            if payload.get("kind") == "client_configuration":
+                return payload
+            raise ValueError("OAuth envelope payload version is invalid")
+        return payload
 
     def _encrypt_and_save(self, payload: Mapping[str, object]) -> None:
         plaintext = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(

@@ -345,6 +345,48 @@ class MetaAdsOAuthTests(unittest.TestCase):
         )
         self.assertEqual(restarted.load_credentials(), credentials)
 
+    def test_v2_payload_with_legacy_outer_header_is_rejected(self) -> None:
+        payload = {
+            "version": 2,
+            "dynamic_client": {
+                "version": 1,
+                "client_id": "dynamic-client-id",
+                "client_secret": None,
+                "registration_access_token": None,
+                "registered_at": 1_700_000_000.0,
+                "expires_at": None,
+                "issuer": META_ADS_MCP_RESOURCE,
+                "resource": META_ADS_MCP_RESOURCE,
+                "redirect_uri": DEFAULT_REDIRECT_URI,
+                "scopes": ["ads_read"],
+            },
+            "credentials": None,
+        }
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(self.key.read_bytes()).encrypt(
+            nonce,
+            json.dumps(payload).encode(),
+            b"brain-meta-ads-oauth-v1",
+        )
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.store.parent, 0o700)
+        self.store.write_bytes(
+            json.dumps(
+                {
+                    "version": 1,
+                    "nonce": base64.urlsafe_b64encode(nonce).decode(),
+                    "ciphertext": base64.urlsafe_b64encode(ciphertext).decode(),
+                }
+            ).encode()
+        )
+        os.chmod(self.store, 0o600)
+        with self.assertRaises(ValueError):
+            self.oauth._decrypt_payload()
+        with self.assertRaisesRegex(OAuthError, "^oauth_credentials_invalid$"):
+            self.oauth.load_registration()
+
     def test_legacy_pre_registered_store_is_rejected(self) -> None:
         self.oauth.save_client_configuration()
         with self.assertRaisesRegex(OAuthError, "^oauth_legacy_store$"):
