@@ -106,6 +106,34 @@ tools = ["conversation_phone"]
         self.assertEqual(settings.ctwa_raw_max_depth, 32)
         self.assertEqual(settings.ctwa_raw_max_nodes, 10_000)
         self.assertEqual(settings.context_response_max_bytes, 32 * 1024 * 1024)
+        self.assertFalse(settings.meta_attribution_enabled)
+        self.assertEqual(settings.meta_ad_account_id, "")
+        self.assertEqual(settings.meta_ads_mcp_access_token, "")
+        self.assertNotIn("fixture-token", repr(settings))
+        self.assertEqual(settings.meta_ads_mcp_timeout_seconds, 4.0)
+        self.assertEqual(settings.meta_ads_mcp_response_max_bytes, 8 * 1024 * 1024)
+        self.assertEqual(settings.meta_ads_sync_interval_seconds, 900)
+        self.assertEqual(settings.meta_ads_full_sync_interval_seconds, 86_400)
+
+    def test_from_env_reads_enabled_meta_settings(self) -> None:
+        config_path = self._write_production_config()
+        with patch.dict(
+            os.environ,
+            {
+                "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                "BRAIN_META_ATTRIBUTION_ENABLED": "true",
+                "BRAIN_META_AD_ACCOUNT_ID": "act_1598606388477916",
+                "BRAIN_META_ADS_MCP_ACCESS_TOKEN": "fixture-token",
+                "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT": "2026-09-02T12:00:00Z",
+            },
+            clear=True,
+        ):
+            settings = BrainSettings.from_env(config_path)
+        self.assertTrue(settings.meta_attribution_enabled)
+        self.assertEqual(settings.meta_ad_account_id, "1598606388477916")
+        self.assertEqual(settings.meta_ads_mcp_access_token, "fixture-token")
+        self.assertNotIn("fixture-token", repr(settings))
+        self.assertEqual(settings.meta_ads_mcp_token_expires_at, 1788350400.0)
 
     def test_from_env_reads_raw_attribution_limits(self) -> None:
         config_path = self._write_production_config()
