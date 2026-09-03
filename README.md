@@ -103,6 +103,22 @@ Follow [`docs/runbook.md`](docs/runbook.md) for installation, live WAL/SHM
 validation, staged rollout and rollback. The unit intentionally does not use
 `ProtectHome=true`.
 
+### Remote Meta Ads MCP rollout
+
+The optional remote Meta Ads MCP is disabled by default. Follow the exact
+rollout and rollback procedure in [`docs/runbook.md`](docs/runbook.md): restrict
+the remote token to `act_1598606388477916`, verify its HTTPS host and
+certificate, install the API key only in root-only `/etc/brain/brain.env`
+(mode `0600`), and run:
+
+```sh
+python scripts/meta_ads_mcp_probe.py
+```
+
+The probe prints only `disabled`, the exact-account readiness line, or a
+bounded error code. It never accepts credentials or URL arguments and never
+prints remote response data.
+
 ## Hermes integration
 
 Use [`deploy/hermes-brain.example.yaml`](deploy/hermes-brain.example.yaml) for

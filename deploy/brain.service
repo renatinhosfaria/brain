@@ -31,6 +31,9 @@ RestrictNamespaces=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # The future whatsapp-observer service is not installed or enabled by this unit.
+# The optional remote Meta MCP remains disabled until the local probe reports
+# the exact account. Run it manually; this unit grants no extra paths or
+# network families beyond the Brain service boundary.
 # ProtectHome=true is intentionally absent: V2 must read /root/.hermes.
 # ProtectSystem=strict is intentionally left for the live WAL/SHM hardening
 # validation described in the PRD; do not enable it without that test. Never

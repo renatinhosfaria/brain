@@ -64,6 +64,33 @@
 
 ## Amendment 3: raw CTWA attribution rollout (2026-09-02)
 
+## Remote Meta Ads MCP rollout and rollback
+
+This optional integration stays disabled by default and uses only the
+existing Brain service boundary. Before enabling it, complete these steps in
+one authorized window:
+
+1. Restrict the remote MCP's Meta token to exactly `act_1598606388477916` and
+   verify the HTTPS certificate and host are the configured endpoint.
+2. Install the Brain API key in the root-only `/etc/brain/brain.env`, owned by
+   root with mode `0600`; never place it in TOML, command arguments, logs, or
+   documentation.
+3. From `/root/brain`, run `python scripts/meta_ads_mcp_probe.py` while
+   `BRAIN_META_ADS_MCP_ENABLED=false`; it must print `disabled`. Set the
+   environment override to `true` only after that check, then run the probe
+   again. It must print only `ready account=act_1598606388477916`.
+4. Restart Brain, verify `/health` reports `ready`, send one known CTWA event,
+   and inspect only the safe `conversation_context({})` fields.
+5. For rollback set `BRAIN_META_ADS_MCP_ENABLED=false` and restart Brain;
+   raw CTWA ingestion and the CEO service continue operating. To rotate the
+   remote key, replace the secret in `/etc/brain/brain.env` and invalidate the
+   in-process session, then rerun the disabled/enabled probe sequence.
+
+The probe has no API-key or URL options and emits no response body, source ID,
+ad name, campaign name, or other remote payload data. Stop the rollout on any
+bounded error code; do not weaken the account, HTTPS, timeout, or response
+bounds.
+
 Raw `externalAdReply` is retained as plaintext attribution evidence for the
 transport retention period and is returned only through the authenticated CEO
 WhatsApp DM context. The observer spool and quarantine retain raw data for at

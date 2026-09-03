@@ -181,6 +181,19 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(environment_files, ["EnvironmentFile=/etc/brain/brain.env"])
         self.assertIn("UMask=0077", unit)
 
+    def test_meta_ads_probe_deployment_contract_is_exact_and_disabled_by_default(self) -> None:
+        env = (ROOT / "deploy/brain.env.example").read_text(encoding="utf-8")
+        toml_text = (ROOT / "deploy/brain.toml.example").read_text(encoding="utf-8")
+        toml = tomllib.loads(toml_text)
+        unit = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
+        self.assertEqual(toml["server"]["meta_ads_mcp_enabled"], False)
+        self.assertIn("BRAIN_META_ADS_MCP_API_KEY=", env)
+        self.assertIn("/etc/brain/brain.env (mode 0600)", env)
+        self.assertIn("meta_ads_mcp_enabled = false", toml_text)
+        self.assertIn("EnvironmentFile=/etc/brain/brain.env", unit)
+        self.assertIn("UMask=0077", unit)
+        self.assertNotIn("ReadWritePaths=", unit)
+
     def test_examples_do_not_enable_observer_or_lifecycle_writes(self) -> None:
         unit = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
         ceo = (ROOT / "deploy/hermes-ceo-brain.example.yaml").read_text(
