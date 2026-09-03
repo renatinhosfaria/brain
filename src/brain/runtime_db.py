@@ -87,7 +87,8 @@ _SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS meta_attribution_state (
         account_id TEXT PRIMARY KEY, auth_circuit_until REAL NOT NULL DEFAULT 0,
-        last_probe_at REAL, last_success_at REAL, updated_at REAL NOT NULL
+        last_probe_at REAL, last_success_at REAL, updated_at REAL NOT NULL,
+        state_revision INTEGER NOT NULL DEFAULT 0
     )
     """,
     (
@@ -146,6 +147,15 @@ _ATTRIBUTION_TABLE_SQL = {
     )
 }
 
+_PRIOR_META_ATTRIBUTION_STATE_SQL = _canonical_table_sql(
+    """
+    CREATE TABLE IF NOT EXISTS meta_attribution_state (
+        account_id TEXT PRIMARY KEY, auth_circuit_until REAL NOT NULL DEFAULT 0,
+        last_probe_at REAL, last_success_at REAL, updated_at REAL NOT NULL
+    )
+    """
+)
+
 _ATTRIBUTION_COLUMN_DEFINITIONS = {
     "ctwa_meta_attributions": (
         ("event_id", "TEXT", 0, None, 1),
@@ -189,6 +199,7 @@ _ATTRIBUTION_COLUMN_DEFINITIONS = {
         ("last_probe_at", "REAL", 0, None, 0),
         ("last_success_at", "REAL", 0, None, 0),
         ("updated_at", "REAL", 1, None, 0),
+        ("state_revision", "INTEGER", 1, "0", 0),
     ),
 }
 
@@ -250,6 +261,7 @@ class RuntimeDatabase:
                         "ALTER TABLE transport_events "
                         "ADD COLUMN external_ad_reply_raw_json TEXT"
                     )
+                self._migrate_meta_attribution_state_revision(conn)
                 self._validate_attribution_schema(conn)
                 conn.commit()
             except BaseException:
@@ -257,6 +269,45 @@ class RuntimeDatabase:
                 raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate_meta_attribution_state_revision(conn: sqlite3.Connection) -> None:
+        """Accept only the immediately preceding exact state schema."""
+        column_info = conn.execute(
+            "PRAGMA table_info(meta_attribution_state)"
+        ).fetchall()
+        if any(str(row[1]) == "state_revision" for row in column_info):
+            return
+        actual_columns = tuple(
+            (
+                str(row[1]),
+                str(row[2]).upper(),
+                int(row[3]),
+                None if row[4] is None else str(row[4]),
+                int(row[5]),
+            )
+            for row in column_info
+        )
+        if (
+            actual_columns
+            != _ATTRIBUTION_COLUMN_DEFINITIONS["meta_attribution_state"][:-1]
+        ):
+            raise sqlite3.OperationalError(
+                "incompatible prior runtime attribution state declaration"
+            )
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("meta_attribution_state",),
+        ).fetchone()
+        sql = "" if sql_row is None or sql_row[0] is None else str(sql_row[0])
+        if _canonical_table_sql(sql) != _PRIOR_META_ATTRIBUTION_STATE_SQL:
+            raise sqlite3.OperationalError(
+                "incompatible prior runtime attribution state definition"
+            )
+        conn.execute(
+            "ALTER TABLE meta_attribution_state "
+            "ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0"
+        )
 
     @staticmethod
     def _validate_attribution_schema(conn: sqlite3.Connection) -> None:

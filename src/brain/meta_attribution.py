@@ -83,13 +83,13 @@ class MetaAttributionService:
         if lease_token is None:
             return False
 
-        probe_started_at = now
+        probe_revision = self._runtime.read(self._store.auth_state_revision)
         deadline = time.monotonic() + budget
         try:
             client = self._client()
             client.probe(deadline)
             self._runtime.write(
-                lambda conn: self._store.close_auth_circuit(conn, now, probe_started_at)
+                lambda conn: self._store.close_auth_circuit(conn, now, probe_revision)
             )
             ad = client.get_ad(source_id, deadline)
             confirmed = self._confirmed(source_id, ad, client, deadline)
@@ -159,6 +159,7 @@ class MetaAttributionService:
     def probe(self, now: float) -> str:
         if not self._settings.meta_ads_mcp_enabled:
             return "disabled"
+        probe_revision = self._runtime.read(self._store.auth_state_revision)
         try:
             self._client().probe(time.monotonic() + self._budget(None))
         except MetaAdsError as error:
@@ -169,7 +170,9 @@ class MetaAttributionService:
                     lambda conn: self._store.open_auth_circuit(conn, now, retry_after)
                 )
             return "degraded"
-        self._runtime.write(lambda conn: self._store.close_auth_circuit(conn, now, now))
+        self._runtime.write(
+            lambda conn: self._store.close_auth_circuit(conn, now, probe_revision)
+        )
         return "ready"
 
     def tick(self, now: float) -> int:

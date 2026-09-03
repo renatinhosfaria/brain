@@ -343,6 +343,41 @@ class MetaAdsStoreTests(unittest.TestCase):
             ["101"],
         )
 
+    def test_auth_state_revision_fences_a_stale_equal_timestamp_probe(self) -> None:
+        self.runtime.write(lambda conn: self.store.open_auth_circuit(conn, 10.0, 0.0))
+        self.assertFalse(
+            self.runtime.write(
+                lambda conn: self.store.close_auth_circuit(conn, 10.0, 0)
+            )
+        )
+        self.assertEqual(
+            self.runtime.read(
+                lambda conn: tuple(
+                    conn.execute(
+                        "SELECT auth_circuit_until, state_revision "
+                        "FROM meta_attribution_state"
+                    ).fetchone()
+                )
+            ),
+            (70.0, 1),
+        )
+        self.assertTrue(
+            self.runtime.write(
+                lambda conn: self.store.close_auth_circuit(conn, 10.0, 1)
+            )
+        )
+        self.assertEqual(
+            self.runtime.read(
+                lambda conn: tuple(
+                    conn.execute(
+                        "SELECT auth_circuit_until, state_revision "
+                        "FROM meta_attribution_state"
+                    ).fetchone()
+                )
+            ),
+            (0.0, 2),
+        )
+
     def test_context_exposes_confirmed_values_or_bounded_pending_reason_only(
         self,
     ) -> None:

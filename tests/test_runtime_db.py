@@ -116,6 +116,40 @@ class RuntimeDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(tuple(row), ("legacy-event", None))
 
+    def test_initialize_migrates_the_exact_prior_auth_state_schema_with_revision(
+        self,
+    ) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE meta_attribution_state ("
+                "account_id TEXT PRIMARY KEY, auth_circuit_until REAL NOT NULL DEFAULT 0, "
+                "last_probe_at REAL, last_success_at REAL, updated_at REAL NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO meta_attribution_state "
+                "(account_id, auth_circuit_until, updated_at) "
+                "VALUES ('act_1598606388477916', 70, 10)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.initialize()
+
+        self.assertEqual(
+            self.runtime.read(
+                lambda conn: tuple(
+                    conn.execute(
+                        "SELECT auth_circuit_until, state_revision "
+                        "FROM meta_attribution_state"
+                    ).fetchone()
+                )
+            ),
+            (70.0, 0),
+        )
+
     def test_wal_foreign_keys_and_writable_runtime_connection(self) -> None:
         self.initialize()
 

@@ -272,9 +272,11 @@ class MetaAdsStore:
         )
         conn.execute(
             "INSERT INTO meta_attribution_state "
-            "(account_id, auth_circuit_until, last_probe_at, updated_at) VALUES (?, ?, ?, ?) "
+            "(account_id, auth_circuit_until, last_probe_at, updated_at, state_revision) "
+            "VALUES (?, ?, ?, ?, 1) "
             "ON CONFLICT(account_id) DO UPDATE SET auth_circuit_until = excluded.auth_circuit_until, "
-            "last_probe_at = excluded.last_probe_at, updated_at = excluded.updated_at",
+            "last_probe_at = excluded.last_probe_at, updated_at = excluded.updated_at, "
+            "state_revision = meta_attribution_state.state_revision + 1",
             (self.account_id, until, now, now),
         )
         return until
@@ -283,25 +285,40 @@ class MetaAdsStore:
         self,
         conn: sqlite3.Connection,
         now: float,
-        probe_started_at: float | None = None,
+        expected_revision: int | None = None,
     ) -> bool:
         now = _time(now)
-        if probe_started_at is not None:
-            probe_started_at = _time(probe_started_at)
+        if expected_revision is not None:
+            if (
+                not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or expected_revision < 0
+            ):
+                raise ValueError("expected_revision must be a non-negative integer")
             state = conn.execute(
-                "SELECT updated_at FROM meta_attribution_state WHERE account_id = ?",
+                "SELECT state_revision FROM meta_attribution_state WHERE account_id = ?",
                 (self.account_id,),
             ).fetchone()
-            if state is not None and float(state["updated_at"]) > probe_started_at:
+            current_revision = 0 if state is None else int(state["state_revision"])
+            if current_revision != expected_revision:
                 return False
         conn.execute(
             "INSERT INTO meta_attribution_state "
-            "(account_id, auth_circuit_until, last_success_at, updated_at) VALUES (?, 0, ?, ?) "
+            "(account_id, auth_circuit_until, last_success_at, updated_at, state_revision) "
+            "VALUES (?, 0, ?, ?, 1) "
             "ON CONFLICT(account_id) DO UPDATE SET auth_circuit_until = 0, "
-            "last_success_at = excluded.last_success_at, updated_at = excluded.updated_at",
+            "last_success_at = excluded.last_success_at, updated_at = excluded.updated_at, "
+            "state_revision = meta_attribution_state.state_revision + 1",
             (self.account_id, now, now),
         )
         return True
+
+    def auth_state_revision(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT state_revision FROM meta_attribution_state WHERE account_id = ?",
+            (self.account_id,),
+        ).fetchone()
+        return 0 if row is None else int(row["state_revision"])
 
     def context_for_event(
         self, conn: sqlite3.Connection, event_id: str

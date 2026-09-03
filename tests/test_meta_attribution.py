@@ -295,10 +295,10 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.service = MetaAttributionService(self.settings, self.runtime, self.client)
 
         self.client.on_probe = lambda: self.runtime.write(
-            lambda conn: self.service._store.open_auth_circuit(conn, 21.0, 0.0)
+            lambda conn: self.service._store.open_auth_circuit(conn, 20.0, 0.0)
         )
         self.assertTrue(self.service.resolve_source("101", 20.0, 1.0))
-        self.assertEqual(self.service.health(21.0), "degraded")
+        self.assertEqual(self.service.health(20.0), "degraded")
 
     def test_account_and_required_tool_probe_failures_are_terminal_without_values(
         self,
