@@ -137,6 +137,20 @@ tools = ["conversation_phone"]
         self.assertTrue(enabled_without_key.meta_ads_mcp_enabled)
         self.assertEqual(enabled_without_key.meta_ads_mcp_api_key, "")
 
+    def test_settings_repr_excludes_meta_ads_api_key(self) -> None:
+        sentinel = "meta-api-key-must-not-appear-in-repr"
+        settings = BrainSettings(
+            principals={
+                "default": self._principal(
+                    "default", "gateway", "gateway", "conversation_phone"
+                )
+            },
+            cursor_secret=b"c" * 32,
+            meta_ads_mcp_api_key=sentinel,
+        )
+
+        self.assertNotIn(sentinel, repr(settings))
+
     def test_from_env_reads_meta_ads_settings_without_persisting_api_key(self) -> None:
         config_path = self.root / "brain.toml"
         config_path.write_text(
@@ -220,6 +234,30 @@ tools = ["conversation_phone"]
                     cursor_secret=b"c" * 32,
                     **{field: value},
                 )
+
+    def test_from_env_rejects_numeric_meta_ads_account_id(self) -> None:
+        config_path = self.root / "brain.toml"
+        config_path.write_text(
+            f'''[server]
+meta_ad_account_id = 1598606388477916
+
+[principals.default]
+mode = "gateway"
+token_sha256 = "{token_digest("gateway")}"
+tools = ["conversation_phone"]
+''',
+            encoding="utf-8",
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {"BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32},
+                clear=True,
+            ),
+            self.assertRaises(TypeError),
+        ):
+            BrainSettings.from_env(config_path)
 
     def test_from_env_strictly_parses_meta_ads_boolean_and_environment_overrides(
         self,

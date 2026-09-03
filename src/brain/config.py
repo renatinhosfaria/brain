@@ -178,7 +178,7 @@ class BrainSettings:
     busy_timeout_seconds: float = 1.0
     meta_ads_mcp_enabled: bool = False
     meta_ads_mcp_url: str = _META_ADS_MCP_URL
-    meta_ads_mcp_api_key: str = ""
+    meta_ads_mcp_api_key: str = field(default="", repr=False)
     meta_ad_account_id: str = f"act_{_META_AD_ACCOUNT_ID}"
     meta_ads_mcp_timeout_seconds: float = 4.0
     meta_ads_mcp_response_max_bytes: int = 8 * 1024 * 1024
@@ -230,7 +230,9 @@ class BrainSettings:
             raise ValueError("meta_ads_mcp_url must be the configured HTTPS MCP URL")
         if not isinstance(self.meta_ads_mcp_api_key, str):
             raise TypeError("meta_ads_mcp_api_key must be a string")
-        account_id = str(self.meta_ad_account_id)
+        if not isinstance(self.meta_ad_account_id, str):
+            raise TypeError("meta_ad_account_id must be a string")
+        account_id = self.meta_ad_account_id
         if account_id.startswith("act_"):
             account_id = account_id.removeprefix("act_")
         if account_id != _META_AD_ACCOUNT_ID:
@@ -479,11 +481,9 @@ class BrainSettings:
             # This secret is deliberately environment-only. Never fall back to
             # the TOML mapping, even if an operator accidentally adds it there.
             meta_ads_mcp_api_key=os.environ.get("BRAIN_META_ADS_MCP_API_KEY", ""),
-            meta_ad_account_id=str(
-                os.environ.get(
-                    "BRAIN_META_AD_ACCOUNT_ID",
-                    server.get("meta_ad_account_id", f"act_{_META_AD_ACCOUNT_ID}"),
-                )
+            meta_ad_account_id=os.environ.get(
+                "BRAIN_META_AD_ACCOUNT_ID",
+                server.get("meta_ad_account_id", f"act_{_META_AD_ACCOUNT_ID}"),
             ),
             meta_ads_mcp_timeout_seconds=_meta_ads_number(
                 server,
