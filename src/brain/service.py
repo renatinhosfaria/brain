@@ -141,7 +141,7 @@ class BrainService:
             credential_provider: OAuthCredentialProvider | None = None
             if settings.meta_ads_mcp_auth_mode == "oauth":
                 try:
-                    oauth = MetaAdsOAuth.from_store(
+                    oauth = MetaAdsOAuth.from_store_or_new(
                         store_path=settings.meta_ads_oauth_store_path,
                         key_path=settings.meta_ads_oauth_key_path,
                         redirect_uri=settings.meta_ads_oauth_redirect_uri,

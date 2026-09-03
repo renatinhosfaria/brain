@@ -497,7 +497,7 @@ class BrainSettings:
             ),
             meta_ads_oauth_key_path=Path(
                 os.environ.get(
-                    "BRAIN_META_ADS_OAUTH_KEY",
+                    "BRAIN_META_ADS_OAUTH_KEY_FILE",
                     server.get("meta_ads_oauth_key_path", DEFAULT_META_ADS_OAUTH_KEY),
                 )
             ),
