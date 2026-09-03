@@ -19,10 +19,14 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import anyio
 import httpx2
 from mcp import ClientSession
 from mcp import types as mcp_types
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.streamable_http import StreamableHTTPTransport
+from mcp.shared._compat import resync_tracer
+from mcp.shared._context_streams import create_context_streams
+from mcp.shared.message import SessionMessage
 
 from .config import BrainSettings
 from .meta_ads_models import META_READ_TOOLS, MetaAdsError, RemoteAd, RemoteCampaign
@@ -55,6 +59,44 @@ class _Session(Protocol):
 
 HttpClientFactory = Callable[..., Any]
 SessionFactory = Callable[[Any], AbstractAsyncContextManager[_Session]]
+
+
+@asynccontextmanager
+async def _post_only_streamable_http_client(url: str, http_client: Any):
+    """Use the SDK transport without its server-initiated GET/retry path.
+
+    Brain makes only request/response MCP calls.  The SDK's convenience context
+    manager starts a background GET stream after initialization and retries it;
+    this composed transport intentionally supplies a no-op starter instead.
+    It also deliberately omits the optional session-termination DELETE.
+    """
+
+    transport = StreamableHTTPTransport(url)
+    read_stream_writer, read_stream = create_context_streams[
+        SessionMessage | Exception
+    ](0)
+    write_stream, write_stream_reader = create_context_streams[SessionMessage](0)
+    async with (
+        read_stream_writer,
+        read_stream,
+        write_stream,
+        write_stream_reader,
+        anyio.create_task_group() as task_group,
+    ):
+        task_group.start_soon(
+            transport.post_writer,
+            http_client,
+            write_stream_reader,
+            read_stream_writer,
+            write_stream,
+            lambda: None,
+            task_group,
+        )
+        try:
+            yield read_stream, write_stream
+        finally:
+            task_group.cancel_scope.cancel()
+    await resync_tracer()
 
 
 @dataclass
@@ -146,6 +188,10 @@ class RemoteMetaAdsMcpClient:
         self._settings = settings
         self._http_client_factory = _http_client_factory or httpx2.AsyncClient
         self._session_factory = _session_factory or self._real_session_factory
+        self._lifecycle_lock = threading.RLock()
+        self._closed = False
+        self._loop_stopped = False
+        self._operation_futures: set[concurrent.futures.Future[Any]] = set()
         self._loop = asyncio.new_event_loop()
         self._loop_ready = threading.Event()
         self._thread = threading.Thread(
@@ -155,7 +201,6 @@ class RemoteMetaAdsMcpClient:
         )
         self._thread.start()
         self._loop_ready.wait()
-        self._closed = False
         self._state_lock: asyncio.Lock | None = None
         self._session: _Session | None = None
         self._resources: AsyncExitStack | None = None
@@ -179,18 +224,49 @@ class RemoteMetaAdsMcpClient:
         return value
 
     def invalidate(self) -> None:
-        if self._closed:
+        with self._lifecycle_lock:
+            if self._closed or self._loop_stopped:
+                return
+            future = self._schedule_locked(self._invalidate_async())
+        if future is None:
             return
-        self._run_coroutine(self._invalidate_async()).result()
+        self._wait_for_cleanup(future)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._run_coroutine(self._close_async()).result()
-        self._closed = True
-        self._loop.call_soon_threadsafe(self._loop.stop)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            for future in tuple(self._operation_futures):
+                future.cancel()
+            future = self._schedule_locked(self._close_async())
+        if future is not None:
+            self._wait_for_cleanup(future)
+        with self._lifecycle_lock:
+            if self._loop_stopped:
+                return
+            self._loop_stopped = True
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                return
         self._thread.join()
-        self._loop.close()
+        if not self._loop.is_closed():
+            self._loop.close()
+
+    @staticmethod
+    def _wait_for_cleanup(future: concurrent.futures.Future[Any]) -> None:
+        try:
+            future.result()
+        except Exception:  # noqa: BLE001 - teardown errors are not public data.
+            return
+
+    def _schedule_locked(self, coroutine: Any) -> concurrent.futures.Future[Any] | None:
+        try:
+            return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        except RuntimeError:
+            coroutine.close()
+            return
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -200,14 +276,25 @@ class RemoteMetaAdsMcpClient:
     def _run_coroutine(self, coroutine: Any) -> concurrent.futures.Future[Any]:
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
+    def _forget_operation(self, future: concurrent.futures.Future[Any]) -> None:
+        with self._lifecycle_lock:
+            self._operation_futures.discard(future)
+
     def _submit(
         self, operation: str, identifier: str | None, deadline: float | None
     ) -> RemoteAd | RemoteCampaign | None:
-        if self._closed:
-            raise MetaAdsError("meta_server_unavailable")
         if deadline is not None and deadline <= time.monotonic():
             raise MetaAdsError("meta_timeout")
-        future = self._run_coroutine(self._operate(operation, identifier, deadline))
+        coroutine = self._operate(operation, identifier, deadline)
+        with self._lifecycle_lock:
+            if self._closed or self._loop_stopped:
+                coroutine.close()
+                raise MetaAdsError("meta_server_unavailable")
+            future = self._schedule_locked(coroutine)
+            if future is None:
+                raise MetaAdsError("meta_server_unavailable")
+            self._operation_futures.add(future)
+            future.add_done_callback(self._forget_operation)
         try:
             timeout = (
                 None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -216,6 +303,8 @@ class RemoteMetaAdsMcpClient:
         except concurrent.futures.TimeoutError as error:
             future.cancel()
             raise MetaAdsError("meta_timeout") from error
+        except (concurrent.futures.CancelledError, RuntimeError) as error:
+            raise MetaAdsError("meta_server_unavailable") from error
 
     async def _operate(
         self, operation: str, identifier: str | None, deadline: float | None
@@ -249,6 +338,8 @@ class RemoteMetaAdsMcpClient:
                     "meta_required_tool_unavailable",
                     "meta_server_unavailable",
                     "meta_timeout",
+                    "meta_incomplete_result",
+                    "meta_account_mismatch",
                 }:
                     await self._discard_session()
                 raise mapped from None
@@ -390,10 +481,9 @@ class RemoteMetaAdsMcpClient:
     @asynccontextmanager
     async def _real_session_factory(self, http_client: Any):
         async with (
-            streamable_http_client(
+            _post_only_streamable_http_client(
                 self._settings.meta_ads_mcp_url,
                 http_client=http_client,
-                terminate_on_close=True,
             ) as streams,
             ClientSession(*streams) as session,
         ):
@@ -417,7 +507,10 @@ class RemoteMetaAdsMcpClient:
         self._session = None
         self._ready = False
         if resources is not None:
-            await resources.aclose()
+            try:
+                await resources.aclose()
+            except Exception:  # noqa: BLE001 - teardown errors carry untrusted data.
+                return
 
     def _map_error(self, error: BaseException) -> MetaAdsError:
         budget = self._active_budget

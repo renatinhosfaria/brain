@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import threading
 import time
 import unittest
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Self
 
@@ -78,11 +80,15 @@ class _FakeSession:
         responses: dict[str, list[mcp_types.CallToolResult]] | None = None,
         initialize_error: BaseException | None = None,
         pause_seconds: float = 0.0,
+        started: threading.Event | None = None,
+        teardown_error: BaseException | None = None,
     ) -> None:
         self.tools = tools or _tools(*sorted(META_READ_TOOLS))
         self.responses = responses or {}
         self.initialize_error = initialize_error
         self.pause_seconds = pause_seconds
+        self.started = started
+        self.teardown_error = teardown_error
         self.initialize_calls = 0
         self.list_calls = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -93,9 +99,13 @@ class _FakeSession:
 
     async def __aexit__(self, *_: object) -> None:
         self.closed += 1
+        if self.teardown_error is not None:
+            raise self.teardown_error
 
     async def initialize(self) -> None:
         self.initialize_calls += 1
+        if self.started is not None:
+            self.started.set()
         if self.pause_seconds:
             await asyncio.sleep(self.pause_seconds)
         if self.initialize_error is not None:
@@ -133,6 +143,39 @@ class _StaticTransport(httpx2.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, request=request, stream=_ByteStream(self._body))
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _McpRecorderTransport(httpx2.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.methods: list[str] = []
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self.methods.append(request.method)
+        if request.method == "POST":
+            message = json.loads(request.content)
+            if message["method"] == "initialize":
+                return httpx2.Response(
+                    200,
+                    headers={
+                        "content-type": "application/json",
+                        "mcp-session-id": "fake-session",
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": message["id"],
+                        "result": {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "serverInfo": {"name": "fake", "version": "1.0"},
+                        },
+                    },
+                    request=request,
+                )
+            return httpx2.Response(202, request=request)
+        return httpx2.Response(403, request=request)
 
     async def aclose(self) -> None:
         return None
@@ -216,6 +259,25 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
 
         self.assertEqual(seen, [])
 
+    def test_real_streamable_transport_cleanup_never_sends_delete_or_get(self) -> None:
+        recorder = _McpRecorderTransport()
+        client = RemoteMetaAdsMcpClient(_settings())
+        self.addCleanup(client.close)
+
+        async def initialize_and_close() -> None:
+            async with (
+                httpx2.AsyncClient(transport=recorder) as http_client,
+                client._real_session_factory(http_client) as session,
+            ):
+                await session.initialize()
+                await asyncio.sleep(0)
+
+        asyncio.run(initialize_and_close())
+
+        self.assertIn("POST", recorder.methods)
+        self.assertNotIn("DELETE", recorder.methods)
+        self.assertNotIn("GET", recorder.methods)
+
     def test_initialized_session_is_reused_for_ad_and_campaign_calls(self) -> None:
         ad = _result(
             {
@@ -278,6 +340,53 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
 
         self.assertEqual(failed.closed, 1)
         self.assertEqual(succeeding.initialize_calls, 1)
+
+    def test_malformed_and_semantic_results_discard_the_session_before_retry(
+        self,
+    ) -> None:
+        malformed = mcp_types.CallToolResult(content=[])
+        incomplete = _result(
+            {
+                "id": "999",
+                "name": "Ad",
+                "campaign_id": "202",
+                "status": "ACTIVE",
+                "effective_status": "ACTIVE",
+            }
+        )
+        for result, expected in (
+            (malformed, "meta_invalid_response"),
+            (incomplete, "meta_incomplete_result"),
+        ):
+            with self.subTest(expected=expected):
+                failed = _FakeSession(
+                    responses=self._ready_responses(("meta_get_ad", result))
+                )
+                recreated = _FakeSession(responses=self._ready_responses())
+                client = self._client(failed, recreated)
+                self.addCleanup(client.close)
+
+                with self.assertRaisesRegex(MetaAdsError, f"^{expected}$"):
+                    client.get_ad("101")
+                client.probe()
+
+                self.assertEqual(failed.closed, 1)
+                self.assertEqual(recreated.initialize_calls, 1)
+
+    def test_account_mismatch_discards_the_session_before_retry(self) -> None:
+        mismatched = _FakeSession(
+            responses={"meta_list_ad_accounts": [_accounts("act_2")]}
+        )
+        recreated = _FakeSession(responses=self._ready_responses())
+        client = self._client(mismatched, recreated)
+        self.addCleanup(client.close)
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_account_mismatch$"):
+            client.probe()
+        client.probe()
+
+        self.assertEqual(mismatched.closed, 1)
+        self.assertEqual(recreated.initialize_calls, 1)
 
     def test_expired_deadline_maps_to_timeout_without_calling_the_remote_tool(
         self,
@@ -409,6 +518,84 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
             client.probe()
 
         self.assertEqual(unconsumed.initialize_calls, 0)
+
+    def test_forbidden_response_opens_the_local_authentication_circuit(self) -> None:
+        request = httpx2.Request("POST", "https://mcp-facebook-ads.famachat.com.br/mcp")
+        response = httpx2.Response(403, request=request)
+        forbidden = _FakeSession(
+            initialize_error=httpx2.HTTPStatusError(
+                "forbidden", request=request, response=response
+            )
+        )
+        client = self._client(forbidden)
+        self.addCleanup(client.close)
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_auth_unavailable$"):
+            client.probe()
+        with self.assertRaisesRegex(MetaAdsError, "^meta_auth_unavailable$"):
+            client.probe()
+
+        self.assertEqual(forbidden.initialize_calls, 1)
+
+    def test_close_cancels_a_racing_request_and_concurrent_lifecycle_calls_are_safe(
+        self,
+    ) -> None:
+        started = threading.Event()
+        session = _FakeSession(
+            responses=self._ready_responses(), pause_seconds=1.0, started=started
+        )
+        client = self._client(session)
+        request_errors: list[BaseException] = []
+        lifecycle_errors: list[BaseException] = []
+
+        def request() -> None:
+            try:
+                client.probe()
+            except Exception as error:  # noqa: BLE001 - asserts no exception crosses the boundary.
+                request_errors.append(error)
+
+        def lifecycle(operation: Callable[[], None]) -> None:
+            try:
+                operation()
+            except Exception as error:  # noqa: BLE001 - asserts no exception crosses the boundary.
+                lifecycle_errors.append(error)
+
+        request_thread = threading.Thread(target=request)
+        request_thread.start()
+        self.assertTrue(started.wait(timeout=1.0))
+        threads = [
+            threading.Thread(target=lifecycle, args=(client.close,)),
+            threading.Thread(target=lifecycle, args=(client.invalidate,)),
+            threading.Thread(target=lifecycle, args=(client.close,)),
+        ]
+        for thread in threads:
+            thread.start()
+        request_thread.join(timeout=0.3)
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        self.assertFalse(request_thread.is_alive())
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(lifecycle_errors, [])
+        self.assertEqual(len(request_errors), 1)
+        self.assertIsInstance(request_errors[0], MetaAdsError)
+        self.assertEqual(str(request_errors[0]), "meta_server_unavailable")
+
+    def test_teardown_failures_are_contained_without_payload_leakage(self) -> None:
+        broken = _FakeSession(
+            responses=self._ready_responses(),
+            teardown_error=RuntimeError("untrusted remote payload"),
+        )
+        replacement = _FakeSession(responses=self._ready_responses())
+        client = self._client(broken, replacement)
+
+        client.probe()
+        client.invalidate()
+        client.probe()
+        client.close()
+
+        self.assertEqual(broken.closed, 1)
+        self.assertEqual(replacement.initialize_calls, 1)
 
     def test_public_operations_never_dispatch_a_write_tool_name(self) -> None:
         ad = _result(

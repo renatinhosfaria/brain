@@ -84,3 +84,54 @@ warnings; it exited with status 0.
 `ruff format --check .` reports 18 pre-existing, out-of-scope files that would
 be reformatted. The changed Task 3 files are formatted, and repository-wide
 `ruff check .` passes.
+
+## Round 1 review fixes
+
+### RED evidence
+
+Added focused regressions for concurrent request/close/invalidate lifecycle
+handling, teardown exceptions, 403 authentication, malformed/incomplete/account
+mismatch session recreation, and real Streamable HTTP cleanup. Before the fix,
+the focused run demonstrated all reviewed failures:
+
+```text
+RuntimeError: Event loop is closed
+AssertionError: 'DELETE' unexpectedly found in ['POST', 'POST', 'GET', 'DELETE']
+RuntimeError: untrusted remote payload
+```
+
+It also showed that `meta_incomplete_result` and `meta_account_mismatch` left
+the old fake session open.
+
+### GREEN evidence
+
+The sync facade now guards lifecycle state with a thread lock, tracks/cancels
+in-flight request futures before shutdown, and maps cancellation/stopped-loop
+races to `meta_server_unavailable`. `invalidate()` and `close()` contain
+teardown failures. The client now composes the installed
+`StreamableHTTPTransport` in post-only mode: it starts neither the SDK's
+background GET stream/retry loop nor its optional cleanup DELETE.
+
+Malformed, incomplete, and account-mismatch results discard the session before
+the next call. The test transport proves the post-only session sends neither
+`GET` nor `DELETE`; 401 and 403 tests both open the local auth circuit.
+
+```text
+PYTHONPATH=src /root/brain/.venv/bin/python -m unittest tests.test_meta_ads_mcp -v
+Ran 18 tests in 0.260s
+OK
+
+/root/brain/.venv/bin/ruff check .
+All checks passed!
+
+/root/brain/.venv/bin/ruff format --check src/brain/meta_ads_mcp.py tests/test_meta_ads_mcp.py
+2 files already formatted
+
+PYTHONPATH=src /root/brain/.venv/bin/python -m unittest discover -s tests -q
+Ran 539 tests in 47.701s
+OK
+```
+
+The repository-wide formatter still reports the same 18 pre-existing,
+out-of-scope files. No credentials, source/ad/campaign payloads, or remote
+repository files were used or changed.
