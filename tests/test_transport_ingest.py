@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -275,6 +276,53 @@ class TransportIngestTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         stored = self.rows("transport_events")[0]["external_ad_reply_raw_json"]
         self.assertEqual(json.loads(stored), raw)
+
+    def test_enabled_valid_raw_ctwa_stages_attribution_with_the_parent_event(
+        self,
+    ) -> None:
+        self.settings = replace(
+            self.settings, meta_ads_mcp_enabled=True, meta_ads_mcp_api_key="test-key"
+        )
+        self.service = BrainService(self.settings)
+        self.api = TransportAPI(self.service)
+        raw = self.raw_ctwa()
+        raw["sourceId"] = "101"
+        external = self.normalized_ctwa_for_raw()
+        external["source_id_length"] = 3
+        external["source_id_hmac"] = self.runtime_ids.opaque_hmac("101")
+
+        response = self.post(
+            self.envelope(
+                message_id="meta-stage",
+                transport_kind="ctwa_candidate",
+                external=external,
+                observer_event_version=2,
+                raw=raw,
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.rows("transport_events")), 1)
+        attribution = self.rows("ctwa_meta_attributions")
+        self.assertEqual(
+            [
+                (
+                    row["event_id"],
+                    row["source_id"],
+                    row["ctwa_clid"],
+                    row["status"],
+                )
+                for row in attribution
+            ],
+            [
+                (
+                    self.runtime_ids.event_id("observer-a", "meta-stage"),
+                    "101",
+                    "ctwa-clid",
+                    "pending",
+                )
+            ],
+        )
 
     def test_v2_rejects_integer_valued_unsafe_raw_floats(self) -> None:
         for index, value in enumerate((9007199254740992.0, 1e20)):

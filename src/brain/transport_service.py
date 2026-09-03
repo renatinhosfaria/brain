@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import BrainSettings
 from .errors import DatabaseUnavailable
+from .meta_attribution import MetaAttributionService
 from .raw_attribution import (
     RawAttributionError,
     RawAttributionLimits,
@@ -369,6 +370,7 @@ class TransportService:
         self.settings = settings
         self.runtime = runtime
         self.transport_ids = transport_ids
+        self.meta_attribution = MetaAttributionService(settings, runtime)
         # Never run, so the first ingestion after start also enforces policy.
         self._retention_ran_at = 0.0
 
@@ -381,6 +383,7 @@ class TransportService:
         envelope = TransportEnvelope.parse(payload, raw_limits)
         if self.transport_ids is None:
             raise TransportIdentityUnavailable("transport IDs are unavailable")
+        raw: object | None = None
         if envelope.external_ad_reply_raw_json is not None:
             try:
                 raw = decode_canonical_raw_attribution(
@@ -403,7 +406,7 @@ class TransportService:
         ingestion_now = time.time()
         try:
             duplicate = self.runtime.write(
-                lambda conn: self._persist(conn, envelope, ingestion_now)
+                lambda conn: self._persist(conn, envelope, raw, ingestion_now)
             )
         except TransportRequestError:
             raise
@@ -463,6 +466,7 @@ class TransportService:
         self,
         conn: sqlite3.Connection,
         envelope: TransportEnvelope,
+        raw: object | None,
         ingestion_now: float,
     ) -> bool:
         values = self._event_values(envelope, ingestion_now)
@@ -482,6 +486,10 @@ class TransportService:
             if existing != values[1:-1]:
                 raise TransportRequestError("event_id conflicts with existing event")
             self._persist_ephemera(conn, envelope, ingestion_now)
+            if raw is not None:
+                self.meta_attribution.stage_event(
+                    conn, event_id=envelope.event_id, raw=raw, now=ingestion_now
+                )
             return True
 
         conn.execute(
@@ -496,6 +504,10 @@ class TransportService:
             values,
         )
         self._persist_ephemera(conn, envelope, ingestion_now)
+        if raw is not None:
+            self.meta_attribution.stage_event(
+                conn, event_id=envelope.event_id, raw=raw, now=ingestion_now
+            )
         return False
 
     def _persist_ephemera(
