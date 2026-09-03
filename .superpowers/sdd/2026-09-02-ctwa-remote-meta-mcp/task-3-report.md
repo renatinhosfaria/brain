@@ -135,3 +135,44 @@ OK
 The repository-wide formatter still reports the same 18 pre-existing,
 out-of-scope files. No credentials, source/ad/campaign payloads, or remote
 repository files were used or changed.
+
+## Round 2 review fix
+
+### RED evidence
+
+Added a fake session whose async teardown waits forever. The previous direct
+cleanup wait blocked until the external test guard terminated it:
+
+```text
+timeout 1s ... test_hung_teardown_bounds_invalidate_and_close
+test_status=124
+```
+
+### GREEN evidence
+
+Control-future waiting and loop-thread joining now use an internal cleanup
+window of `min(meta_ads_mcp_timeout_seconds, 0.25 seconds)`, independent of a
+request deadline. Timeout cancels the cleanup future, marks the client closed
+to new work, and returns without propagating exception data. Loop stopping is
+deferred one callback turn so cancellation is delivered before the bounded
+join; the loop is closed only after the thread exits.
+
+The regression uses a 50 ms configured MCP timeout and proves both
+`invalidate()` and `close()` return within 300 ms, then reject new work with
+the bounded `meta_server_unavailable` error.
+
+```text
+PYTHONPATH=src /root/brain/.venv/bin/python -m unittest tests.test_meta_ads_mcp -q
+Ran 19 tests in 0.574s
+OK
+
+/root/brain/.venv/bin/ruff check .
+All checks passed!
+
+/root/brain/.venv/bin/ruff format --check src/brain/meta_ads_mcp.py tests/test_meta_ads_mcp.py
+2 files already formatted
+
+PYTHONPATH=src /root/brain/.venv/bin/python -m unittest discover -s tests -q
+Ran 540 tests in 50.791s
+OK
+```

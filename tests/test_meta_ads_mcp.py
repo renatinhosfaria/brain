@@ -82,6 +82,7 @@ class _FakeSession:
         pause_seconds: float = 0.0,
         started: threading.Event | None = None,
         teardown_error: BaseException | None = None,
+        teardown_hangs: bool = False,
     ) -> None:
         self.tools = tools or _tools(*sorted(META_READ_TOOLS))
         self.responses = responses or {}
@@ -89,6 +90,7 @@ class _FakeSession:
         self.pause_seconds = pause_seconds
         self.started = started
         self.teardown_error = teardown_error
+        self.teardown_hangs = teardown_hangs
         self.initialize_calls = 0
         self.list_calls = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -99,6 +101,8 @@ class _FakeSession:
 
     async def __aexit__(self, *_: object) -> None:
         self.closed += 1
+        if self.teardown_hangs:
+            await asyncio.Event().wait()
         if self.teardown_error is not None:
             raise self.teardown_error
 
@@ -596,6 +600,25 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
 
         self.assertEqual(broken.closed, 1)
         self.assertEqual(replacement.initialize_calls, 1)
+
+    def test_hung_teardown_bounds_invalidate_and_close(self) -> None:
+        settings = _settings(meta_ads_mcp_timeout_seconds=0.05)
+        for operation_name in ("invalidate", "close"):
+            with self.subTest(operation=operation_name):
+                hanging = _FakeSession(
+                    responses=self._ready_responses(), teardown_hangs=True
+                )
+                client = self._client(hanging, settings=settings)
+                client.probe()
+
+                started = time.monotonic()
+                getattr(client, operation_name)()
+                elapsed = time.monotonic() - started
+
+                self.assertLess(elapsed, 0.3)
+                with self.assertRaisesRegex(MetaAdsError, "^meta_server_unavailable$"):
+                    client.probe()
+                client.close()
 
     def test_public_operations_never_dispatch_a_write_tool_name(self) -> None:
         ad = _result(

@@ -32,6 +32,7 @@ from .config import BrainSettings
 from .meta_ads_models import META_READ_TOOLS, MetaAdsError, RemoteAd, RemoteCampaign
 
 _DECIMAL_ID = re.compile(r"^[0-9]{1,64}$", re.ASCII)
+_MAX_CLEANUP_TIMEOUT_SECONDS = 0.25
 
 
 class _SuppressStreamableHttpLogs(logging.Filter):
@@ -230,7 +231,8 @@ class RemoteMetaAdsMcpClient:
             future = self._schedule_locked(self._invalidate_async())
         if future is None:
             return
-        self._wait_for_cleanup(future)
+        if not self._wait_for_cleanup(future):
+            self._stop_loop_bounded()
 
     def close(self) -> None:
         with self._lifecycle_lock:
@@ -242,24 +244,47 @@ class RemoteMetaAdsMcpClient:
             future = self._schedule_locked(self._close_async())
         if future is not None:
             self._wait_for_cleanup(future)
+        self._stop_loop_bounded()
+
+    def _stop_loop_bounded(self) -> None:
         with self._lifecycle_lock:
             if self._loop_stopped:
                 return
+            self._closed = True
             self._loop_stopped = True
             try:
-                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._loop.call_soon_threadsafe(self._stop_after_pending_callbacks)
             except RuntimeError:
                 return
-        self._thread.join()
-        if not self._loop.is_closed():
-            self._loop.close()
-
-    @staticmethod
-    def _wait_for_cleanup(future: concurrent.futures.Future[Any]) -> None:
-        try:
-            future.result()
-        except Exception:  # noqa: BLE001 - teardown errors are not public data.
+        if threading.current_thread() is self._thread:
             return
+        self._thread.join(timeout=self._cleanup_timeout_seconds())
+        if not self._thread.is_alive() and not self._loop.is_closed():
+            try:
+                self._loop.close()
+            except RuntimeError:
+                return
+
+    def _cleanup_timeout_seconds(self) -> float:
+        return min(
+            self._settings.meta_ads_mcp_timeout_seconds,
+            _MAX_CLEANUP_TIMEOUT_SECONDS,
+        )
+
+    def _stop_after_pending_callbacks(self) -> None:
+        self._loop.call_soon(self._loop.stop)
+
+    def _wait_for_cleanup(self, future: concurrent.futures.Future[Any]) -> bool:
+        try:
+            future.result(timeout=self._cleanup_timeout_seconds())
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return False
+        except (concurrent.futures.CancelledError, RuntimeError):
+            return False
+        except Exception:  # noqa: BLE001 - teardown errors are not public data.
+            return True
+        return True
 
     def _schedule_locked(self, coroutine: Any) -> concurrent.futures.Future[Any] | None:
         try:
