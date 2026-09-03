@@ -27,11 +27,6 @@ DEFAULT_KANBAN_DB = Path("/root/.hermes/kanban.db")
 DEFAULT_WHATSAPP_SESSION_DIR = Path("/root/.hermes/platforms/whatsapp/session")
 DEFAULT_RUNTIME_DB = Path("/var/lib/brain/runtime/brain-runtime.db")
 DEFAULT_OBSERVER_SESSION_DIR = Path("/var/lib/brain/whatsapp-observer/session")
-DEFAULT_META_ADS_OAUTH_STORE = Path(
-    "/var/lib/brain/credentials/meta-ads-oauth.json.enc"
-)
-DEFAULT_META_ADS_OAUTH_KEY = Path("/etc/brain/meta-ads-oauth.key")
-DEFAULT_META_ADS_OAUTH_REDIRECT_URI = "http://127.0.0.1:8766/oauth/callback"
 VALID_MODES = frozenset({"worker", "gateway", "service"})
 VALID_TOOLS = frozenset(
     {
@@ -169,12 +164,8 @@ class BrainSettings:
     busy_timeout_seconds: float = 1.0
     meta_attribution_enabled: bool = False
     meta_ad_account_id: str = ""
-    meta_ads_mcp_auth_mode: Literal["token", "oauth"] = "token"
     meta_ads_mcp_access_token: str = field(default="", repr=False)
     meta_ads_mcp_token_expires_at: float | None = None
-    meta_ads_oauth_store_path: Path = DEFAULT_META_ADS_OAUTH_STORE
-    meta_ads_oauth_key_path: Path = DEFAULT_META_ADS_OAUTH_KEY
-    meta_ads_oauth_redirect_uri: str = DEFAULT_META_ADS_OAUTH_REDIRECT_URI
     meta_ads_mcp_timeout_seconds: float = 4.0
     meta_ads_mcp_response_max_bytes: int = 8 * 1024 * 1024
     meta_ads_sync_interval_seconds: int = 900
@@ -211,16 +202,6 @@ class BrainSettings:
             canonical_account_id(self.meta_ad_account_id)
         if not isinstance(self.meta_ads_mcp_access_token, str):
             raise TypeError("Meta Ads token must be text")
-        if self.meta_ads_mcp_auth_mode not in {"token", "oauth"}:
-            raise ValueError("Meta Ads authentication mode must be token or oauth")
-        if self.meta_ads_oauth_redirect_uri != DEFAULT_META_ADS_OAUTH_REDIRECT_URI:
-            raise ValueError("Meta Ads OAuth redirect URI is fixed")
-        object.__setattr__(
-            self, "meta_ads_oauth_store_path", Path(self.meta_ads_oauth_store_path)
-        )
-        object.__setattr__(
-            self, "meta_ads_oauth_key_path", Path(self.meta_ads_oauth_key_path)
-        )
         if self.meta_ads_mcp_token_expires_at is not None and (
             not isinstance(self.meta_ads_mcp_token_expires_at, (int, float))
             or isinstance(self.meta_ads_mcp_token_expires_at, bool)
@@ -377,16 +358,6 @@ class BrainSettings:
             canonical_account_id(configured_account)
         meta_account = canonical_account_id(configured_account) if meta_enabled else ""
         meta_token = os.environ.get("BRAIN_META_ADS_MCP_ACCESS_TOKEN", "")
-        meta_auth_mode = str(
-            os.environ.get(
-                "BRAIN_META_ADS_MCP_AUTH_MODE",
-                server.get("meta_ads_mcp_auth_mode", "token"),
-            )
-        )
-        if meta_auth_mode == "oauth":
-            # OAuth intentionally never falls back to this legacy environment
-            # credential.  It remains available only when token mode is selected.
-            meta_token = ""
         meta_expiry = _meta_expiry(
             os.environ.get(
                 "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT",
@@ -484,32 +455,8 @@ class BrainSettings:
             ),
             meta_attribution_enabled=meta_enabled,
             meta_ad_account_id=meta_account,
-            meta_ads_mcp_auth_mode=meta_auth_mode,  # type: ignore[arg-type]
             meta_ads_mcp_access_token=meta_token,
             meta_ads_mcp_token_expires_at=meta_expiry,
-            meta_ads_oauth_store_path=Path(
-                os.environ.get(
-                    "BRAIN_META_ADS_OAUTH_STORE",
-                    server.get(
-                        "meta_ads_oauth_store_path", DEFAULT_META_ADS_OAUTH_STORE
-                    ),
-                )
-            ),
-            meta_ads_oauth_key_path=Path(
-                os.environ.get(
-                    "BRAIN_META_ADS_OAUTH_KEY_FILE",
-                    server.get("meta_ads_oauth_key_path", DEFAULT_META_ADS_OAUTH_KEY),
-                )
-            ),
-            meta_ads_oauth_redirect_uri=str(
-                os.environ.get(
-                    "BRAIN_META_ADS_OAUTH_REDIRECT_URI",
-                    server.get(
-                        "meta_ads_oauth_redirect_uri",
-                        DEFAULT_META_ADS_OAUTH_REDIRECT_URI,
-                    ),
-                )
-            ),
             meta_ads_mcp_timeout_seconds=float(
                 os.environ.get(
                     "BRAIN_META_ADS_MCP_TIMEOUT_SECONDS",

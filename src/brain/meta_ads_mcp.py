@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-import time
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -77,16 +76,6 @@ class MetaAdsClient(Protocol):
     ) -> MetaAdRecord: ...
 
     def list_ads(self, now: float, full: bool) -> list[MetaAdRecord]: ...
-
-
-class OAuthCredentialProvider(Protocol):
-    """Runtime-only bearer-token source for the explicit OAuth mode."""
-
-    def access_token(self, now: float) -> str: ...
-
-    async def access_token_async(self, now: float, budget_seconds: float) -> str: ...
-
-    def invalidate(self) -> None: ...
 
 
 class _ResponseByteBudget:
@@ -239,16 +228,14 @@ class MetaAdsMcpClient:
         settings: BrainSettings,
         *,
         session_factory: SessionFactory | None = None,
-        credential_provider: OAuthCredentialProvider | None = None,
     ) -> None:
         self._settings = settings
         self._account_id = canonical_account_id(settings.meta_ad_account_id)
         self._session_factory = session_factory
-        self._credential_provider = credential_provider
         self._capabilities: MetaAdsCapabilities | None = None
 
     def probe(self) -> MetaAdsCapabilities:
-        return self._run_with_oauth_retry(self._probe)
+        return self._run_sync(self._probe)
 
     def get_ad(
         self,
@@ -260,25 +247,13 @@ class MetaAdsMcpClient:
         self._validate_source_id(source_id)
         self._validate_now(now)
         timeout_seconds = self._context_timeout(timeout_seconds)
-        deadline = time.monotonic() + timeout_seconds
-        return self._run_with_oauth_retry(
-            self._get_ad, source_id, now, timeout_seconds, deadline
-        )
+        return self._run_sync(self._get_ad, source_id, now, timeout_seconds)
 
     def list_ads(self, now: float, full: bool) -> list[MetaAdRecord]:
         self._validate_now(now)
         if not isinstance(full, bool):
             raise TypeError("full must be boolean")
-        return self._run_with_oauth_retry(self._list_ads, now, full)
-
-    def _run_with_oauth_retry(self, function: Callable[..., Any], *args: object) -> Any:
-        try:
-            return self._run_sync(function, *args)
-        except MetaAdsError as exc:
-            if exc.code != "meta_auth_unavailable" or self._credential_provider is None:
-                raise
-            self._credential_provider.invalidate()
-            return self._run_sync(function, *args)
+        return self._run_sync(self._list_ads, now, full)
 
     @staticmethod
     def _validate_source_id(source_id: object) -> None:
@@ -314,42 +289,6 @@ class MetaAdsMcpClient:
             return anyio.run(function, *args)
         raise RuntimeError("Meta Ads MCP client must run outside an event loop")
 
-    def _authorization_token(self, now: float) -> str:
-        if self._credential_provider is not None:
-            try:
-                return self._credential_provider.access_token(now)
-            except Exception:  # noqa: BLE001 - secret boundary exposes no details
-                raise MetaAdsError("meta_auth_unavailable") from None
-        if self._settings.meta_ads_mcp_auth_mode == "oauth":
-            raise MetaAdsError("meta_auth_unavailable")
-        token = self._settings.meta_ads_mcp_access_token
-        if not token:
-            raise MetaAdsError("meta_auth_unavailable")
-        return token
-
-    async def _authorization_token_async(
-        self, now: float, timeout_seconds: float
-    ) -> str:
-        if self._credential_provider is None:
-            return self._authorization_token(now)
-        deadline = anyio.current_effective_deadline()
-        remaining = timeout_seconds
-        if math.isfinite(deadline):
-            remaining = min(remaining, deadline - anyio.current_time())
-        if remaining <= 0:
-            raise MetaAdsError("meta_timeout")
-        try:
-            with anyio.fail_after(remaining):
-                return await self._credential_provider.access_token_async(
-                    now, remaining
-                )
-        except TimeoutError:
-            raise MetaAdsError("meta_timeout") from None
-        except MetaAdsError:
-            raise
-        except Exception:  # noqa: BLE001 - secret boundary exposes no details
-            raise MetaAdsError("meta_auth_unavailable") from None
-
     @asynccontextmanager
     async def _session(
         self, timeout_seconds: float | None = None
@@ -364,8 +303,10 @@ class MetaAdsMcpClient:
                 raise self._map_error(exc) from None
             return
 
+        token = self._settings.meta_ads_mcp_access_token
+        if not token:
+            raise MetaAdsError("meta_auth_unavailable")
         timeout_seconds = self._context_timeout(timeout_seconds)
-        token = await self._authorization_token_async(time.time(), timeout_seconds)
         transport = _ResponseLimitTransport(
             httpx2.AsyncHTTPTransport(),
             _ResponseByteBudget(self._settings.meta_ads_mcp_response_max_bytes),
@@ -397,9 +338,7 @@ class MetaAdsMcpClient:
             raise self._map_error(exc) from None
 
     async def _probe(self) -> MetaAdsCapabilities:
-        async with self._session(
-            self._settings.meta_ads_mcp_timeout_seconds
-        ) as session:
+        async with self._session() as session:
             return await self._probe_session(session)
 
     async def _probe_session(self, session: _Session) -> MetaAdsCapabilities:
@@ -603,15 +542,11 @@ class MetaAdsMcpClient:
             raise MetaAdsError("meta_account_mismatch")
 
     async def _get_ad(
-        self, source_id: str, now: float, timeout_seconds: float, deadline: float
+        self, source_id: str, now: float, timeout_seconds: float
     ) -> MetaAdRecord:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise MetaAdsError("meta_timeout")
-        effective_timeout = min(timeout_seconds, remaining)
         try:
-            with anyio.fail_after(effective_timeout):
-                async with self._session(effective_timeout) as session:
+            with anyio.fail_after(timeout_seconds):
+                async with self._session(timeout_seconds) as session:
                     capabilities = await self._probe_session(session)
                     records = await self._read_entity_pages(
                         session,
@@ -630,9 +565,7 @@ class MetaAdsMcpClient:
         return matching[0]
 
     async def _list_ads(self, now: float, full: bool) -> list[MetaAdRecord]:
-        async with self._session(
-            self._settings.meta_ads_mcp_timeout_seconds
-        ) as session:
+        async with self._session() as session:
             capabilities = await self._probe_session(session)
             return await self._read_entity_pages(
                 session, capabilities, now, source_id=None, full=full

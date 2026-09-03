@@ -35,7 +35,6 @@ from .meta_ads_models import (
     confirmed_payload,
     pending_payload,
 )
-from .meta_ads_oauth import MetaAdsOAuth, OAuthCredentialProvider, OAuthError
 from .meta_ads_store import MetaAdsStore
 from .meta_attribution import MetaAttributionService
 from .projection import ProjectedMessage, project_rows
@@ -138,26 +137,12 @@ class BrainService:
         self.meta_attribution: MetaAttributionService | None = None
         if settings.meta_attribution_enabled:
             store = MetaAdsStore(settings.meta_ad_account_id)
-            credential_provider: OAuthCredentialProvider | None = None
-            if settings.meta_ads_mcp_auth_mode == "oauth":
-                try:
-                    oauth = MetaAdsOAuth.from_store_or_new(
-                        store_path=settings.meta_ads_oauth_store_path,
-                        key_path=settings.meta_ads_oauth_key_path,
-                        redirect_uri=settings.meta_ads_oauth_redirect_uri,
-                    )
-                    credential_provider = OAuthCredentialProvider(oauth)
-                except OAuthError:
-                    # A missing, incomplete, or unreadable credential must not
-                    # make the conversational service unavailable at boot.
-                    credential_provider = None
-            client = MetaAdsMcpClient(settings, credential_provider=credential_provider)
+            client = MetaAdsMcpClient(settings)
             self.meta_attribution = MetaAttributionService(
                 settings,
                 self.runtime,
                 store,
                 client,
-                credential_provider=credential_provider,
             )
         self.transport_service = TransportService(
             settings,

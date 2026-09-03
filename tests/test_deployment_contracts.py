@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from brain.config import BrainSettings, PrincipalConfig, token_digest
 from scripts.install_brain_secrets import restore_files, snapshot_files
 
 ROOT = Path(__file__).parents[1]
@@ -373,173 +372,6 @@ tools = ["conversation_context"]
         self.assertNotIn(token, stderr.getvalue())
         self.assertNotIn(known_id, stderr.getvalue())
 
-    def test_oauth_probe_uses_the_fixed_account_while_worker_is_disabled(self) -> None:
-        """OAuth validation must precede enabling the attribution worker."""
-        from scripts import meta_ads_oauth
-
-        settings = BrainSettings(
-            principals={
-                "default": PrincipalConfig(
-                    "default",
-                    "gateway",
-                    token_digest("gateway-token"),
-                    frozenset({"conversation_context"}),
-                )
-            },
-            cursor_secret=b"c" * 32,
-        )
-        created: list[object] = []
-
-        class FakeClient:
-            def __init__(
-                self, configured: object, *, credential_provider: object
-            ) -> None:
-                self.configured = configured
-                self.credential_provider = credential_provider
-                created.append(self)
-
-            def probe(self) -> object:
-                return object()
-
-        args = SimpleNamespace(
-            store_path=Path("/unused/store"), key_path=Path("/unused/key")
-        )
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with (
-            contextlib.redirect_stdout(stdout),
-            contextlib.redirect_stderr(stderr),
-            patch.object(
-                meta_ads_oauth.BrainSettings, "from_env", return_value=settings
-            ),
-            patch.object(meta_ads_oauth, "_oauth", return_value=object()),
-            patch.object(
-                meta_ads_oauth, "OAuthCredentialProvider", return_value="provider"
-            ),
-            patch.object(meta_ads_oauth, "MetaAdsMcpClient", FakeClient),
-        ):
-            result = meta_ads_oauth._probe(args)
-
-        self.assertEqual(result, 0)
-        self.assertEqual(stderr.getvalue(), "")
-        self.assertEqual(
-            stdout.getvalue(), "OK: Meta Ads OAuth read-only MCP probe verified\n"
-        )
-        self.assertEqual(len(created), 1)
-        configured = created[0].configured
-        self.assertFalse(configured.meta_attribution_enabled)
-        self.assertEqual(configured.meta_ad_account_id, "1598606388477916")
-        self.assertEqual(configured.meta_ads_mcp_auth_mode, "oauth")
-
-    def test_oauth_status_reports_missing_store_before_configuration(self) -> None:
-        from scripts import meta_ads_oauth
-
-        with tempfile.TemporaryDirectory() as temporary:
-            args = SimpleNamespace(
-                store_path=Path(temporary) / "missing.enc",
-                key_path=Path(temporary) / "missing.key",
-            )
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with (
-                contextlib.redirect_stdout(stdout),
-                contextlib.redirect_stderr(stderr),
-            ):
-                result = meta_ads_oauth._status(args)
-
-        self.assertEqual(result, 0)
-        self.assertEqual(stdout.getvalue(), "Meta Ads OAuth status: missing\n")
-        self.assertEqual(stderr.getvalue(), "")
-
-    def test_oauth_cli_has_no_pre_registered_configure_command(self) -> None:
-        from scripts import meta_ads_oauth
-
-        with self.assertRaises(SystemExit):
-            meta_ads_oauth._parser().parse_args(["configure"])
-
-    def test_oauth_login_uses_dynamic_store_without_secret_prompts(self) -> None:
-        from scripts import meta_ads_oauth
-
-        request = SimpleNamespace(url="https://example.invalid/oauth", state="state")
-        calls: list[str] = []
-
-        class FakeOAuth:
-            def authorization_url(self) -> object:
-                calls.append("authorization_url")
-                return request
-
-            def exchange_code(self, code: str, received: object) -> object:
-                calls.append(f"exchange:{code}")
-                self.received = received
-                return object()
-
-            def save_credentials(self, credentials: object) -> None:
-                calls.append("save")
-
-        args = SimpleNamespace(
-            store_path=Path("/unused/store"), key_path=Path("/unused/key")
-        )
-        with (
-            patch.object(meta_ads_oauth, "_oauth", return_value=FakeOAuth()),
-            patch.object(
-                meta_ads_oauth.OAuthCallback,
-                "serve_once",
-                return_value="authorization-code",
-            ),
-            patch("builtins.print") as output,
-        ):
-            result = meta_ads_oauth._login(args)
-
-        self.assertEqual(result, 0)
-        self.assertEqual(
-            calls, ["authorization_url", "exchange:authorization-code", "save"]
-        )
-        self.assertIn(
-            "https://example.invalid/oauth",
-            " ".join(str(c) for c in output.call_args_list),
-        )
-
-    def test_service_oauth_constructs_dcr_provider_without_app_configuration(
-        self,
-    ) -> None:
-        from brain import service as brain_service
-
-        settings = BrainSettings(
-            meta_attribution_enabled=True,
-            meta_ad_account_id="act_1598606388477916",
-            meta_ads_mcp_auth_mode="oauth",
-            principals={
-                "default": PrincipalConfig(
-                    "default",
-                    "gateway",
-                    token_digest("gateway-token"),
-                    frozenset({"conversation_context"}),
-                )
-            },
-            cursor_secret=b"c" * 32,
-            transport_hmac_secret=b"t" * 32,
-        )
-        dynamic_oauth = object()
-        with (
-            patch.object(
-                brain_service.MetaAdsOAuth,
-                "from_store_or_new",
-                return_value=dynamic_oauth,
-            ) as from_store_or_new,
-            patch.object(
-                brain_service.MetaAdsOAuth,
-                "from_store",
-                side_effect=AssertionError("legacy OAuth constructor used"),
-            ),
-            patch.object(
-                brain_service, "OAuthCredentialProvider", return_value="provider"
-            ) as provider_factory,
-            patch.object(brain_service, "MetaAttributionService"),
-            patch.object(brain_service.RuntimeDatabase, "initialize"),
-        ):
-            brain_service.BrainService(settings)
-
-        from_store_or_new.assert_called_once()
-        provider_factory.assert_called_once_with(dynamic_oauth)
-
     def test_meta_deployment_examples_smoke_and_runbook_preserve_read_only_contract(
         self,
     ) -> None:
@@ -583,10 +415,6 @@ tools = ["conversation_context"]
         for source in (readme, runbook):
             self.assertIn("act_1598606388477916", source)
             self.assertIn("https://mcp.facebook.com/ads", source)
-        for source in (readme, runbook):
-            self.assertIn("meta_ads_oauth.py clear", source)
-            self.assertIn("meta_ads_oauth.py login", source)
-            self.assertNotIn("meta_ads_oauth.py configure", source)
         for required in (
             "Create & manage ads with Ads MCP server",
             "Read/Manage",

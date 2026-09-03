@@ -25,7 +25,6 @@ from .meta_ads_models import (
     canonical_account_id,
     eligible_source,
 )
-from .meta_ads_oauth import OAuthCredentialProvider
 from .meta_ads_store import AUTH_CIRCUIT_SECONDS, MetaAdsStore
 from .runtime_db import RuntimeDatabase
 
@@ -58,14 +57,12 @@ class MetaAttributionService:
         store: MetaAdsStore,
         client: MetaAdsClient,
         *,
-        credential_provider: OAuthCredentialProvider | None = None,
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._runtime = runtime
         self._store = store
         self._client = client
-        self._credential_provider = credential_provider
         self._monotonic_clock = monotonic_clock
         self._account_id = (
             canonical_account_id(settings.meta_ad_account_id)
@@ -339,17 +336,6 @@ class MetaAttributionService:
         return self.run_due_jobs(now)
 
     def _credential_status(self, now: float) -> str:
-        if self._settings.meta_ads_mcp_auth_mode == "oauth":
-            if self._credential_provider is None:
-                return "missing"
-            status = self._credential_provider.status(now)
-            return {
-                "ready": "valid",
-                "expiring": "expiring",
-                "expired": "expired",
-                "missing": "missing",
-                "degraded": "expired",
-            }[status]
         if not self._settings.meta_ads_mcp_access_token:
             return "missing"
         expiry = self._settings.meta_ads_mcp_token_expires_at
@@ -413,13 +399,6 @@ class MetaAttributionService:
         )
 
     def _credential_fingerprint(self) -> str | None:
-        if self._settings.meta_ads_mcp_auth_mode == "oauth":
-            if self._credential_provider is None:
-                return None
-            key = self._settings.transport_hmac_secret
-            if not key:
-                return None
-            return self._credential_provider.fingerprint(key)
         credential = self._settings.meta_ads_mcp_access_token
         if not credential:
             return None
