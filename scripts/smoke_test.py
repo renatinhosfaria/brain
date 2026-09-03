@@ -93,20 +93,8 @@ def main() -> int:
         "schema": "compatible",
         "hermes_compatibility": "compatible",
     }
-    if status != 200 or any(
-        payload.get(key) != value for key, value in expected.items()
-    ):
+    if status != 200 or payload != expected:
         print("FAIL: Brain health is incompatible", file=sys.stderr)
-        return 1
-    meta_status = payload.get("meta_ads_attribution")
-    if meta_status == "disabled":
-        pass
-    elif meta_status in {"ready", "degraded"}:
-        # Meta can degrade independently; the concrete reason is deliberately
-        # not rendered by this smoke check because it can contain remote data.
-        pass
-    else:
-        print("FAIL: Brain Meta health is incompatible", file=sys.stderr)
         return 1
 
     def env_value(path: Path, key: str) -> str:

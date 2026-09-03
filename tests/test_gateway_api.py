@@ -6,12 +6,8 @@ import sqlite3
 import tempfile
 import time
 import unittest
-from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
-from threading import Event
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from starlette.requests import Request
 
@@ -19,43 +15,8 @@ from brain import service
 from brain.config import BrainSettings, PrincipalConfig, token_digest
 from brain.gateway_api import GatewayAPI
 from brain.mcp_server import BrainMCPServer, _tools
-from brain.meta_ads_models import MetaAdRecord, MetaAdsError
-from brain.meta_ads_store import MetaAdsStore
 from brain.service import BrainService
 from brain.transport_models import RuntimeIds
-
-
-class _BlockingMetaClient:
-    """Controlled remote double that honors the timeout passed by the resolver."""
-
-    def __init__(self) -> None:
-        self.timeouts: list[float] = []
-
-    def get_ad(
-        self,
-        _source_id: str,
-        _now: float,
-        *,
-        timeout_seconds: float | None = None,
-    ) -> MetaAdRecord:
-        assert timeout_seconds is not None
-        self.timeouts.append(timeout_seconds)
-        time.sleep(timeout_seconds)
-        raise MetaAdsError("meta_timeout")
-
-
-class _NonConformingContextResolver:
-    """Resolver double that deliberately ignores the context budget."""
-
-    def __init__(self) -> None:
-        self.started = Event()
-
-    def resolve_contact_pending(
-        self, _event_id: str, _now: float, *, budget_seconds: float
-    ) -> bool:
-        self.started.set()
-        time.sleep(service.CONTEXT_META_OPERATION_TIMEOUT_SECONDS + 0.5)
-        return False
 
 
 class GatewayAPITests(unittest.TestCase):
@@ -119,7 +80,9 @@ class GatewayAPITests(unittest.TestCase):
                     "default",
                     "gateway",
                     token_digest("gateway-secret"),
-                    frozenset({"conversation_phone", "conversation_context"}),
+                    frozenset(
+                        {"conversation_phone", "conversation_context"}
+                    ),
                 ),
                 "reno": PrincipalConfig(
                     "reno",
@@ -281,46 +244,6 @@ class GatewayAPITests(unittest.TestCase):
     def context_payload(self) -> dict[str, str]:
         return self.valid_context()
 
-    def enable_meta_attribution(
-        self,
-        *,
-        clock: Callable[[], float] | None = None,
-        monotonic_clock: Callable[[], float] = time.monotonic,
-    ) -> MetaAdsStore:
-        settings = replace(
-            self.service.settings,
-            meta_attribution_enabled=True,
-            meta_ad_account_id="act_1598606388477916",
-            meta_ads_mcp_access_token="fixture-token",
-        )
-        self.service = BrainService(
-            settings,
-            clock=time.time if clock is None else clock,
-            monotonic_clock=monotonic_clock,
-        )
-        self.api = GatewayAPI(self.service)
-        return MetaAdsStore("1598606388477916")
-
-    @staticmethod
-    def meta_record(*, fetched_at: float) -> MetaAdRecord:
-        return MetaAdRecord(
-            account_id="1598606388477916",
-            ad_id="120200000000001",
-            ad_name="Lead ad",
-            ad_status="PAUSED",
-            ad_effective_status="ACTIVE",
-            adset_id="120300000000001",
-            adset_name="Prospecting",
-            adset_status="ACTIVE",
-            campaign_id="120400000000001",
-            campaign_name="September leads",
-            campaign_status="PAUSED",
-            creative_id="120500000000001",
-            creative_name="Image A",
-            metadata_complete=True,
-            fetched_at=fetched_at,
-        )
-
     def test_gateway_context_resolves_phone_after_state_revalidation(self) -> None:
         (self.mapping_dir / "lid-mapping-5534999772714.json").write_text(
             '"123456789012345"', encoding="utf-8"
@@ -448,7 +371,6 @@ class GatewayAPITests(unittest.TestCase):
         response = self.post_context(self.context_payload())
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
         self.assertEqual(
             response.json(),
             {
@@ -465,7 +387,6 @@ class GatewayAPITests(unittest.TestCase):
                         "source_app": "instagram",
                         "inbound_kind": None,
                         "external_ad_reply": None,
-                        "meta_attribution": None,
                     },
                     {
                         "event_id": ordinary,
@@ -473,7 +394,6 @@ class GatewayAPITests(unittest.TestCase):
                         "source_app": None,
                         "inbound_kind": None,
                         "external_ad_reply": None,
-                        "meta_attribution": None,
                     },
                 ],
             },
@@ -517,414 +437,6 @@ class GatewayAPITests(unittest.TestCase):
                     "data": "AAEC/w==",
                 },
             },
-        )
-        self.assertIsNone(event["meta_attribution"])
-
-    def test_conversation_context_exposes_confirmed_exact_meta_attribution(
-        self,
-    ) -> None:
-        """Omitting a proven ad would prevent the CEO from identifying a CTWA lead."""
-        self.prepare_turn_identity()
-        store = self.enable_meta_attribution(clock=lambda: 1_700_000_050.0)
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="confirmed-meta",
-            timestamp=1_700_000_000.0,
-        )
-        record = self.meta_record(fetched_at=1_700_000_020.0)
-        self.service.runtime.write(
-            lambda conn: store.upsert_record_and_confirm(
-                conn, record, confirmed_at=1_700_000_021.0
-            )
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={
-                    "sourceType": "ad",
-                    "sourceId": "120200000000001",
-                    "ctwaClid": "clid-123",
-                },
-                now=1_700_000_022.0,
-            )
-        )
-
-        response = self.post_context(self.context_payload())
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
-        self.assertEqual(
-            response.json()["events"][0]["meta_attribution"],
-            {
-                "status": "confirmed",
-                "account_id": "act_1598606388477916",
-                "matched_by": "source_id_exact",
-                "source_id": "120200000000001",
-                "ctwa_clid": "clid-123",
-                "ad": {
-                    "id": "120200000000001",
-                    "name": "Lead ad",
-                    "status": "ACTIVE",
-                },
-                "adset": {
-                    "id": "120300000000001",
-                    "name": "Prospecting",
-                    "status": "ACTIVE",
-                },
-                "campaign": {
-                    "id": "120400000000001",
-                    "name": "September leads",
-                    "status": "PAUSED",
-                },
-                "creative": {
-                    "id": "120500000000001",
-                    "name": "Image A",
-                },
-                "metadata_complete": True,
-                "confirmed_at": "2023-11-14T22:13:42Z",
-                "metadata_fetched_at": "2023-11-14T22:13:40Z",
-            },
-        )
-
-    def test_conversation_context_exposes_pending_meta_attribution(
-        self,
-    ) -> None:
-        """Treating an unresolved CTWA source as null would hide durable retry state."""
-        self.prepare_turn_identity()
-        self.enable_meta_attribution()
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="pending-meta",
-            timestamp=time.time() - 10,
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={
-                    "sourceType": "ad",
-                    "sourceId": "120200000000001",
-                    "ctwaClid": "clid-123",
-                },
-                now=time.time() - 5,
-            )
-        )
-        self.service.meta_attribution = SimpleNamespace(
-            enabled=True,
-            resolve_contact_pending=lambda _event_id, _now, *, budget_seconds: False,
-        )
-
-        response = self.post_context(self.context_payload())
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
-        self.assertEqual(
-            response.json()["events"][0]["meta_attribution"],
-            {
-                "status": "pending",
-                "source_id": "120200000000001",
-                "ctwa_clid": "clid-123",
-                "last_attempt_at": None,
-                "retry_scheduled": True,
-                "last_error_code": None,
-            },
-        )
-
-    def test_context_lookup_stops_at_the_remaining_deadline_and_keeps_raw_pending(
-        self,
-    ) -> None:
-        """A slow Meta read must not make the CEO lose the transport context."""
-        self.prepare_turn_identity()
-        clock_values = iter((100.0, 100.0, 104.98, 104.99, 104.995))
-        self.enable_meta_attribution(
-            clock=lambda: 1_700_000_050.0,
-            monotonic_clock=lambda: next(clock_values),
-        )
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="bounded-meta",
-            timestamp=1_700_000_000.0,
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={"sourceType": "ad", "sourceId": "120200000000001"},
-                now=1_700_000_010.0,
-            )
-        )
-        blocking_client = _BlockingMetaClient()
-        attribution._client = blocking_client  # type: ignore[assignment]
-
-        started = time.perf_counter()
-        response = self.post_context(self.context_payload())
-        elapsed = time.perf_counter() - started
-
-        self.assertLess(elapsed, 0.5)
-        event = response.json()["events"][0]
-        self.assertEqual(event["external_ad_reply"]["sourceId"], "120200000000001")
-        self.assertEqual(event["meta_attribution"]["status"], "pending")
-        self.assertIn(
-            event["meta_attribution"]["last_error_code"], {None, "meta_timeout"}
-        )
-
-    def test_context_deadline_does_not_wait_for_a_nonconforming_resolver(
-        self,
-    ) -> None:
-        """An injected resolver that ignores its budget must not hold the CEO past 5s."""
-        self.prepare_turn_identity()
-        self.enable_meta_attribution()
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="nonconforming-resolver",
-            timestamp=time.time() - 10,
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={"sourceType": "ad", "sourceId": "120200000000001"},
-                now=time.time() - 5,
-            )
-        )
-        resolver = _NonConformingContextResolver()
-        self.service.meta_attribution = SimpleNamespace(
-            enabled=True, resolve_contact_pending=resolver.resolve_contact_pending
-        )
-
-        started = time.perf_counter()
-        response = self.post_context(self.context_payload())
-        elapsed = time.perf_counter() - started
-
-        self.assertTrue(resolver.started.is_set())
-        self.assertLess(elapsed, service.CONTEXT_META_OPERATION_TIMEOUT_SECONDS + 0.3)
-        self.assertEqual(response.json()["status"], "ok")
-        self.assertEqual(
-            response.json()["events"][0]["meta_attribution"]["status"], "pending"
-        )
-
-    def test_context_rereads_after_immediate_resolution_before_rendering(
-        self,
-    ) -> None:
-        """Using a pre-resolution view would hide a worker confirmation race."""
-        self.prepare_turn_identity()
-        store = self.enable_meta_attribution()
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="resolution-race",
-            timestamp=time.time() - 10,
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={"sourceType": "ad", "sourceId": "120200000000001"},
-                now=time.time() - 5,
-            )
-        )
-        record = self.meta_record(fetched_at=time.time() - 1)
-
-        def confirm(_event_id: str, now: float, *, budget_seconds: float) -> bool:
-            self.service.runtime.write(
-                lambda conn: store.upsert_record_and_confirm(
-                    conn, record, confirmed_at=now
-                )
-            )
-            return True
-
-        self.service.meta_attribution = SimpleNamespace(
-            enabled=True, resolve_contact_pending=confirm
-        )
-
-        event = self.post_context(self.context_payload()).json()["events"][0]
-
-        self.assertEqual(event["meta_attribution"]["status"], "confirmed")
-        self.assertEqual(event["meta_attribution"]["ad"]["id"], "120200000000001")
-
-    def test_context_rereads_when_worker_confirms_before_pending_selection(
-        self,
-    ) -> None:
-        """A worker confirmation after the snapshot must not render stale pending."""
-        self.prepare_turn_identity()
-        store = self.enable_meta_attribution()
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="selection-race",
-            timestamp=time.time() - 10,
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={"sourceType": "ad", "sourceId": "120200000000001"},
-                now=time.time() - 5,
-            )
-        )
-        record = self.meta_record(fetched_at=time.time() - 1)
-
-        def confirm_before_selection(**_: object) -> None:
-            self.service.runtime.write(
-                lambda conn: store.upsert_record_and_confirm(
-                    conn, record, confirmed_at=time.time()
-                )
-            )
-
-        with patch.object(
-            self.service,
-            "_pending_context_meta_event_id_until_deadline",
-            side_effect=confirm_before_selection,
-        ):
-            event = self.post_context(self.context_payload()).json()["events"][0]
-
-        self.assertEqual(event["meta_attribution"]["status"], "confirmed")
-        self.assertEqual(event["meta_attribution"]["ad"]["id"], "120200000000001")
-
-    def test_context_downgrades_an_inconsistent_stored_confirmation_to_pending(
-        self,
-    ) -> None:
-        """A missing catalog proof must never be rendered as a named Meta ad."""
-        self.prepare_turn_identity()
-        store = self.enable_meta_attribution()
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="inconsistent-confirmation",
-            timestamp=time.time() - 10,
-        )
-        record = self.meta_record(fetched_at=time.time() - 1)
-        self.service.runtime.write(
-            lambda conn: store.upsert_record_and_confirm(
-                conn, record, confirmed_at=time.time()
-            )
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={"sourceType": "ad", "sourceId": "120200000000001"},
-                now=time.time(),
-            )
-        )
-        self.service.runtime.write(
-            lambda conn: conn.execute(
-                "DELETE FROM meta_ads_catalog WHERE account_id = ? AND ad_id = ?",
-                ("1598606388477916", "120200000000001"),
-            )
-        )
-
-        event = self.post_context(self.context_payload()).json()["events"][0]
-
-        self.assertEqual(event["meta_attribution"]["status"], "pending")
-        self.assertEqual(
-            event["meta_attribution"]["last_error_code"], "meta_invalid_response"
-        )
-        self.assertNotIn("ad", event["meta_attribution"])
-
-    def test_context_rejects_the_complete_expanded_meta_response_when_too_large(
-        self,
-    ) -> None:
-        """Size enforcement must include Meta metadata, not only raw CTWA bytes."""
-        self.prepare_turn_identity()
-        store = self.enable_meta_attribution()
-        event_id = self.seed_event(
-            "ad click",
-            transport_kind="ctwa_candidate",
-            source_app="instagram",
-            external_ad_reply_raw_json=(
-                '{"ctwaClid":"clid-123","sourceId":"120200000000001","sourceType":"ad"}'
-            ),
-            suffix="oversized-meta",
-            timestamp=time.time() - 10,
-        )
-        record = MetaAdRecord(
-            account_id="1598606388477916",
-            ad_id="120200000000001",
-            ad_name="a" * 512,
-            ad_status=None,
-            ad_effective_status=None,
-            adset_id="120300000000001",
-            adset_name="b" * 512,
-            adset_status=None,
-            campaign_id="120400000000001",
-            campaign_name="c" * 512,
-            campaign_status=None,
-            creative_id="120500000000001",
-            creative_name="d" * 512,
-            metadata_complete=True,
-            fetched_at=time.time() - 1,
-        )
-        self.service.runtime.write(
-            lambda conn: store.upsert_record_and_confirm(
-                conn, record, confirmed_at=time.time()
-            )
-        )
-        attribution = self.service.meta_attribution
-        assert attribution is not None
-        self.service.runtime.write(
-            lambda conn: attribution.stage_event(
-                conn,
-                event_id=event_id,
-                raw={"sourceType": "ad", "sourceId": "120200000000001"},
-                now=time.time(),
-            )
-        )
-        object.__setattr__(self.service.settings, "context_response_max_bytes", 1024)
-
-        response = self.post_context(self.context_payload())
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json(),
-            {"status": "unavailable", "reason": "context_too_large"},
         )
 
     def test_conversation_context_returns_unavailable_for_invalid_stored_raw(

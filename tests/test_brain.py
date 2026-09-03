@@ -10,7 +10,6 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +21,6 @@ from brain.config import BrainSettings, PrincipalConfig, token_digest
 from brain.db import ReadOnlyDatabase
 from brain.errors import BrainError
 from brain.mcp_server import BrainMCPServer, _tools
-from brain.meta_attribution import MetaAttributionHealth
 from brain.projection import ProjectedMessage, project_rows
 from brain.service import BrainService, Health
 
@@ -271,8 +269,6 @@ class BrainFixture(unittest.TestCase):
                 "gateway_bridge": "configured",
                 "schema": "compatible",
                 "hermes_compatibility": "compatible",
-                "meta_ads_attribution": "disabled",
-                "meta_ads_credential": "missing",
             },
         )
 
@@ -434,106 +430,6 @@ class BrainFixture(unittest.TestCase):
                 "gateway_bridge": "configured",
                 "schema": "compatible",
                 "hermes_compatibility": "compatible",
-                "meta_ads_attribution": "disabled",
-                "meta_ads_credential": "missing",
-            },
-        )
-
-    def test_meta_attribution_health_is_independent_from_brain_readiness(self) -> None:
-        """A Meta outage must not turn a working conversation bridge unavailable."""
-        missing_credential = replace(
-            self.settings,
-            meta_attribution_enabled=True,
-            meta_ad_account_id="act_1598606388477916",
-            meta_ads_mcp_access_token="",
-        )
-
-        health = BrainService(missing_credential).health()
-
-        self.assertEqual(health.status, "ok")
-        self.assertEqual(health.meta_ads_attribution, "degraded")
-        self.assertEqual(health.meta_ads_credential, "missing")
-
-    def test_meta_attribution_expiry_warnings_use_the_injected_clock(self) -> None:
-        """Expiry warning windows must not depend on the machine's wall clock."""
-        now = 1_700_000_000.0
-        for days in (14, 7, 3):
-            with self.subTest(days=days):
-                settings = replace(
-                    self.settings,
-                    meta_attribution_enabled=True,
-                    meta_ad_account_id="act_1598606388477916",
-                    meta_ads_mcp_access_token="fixture-token",
-                    meta_ads_mcp_token_expires_at=now + days * 86_400,
-                )
-
-                health = BrainService(settings, clock=lambda: now).health()
-
-                self.assertEqual(health.status, "ok")
-                self.assertEqual(health.meta_ads_attribution, "degraded")
-                self.assertEqual(health.meta_ads_credential, "expiring")
-
-    def test_failed_meta_probe_is_reported_without_breaking_brain_health(self) -> None:
-        """A failed capability probe must stay visible without denying conversations."""
-        settings = replace(
-            self.settings,
-            meta_attribution_enabled=True,
-            meta_ad_account_id="act_1598606388477916",
-            meta_ads_mcp_access_token="fixture-token",
-        )
-        service = BrainService(settings)
-        service.meta_attribution = SimpleNamespace(
-            health=lambda _now: MetaAttributionHealth("degraded", "valid")
-        )
-
-        health = service.health()
-
-        self.assertEqual(health.status, "ok")
-        self.assertEqual(health.meta_ads_attribution, "degraded")
-        self.assertEqual(health.meta_ads_credential, "valid")
-
-    def test_context_downgrades_null_catalog_name_in_a_confirmed_row(self) -> None:
-        """Stringifying NULL catalog fields would fabricate a named Meta ad."""
-        payload = BrainService._meta_attribution_from_row(
-            {
-                "meta_source_id": "120200000000001",
-                "meta_ctwa_clid": None,
-                "meta_job_source_id": None,
-                "meta_last_attempt_at": None,
-                "meta_last_error_code": None,
-                "meta_status": "confirmed",
-                "meta_match_method": "source_id_exact",
-                "meta_matched_ad_id": "120200000000001",
-                "meta_account_id": "1598606388477916",
-                "catalog_account_id": "1598606388477916",
-                "meta_metadata_complete": 0,
-                "catalog_metadata_complete": 0,
-                "catalog_ad_id": "120200000000001",
-                "catalog_ad_name": None,
-                "catalog_ad_status": None,
-                "catalog_ad_effective_status": None,
-                "catalog_adset_id": None,
-                "catalog_adset_name": None,
-                "catalog_adset_status": None,
-                "catalog_campaign_id": "120400000000001",
-                "catalog_campaign_name": "September",
-                "catalog_campaign_status": None,
-                "catalog_creative_id": None,
-                "catalog_creative_name": None,
-                "catalog_fetched_at": 100.0,
-                "meta_confirmed_at": 101.0,
-            }
-        )
-
-        self.assertEqual(
-            payload,
-            {
-                "status": "pending",
-                "source_id": "120200000000001",
-                "ctwa_clid": None,
-                "last_attempt_at": None,
-                "retry_scheduled": False,
-                "last_error_code": "meta_invalid_response",
             },
         )
 
@@ -605,13 +501,6 @@ class BrainFixture(unittest.TestCase):
                     "incompatible",
                     "configured",
                     "unconfigured",
-                    "disabled",
-                    "ready",
-                    "degraded",
-                    "missing",
-                    "valid",
-                    "expiring",
-                    "expired",
                 }
                 for value in health.values()
             )
@@ -1419,114 +1308,6 @@ class BrainFixture(unittest.TestCase):
             self.assertEqual(result["messages"][-1]["text"], "mensagem ainda no WAL")
         finally:
             writer.close()
-
-
-class _LifespanAttribution:
-    """External Meta boundary double; its exception text is intentionally sensitive."""
-
-    def __init__(self, failures: list[str] | None = None) -> None:
-        self.failures = list(failures or [])
-        self.tick_calls = 0
-        self.tick_started = threading.Event()
-
-    def tick(self, _now: float) -> int:
-        self.tick_calls += 1
-        self.tick_started.set()
-        if self.failures:
-            operation = self.failures.pop(0)
-            if operation == "refresh_catalog":
-                return self.refresh_catalog()
-            return self.run_due_jobs()
-        return 2
-
-    @staticmethod
-    def refresh_catalog() -> int:
-        raise RuntimeError(
-            "fixture-token 120200000000001 fixture-click-id Fixture campaign"
-        )
-
-    @staticmethod
-    def run_due_jobs() -> int:
-        raise RuntimeError(
-            "fixture-token 120200000000001 fixture-click-id Fixture campaign"
-        )
-
-
-class _LifespanTransport:
-    def __init__(self) -> None:
-        self.calls = 0
-        self.completed = threading.Event()
-
-    def apply_retention(self, _now: float) -> int:
-        self.calls += 1
-        self.completed.set()
-        return 0
-
-
-class BrainMCPServerLifespanTests(unittest.IsolatedAsyncioTestCase):
-    async def test_meta_worker_runs_before_readiness_and_cancels_on_shutdown(
-        self,
-    ) -> None:
-        """Removing the worker would leave eligible CTWA leads permanently pending."""
-        attribution = _LifespanAttribution()
-        transport = _LifespanTransport()
-        service = SimpleNamespace(
-            settings=SimpleNamespace(host="127.0.0.1"),
-            meta_attribution=attribution,
-            transport_service=transport,
-        )
-        server = BrainMCPServer(service)  # type: ignore[arg-type]
-        application = server.app()
-
-        with patch("brain.mcp_server.RETENTION_LOOP_SECONDS", 0.001):
-            async with application.router.lifespan_context(application):
-                self.assertGreaterEqual(attribution.tick_calls, 1)
-                await asyncio.wait_for(
-                    asyncio.to_thread(transport.completed.wait), timeout=0.5
-                )
-                self.assertGreaterEqual(transport.calls, 1)
-
-        self.assertIsNone(server._meta_attribution_task)
-
-    async def test_meta_worker_failure_is_sanitized_and_does_not_stop_retention(
-        self,
-    ) -> None:
-        """Leaking an SDK error or killing the lifespan would expose and lose work."""
-        attribution = _LifespanAttribution(["refresh_catalog", "run_due_jobs"])
-        transport = _LifespanTransport()
-        service = SimpleNamespace(
-            settings=SimpleNamespace(host="127.0.0.1"),
-            meta_attribution=attribution,
-            transport_service=transport,
-        )
-        server = BrainMCPServer(service)  # type: ignore[arg-type]
-        application = server.app()
-
-        with (
-            patch("brain.mcp_server.RETENTION_LOOP_SECONDS", 0.001),
-            patch("brain.mcp_server.META_ATTRIBUTION_ERROR_DELAY_SECONDS", 0.001),
-            self.assertLogs("brain.meta_attribution", level="INFO") as captured,
-        ):
-            async with application.router.lifespan_context(application):
-                await asyncio.wait_for(
-                    asyncio.to_thread(transport.completed.wait), timeout=0.5
-                )
-                for _ in range(100):
-                    if attribution.tick_calls >= 3:
-                        break
-                    await asyncio.sleep(0.005)
-                self.assertGreaterEqual(attribution.tick_calls, 3)
-                self.assertGreaterEqual(transport.calls, 1)
-
-        output = "\n".join(captured.output)
-        self.assertIn("meta_operation_failed", output)
-        for secret in (
-            "fixture-token",
-            "120200000000001",
-            "fixture-click-id",
-            "Fixture campaign",
-        ):
-            self.assertNotIn(secret, output)
 
 
 if __name__ == "__main__":

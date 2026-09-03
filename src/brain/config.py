@@ -9,18 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 import os
 import re
 import secrets
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
-
-from brain.meta_ads_models import canonical_account_id
 
 DEFAULT_STATE_DB = Path("/root/.hermes/state.db")
 DEFAULT_KANBAN_DB = Path("/root/.hermes/kanban.db")
@@ -40,31 +36,6 @@ VALID_TOOLS = frozenset(
 _PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _DECIMAL_INTEGER_RE = re.compile(r"^-?[0-9]+$")
 logger = logging.getLogger("brain.config")
-_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
-
-
-def _meta_bool(value: object, name: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value in {"true", "false"}:
-        return value == "true"
-    raise ValueError(f"{name} must be true or false")
-
-
-def _meta_expiry(value: object, name: str) -> float | None:
-    if value in (None, ""):
-        return None
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be RFC3339")
-    if not _RFC3339_UTC_RE.fullmatch(value):
-        raise ValueError(f"{name} must be RFC3339 UTC")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be RFC3339") from exc
-    if parsed.tzinfo is None:
-        raise ValueError(f"{name} must include timezone")
-    return parsed.timestamp()
 
 
 def token_digest(token: str) -> str:
@@ -162,14 +133,6 @@ class BrainSettings:
     context_response_max_bytes: int = 32 * 1024 * 1024
     busy_retries: int = 2
     busy_timeout_seconds: float = 1.0
-    meta_attribution_enabled: bool = False
-    meta_ad_account_id: str = ""
-    meta_ads_mcp_access_token: str = field(default="", repr=False)
-    meta_ads_mcp_token_expires_at: float | None = None
-    meta_ads_mcp_timeout_seconds: float = 4.0
-    meta_ads_mcp_response_max_bytes: int = 8 * 1024 * 1024
-    meta_ads_sync_interval_seconds: int = 900
-    meta_ads_full_sync_interval_seconds: int = 86_400
 
     def __post_init__(self) -> None:
         if self.host not in {"127.0.0.1", "localhost", "::1"}:
@@ -196,46 +159,6 @@ class BrainSettings:
             raise ValueError("busy_retries must be between 0 and 5")
         if self.busy_timeout_seconds <= 0:
             raise ValueError("busy_timeout_seconds must be positive")
-        if not isinstance(self.meta_attribution_enabled, bool):
-            raise TypeError("meta_attribution_enabled must be boolean")
-        if self.meta_attribution_enabled or self.meta_ad_account_id:
-            canonical_account_id(self.meta_ad_account_id)
-        if not isinstance(self.meta_ads_mcp_access_token, str):
-            raise TypeError("Meta Ads token must be text")
-        if self.meta_ads_mcp_token_expires_at is not None and (
-            not isinstance(self.meta_ads_mcp_token_expires_at, (int, float))
-            or isinstance(self.meta_ads_mcp_token_expires_at, bool)
-            or not math.isfinite(self.meta_ads_mcp_token_expires_at)
-        ):
-            raise ValueError("Meta Ads token expiry must be finite")
-        if (
-            not isinstance(self.meta_ads_mcp_timeout_seconds, (int, float))
-            or isinstance(self.meta_ads_mcp_timeout_seconds, bool)
-            or not math.isfinite(self.meta_ads_mcp_timeout_seconds)
-            or self.meta_ads_mcp_timeout_seconds <= 0
-        ):
-            raise ValueError("Meta Ads timeout must be finite and positive")
-        if (
-            isinstance(self.meta_ads_mcp_response_max_bytes, bool)
-            or not isinstance(self.meta_ads_mcp_response_max_bytes, int)
-            or not 1 * 1024 * 1024
-            <= self.meta_ads_mcp_response_max_bytes
-            <= 32 * 1024 * 1024
-        ):
-            raise ValueError("Meta Ads response limit must be between 1 and 32 MiB")
-        if (
-            isinstance(self.meta_ads_sync_interval_seconds, bool)
-            or not isinstance(self.meta_ads_sync_interval_seconds, int)
-            or self.meta_ads_sync_interval_seconds < 60
-        ):
-            raise ValueError("Meta Ads sync interval must be at least 60 seconds")
-        if (
-            isinstance(self.meta_ads_full_sync_interval_seconds, bool)
-            or not isinstance(self.meta_ads_full_sync_interval_seconds, int)
-            or self.meta_ads_full_sync_interval_seconds
-            < self.meta_ads_sync_interval_seconds
-        ):
-            raise ValueError("Meta Ads full sync interval must cover incremental sync")
         if self.transport_retention_days <= 0:
             raise ValueError("transport_retention_days must be positive")
         if self.display_name_ttl_hours <= 0:
@@ -344,27 +267,6 @@ class BrainSettings:
             return parsed
 
         transport_hmac_secret = required_hmac_secret("BRAIN_TRANSPORT_HMAC_SECRET")
-        meta_enabled = _meta_bool(
-            os.environ.get(
-                "BRAIN_META_ATTRIBUTION_ENABLED",
-                server.get("meta_attribution_enabled", False),
-            ),
-            "BRAIN_META_ATTRIBUTION_ENABLED",
-        )
-        configured_account = os.environ.get(
-            "BRAIN_META_AD_ACCOUNT_ID", server.get("meta_ad_account_id", "")
-        )
-        if configured_account:
-            canonical_account_id(configured_account)
-        meta_account = canonical_account_id(configured_account) if meta_enabled else ""
-        meta_token = os.environ.get("BRAIN_META_ADS_MCP_ACCESS_TOKEN", "")
-        meta_expiry = _meta_expiry(
-            os.environ.get(
-                "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT",
-                server.get("meta_ads_mcp_token_expires_at"),
-            ),
-            "BRAIN_META_ADS_MCP_TOKEN_EXPIRES_AT",
-        )
 
         return cls(
             state_db=Path(
@@ -451,34 +353,6 @@ class BrainSettings:
                 os.environ.get(
                     "BRAIN_BUSY_TIMEOUT_SECONDS",
                     server.get("busy_timeout_seconds", 1.0),
-                )
-            ),
-            meta_attribution_enabled=meta_enabled,
-            meta_ad_account_id=meta_account,
-            meta_ads_mcp_access_token=meta_token,
-            meta_ads_mcp_token_expires_at=meta_expiry,
-            meta_ads_mcp_timeout_seconds=float(
-                os.environ.get(
-                    "BRAIN_META_ADS_MCP_TIMEOUT_SECONDS",
-                    server.get("meta_ads_mcp_timeout_seconds", 4.0),
-                )
-            ),
-            meta_ads_mcp_response_max_bytes=_raw_attribution_limit(
-                server,
-                "meta_ads_mcp_response_max_bytes",
-                "BRAIN_META_ADS_MCP_RESPONSE_MAX_BYTES",
-                8 * 1024 * 1024,
-            ),
-            meta_ads_sync_interval_seconds=int(
-                os.environ.get(
-                    "BRAIN_META_ADS_SYNC_INTERVAL_SECONDS",
-                    server.get("meta_ads_sync_interval_seconds", 900),
-                )
-            ),
-            meta_ads_full_sync_interval_seconds=int(
-                os.environ.get(
-                    "BRAIN_META_ADS_FULL_SYNC_INTERVAL_SECONDS",
-                    server.get("meta_ads_full_sync_interval_seconds", 86_400),
                 )
             ),
         )

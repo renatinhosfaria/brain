@@ -14,10 +14,6 @@ from brain.transport_models import RuntimeIds
 BUSINESS_TABLES = {
     "transport_events",
     "contact_ephemera",
-    "meta_ads_catalog",
-    "ctwa_meta_attributions",
-    "meta_attribution_jobs",
-    "meta_attribution_state",
 }
 
 
@@ -74,159 +70,6 @@ class RuntimeDatabaseTests(unittest.TestCase):
         )
         self.assertEqual(kept, "event-kept")
 
-    def test_read_accepts_a_narrower_operation_timeout(self) -> None:
-        """A context deadline must not silently use the normal one-second DB wait."""
-        self.initialize()
-
-        value = self.runtime.read(
-            lambda conn: conn.execute("SELECT 1").fetchone()[0],
-            timeout_seconds=0.01,
-        )
-
-        self.assertEqual(value, 1)
-
-    def test_initialize_creates_meta_attribution_schema_and_indexes(self) -> None:
-        """Removing a durable attribution field must break the runtime contract."""
-        self.initialize()
-
-        def schema(conn: sqlite3.Connection) -> tuple[set[str], str, set[str]]:
-            attribution_columns = {
-                str(row[1])
-                for row in conn.execute("PRAGMA table_info(ctwa_meta_attributions)")
-            }
-            attribution_sql = str(
-                conn.execute(
-                    "SELECT sql FROM sqlite_master "
-                    "WHERE type = 'table' AND name = 'ctwa_meta_attributions'"
-                ).fetchone()[0]
-            )
-            indexes = {
-                str(row[1])
-                for table in (
-                    "meta_ads_catalog",
-                    "ctwa_meta_attributions",
-                    "meta_attribution_jobs",
-                )
-                for row in conn.execute(f"PRAGMA index_list({table})")
-            }
-            return attribution_columns, attribution_sql, indexes
-
-        columns, attribution_sql, indexes = self.runtime.read(schema)
-        self.assertEqual(
-            columns,
-            {
-                "event_id",
-                "account_id",
-                "source_id",
-                "ctwa_clid",
-                "status",
-                "matched_ad_id",
-                "match_method",
-                "metadata_complete",
-                "confirmed_at",
-                "last_attempt_at",
-                "last_error_code",
-                "created_at",
-                "updated_at",
-            },
-        )
-        self.assertIn("ON DELETE CASCADE", attribution_sql)
-        self.assertIn("matched_ad_id = source_id", attribution_sql)
-        self.assertIn("match_method = 'source_id_exact'", attribution_sql)
-        self.assertTrue(
-            {
-                "idx_meta_attribution_jobs_due",
-                "idx_ctwa_meta_attributions_lookup",
-                "idx_meta_ads_catalog_gc",
-            }.issubset(indexes)
-        )
-
-    def test_initialize_creates_account_level_meta_attribution_state(self) -> None:
-        """An auth circuit without jobs still needs durable per-account state."""
-        self.initialize()
-
-        columns, sql = self.runtime.read(
-            lambda conn: (
-                {
-                    str(row[1])
-                    for row in conn.execute("PRAGMA table_info(meta_attribution_state)")
-                },
-                str(
-                    conn.execute(
-                        "SELECT sql FROM sqlite_master WHERE type = 'table' "
-                        "AND name = 'meta_attribution_state'"
-                    ).fetchone()[0]
-                ),
-            )
-        )
-
-        self.assertEqual(
-            columns,
-            {
-                "account_id",
-                "auth_circuit_until",
-                "auth_credential_fingerprint",
-                "updated_at",
-            },
-        )
-        self.assertIn("PRIMARY KEY", sql)
-
-    def test_initialize_adds_credential_fingerprint_to_legacy_circuit_state(
-        self,
-    ) -> None:
-        """A state migration must retain its horizon without storing a credential."""
-        self.path.parent.mkdir(parents=True)
-        conn = sqlite3.connect(self.path)
-        try:
-            conn.execute(
-                "CREATE TABLE meta_attribution_state ("
-                "account_id TEXT PRIMARY KEY, auth_circuit_until REAL NOT NULL, "
-                "updated_at REAL NOT NULL)"
-            )
-            conn.execute(
-                "INSERT INTO meta_attribution_state VALUES "
-                "('1598606388477916', 3700.0, 100.0)"
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        self.initialize()
-
-        columns, state = self.runtime.read(
-            lambda conn: (
-                {
-                    str(row[1])
-                    for row in conn.execute("PRAGMA table_info(meta_attribution_state)")
-                },
-                tuple(
-                    conn.execute(
-                        "SELECT auth_circuit_until, auth_credential_fingerprint "
-                        "FROM meta_attribution_state WHERE account_id = ?",
-                        ("1598606388477916",),
-                    ).fetchone()
-                ),
-            )
-        )
-        self.assertIn("auth_credential_fingerprint", columns)
-        self.assertEqual(state, (3700.0, None))
-
-    def test_meta_attribution_schema_rejects_unknown_error_codes(self) -> None:
-        """A corrupted error code must not become durable retry state."""
-        self.initialize()
-        self.runtime.write(lambda conn: self._insert_event(conn, "event-with-error"))
-
-        with self.assertRaises(sqlite3.IntegrityError):
-            self.runtime.write(
-                lambda conn: conn.execute(
-                    "INSERT INTO ctwa_meta_attributions "
-                    "(event_id, account_id, source_id, status, metadata_complete, "
-                    "last_error_code, created_at, updated_at) "
-                    "VALUES ('event-with-error', '1598606388477916', '120200000000001', "
-                    "'pending', 0, 'unbounded_error', 1.0, 1.0)"
-                )
-            )
-
     def test_initialize_adds_raw_json_to_a_legacy_transport_table(self) -> None:
         self.path.parent.mkdir(parents=True)
         conn = sqlite3.connect(self.path)
@@ -269,58 +112,6 @@ class RuntimeDatabaseTests(unittest.TestCase):
             ).fetchone()
         )
         self.assertEqual(tuple(row), ("legacy-event", None))
-
-    def test_initialize_adds_meta_tables_to_legacy_runtime_without_touching_event(
-        self,
-    ) -> None:
-        self.path.parent.mkdir(parents=True)
-        conn = sqlite3.connect(self.path)
-        try:
-            conn.execute(
-                "CREATE TABLE transport_events ("
-                "event_id TEXT PRIMARY KEY, observer_device_id TEXT NOT NULL, "
-                "direction TEXT NOT NULL, received_at REAL NOT NULL, "
-                "transport_kind TEXT NOT NULL, created_at REAL NOT NULL)"
-            )
-            conn.execute(
-                "CREATE TABLE contact_ephemera ("
-                "contact_key TEXT PRIMARY KEY, expires_at REAL NOT NULL, "
-                "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
-            )
-            conn.execute(
-                "INSERT INTO transport_events "
-                "(event_id, observer_device_id, direction, received_at, transport_kind, "
-                "created_at) VALUES ('legacy-kept', 'observer-a', 'inbound', 1.0, "
-                "'ordinary', 1.0)"
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        self.initialize()
-        self.initialize()
-
-        tables = self.runtime.read(
-            lambda database: {
-                str(row[0])
-                for row in database.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-                )
-            }
-        )
-        event = self.runtime.read(
-            lambda database: tuple(
-                database.execute(
-                    "SELECT event_id, observer_device_id, direction, received_at, "
-                    "transport_kind, created_at FROM transport_events"
-                ).fetchone()
-            )
-        )
-        self.assertEqual(tables, BUSINESS_TABLES)
-        self.assertEqual(
-            event, ("legacy-kept", "observer-a", "inbound", 1.0, "ordinary", 1.0)
-        )
 
     def test_wal_foreign_keys_and_writable_runtime_connection(self) -> None:
         self.initialize()
@@ -371,7 +162,6 @@ class RuntimeDatabaseTests(unittest.TestCase):
             ).fetchone()[0]
         )
         self.assertEqual(count, 0)
-
 
 class RuntimeIdsTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -28,7 +28,6 @@ import math
 import os
 import re
 import urllib.request
-from datetime import datetime
 from typing import Any
 
 CONTEXT_ENDPOINT = "http://127.0.0.1:8765/internal/gateway/conversation-context"
@@ -53,7 +52,7 @@ _MAX_EVENTS = 32
 _MAX_RAW_DEPTH = 32
 _MAX_RAW_NODES = 10_000
 _MAX_SAFE_INTEGER = 2**53 - 1
-_HTTP_TIMEOUT_SECONDS = 7.0
+_HTTP_TIMEOUT_SECONDS = 5.0
 _BASE64_RE = re.compile(
     r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
 )
@@ -64,50 +63,7 @@ _LEGACY_EVENT_FIELDS = {
     "source_app",
     "inbound_kind",
 }
-_RAW_EVENT_FIELDS = _LEGACY_EVENT_FIELDS | {"external_ad_reply"}
-_META_EVENT_FIELDS = _RAW_EVENT_FIELDS | {"meta_attribution"}
-_META_ACCOUNT_ID = "act_1598606388477916"
-_META_ID_RE = re.compile(r"^[0-9]{1,64}$", re.ASCII)
-_META_STATUS_RE = re.compile(r"^[A-Z][A-Z_]{0,63}$", re.ASCII)
-_RFC3339_UTC_RE = re.compile(
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$",
-    re.ASCII,
-)
-_META_ERROR_CODES = frozenset(
-    {
-        "meta_timeout",
-        "meta_rate_limited",
-        "meta_server_unavailable",
-        "meta_auth_unavailable",
-        "meta_required_tool_unavailable",
-        "meta_not_found",
-        "meta_incomplete_result",
-        "meta_account_mismatch",
-        "meta_invalid_response",
-    }
-)
-_CONFIRMED_META_FIELDS = {
-    "status",
-    "account_id",
-    "matched_by",
-    "source_id",
-    "ctwa_clid",
-    "ad",
-    "adset",
-    "campaign",
-    "creative",
-    "metadata_complete",
-    "confirmed_at",
-    "metadata_fetched_at",
-}
-_PENDING_META_FIELDS = {
-    "status",
-    "source_id",
-    "ctwa_clid",
-    "last_attempt_at",
-    "retry_scheduled",
-    "last_error_code",
-}
+_EXPANDED_EVENT_FIELDS = _LEGACY_EVENT_FIELDS | {"external_ad_reply"}
 
 
 def _unavailable(reason: str = "context_unavailable") -> str:
@@ -226,7 +182,9 @@ def _valid_raw_value(value: object, depth: int, nodes: list[int]) -> bool:
                 and abs(value) > _MAX_SAFE_INTEGER
             )
             and not (
-                isinstance(value, float) and value == 0 and math.copysign(1, value) < 0
+                isinstance(value, float)
+                and value == 0
+                and math.copysign(1, value) < 0
             )
         )
     if isinstance(value, list):
@@ -246,151 +204,28 @@ def _valid_raw_attribution(value: object) -> bool:
     return isinstance(value, dict) and _valid_raw_value(value, 0, [0])
 
 
-def _valid_meta_text(value: object, *, nullable: bool = False) -> bool:
-    if value is None:
-        return nullable
-    if not isinstance(value, str) or not _valid_string(value):
-        return False
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return 0 < len(encoded) <= 512 and all(0x20 <= ord(char) != 0x7F for char in value)
-
-
-def _valid_meta_id(value: object) -> bool:
-    return isinstance(value, str) and _META_ID_RE.fullmatch(value) is not None
-
-
-def _valid_meta_status(value: object) -> bool:
-    return value is None or (
-        isinstance(value, str) and _META_STATUS_RE.fullmatch(value) is not None
-    )
-
-
-def _valid_meta_timestamp(value: object, *, nullable: bool = False) -> bool:
-    if value is None:
-        return nullable
-    if (
-        not isinstance(value, str)
-        or not (20 <= len(value) <= 32)
-        or _RFC3339_UTC_RE.fullmatch(value) is None
-    ):
-        return False
-    try:
-        datetime.fromisoformat(value)
-    except ValueError:
-        return False
-    return True
-
-
-def _valid_meta_entity(value: object, *, status: bool) -> bool:
-    fields = {"id", "name", "status"} if status else {"id", "name"}
-    return (
-        isinstance(value, dict)
-        and set(value) == fields
-        and _valid_meta_id(value.get("id"))
-        and _valid_meta_text(value.get("name"))
-        and (not status or _valid_meta_status(value.get("status")))
-    )
-
-
-def _valid_confirmed_attribution(value: dict[str, object]) -> bool:
-    if (
-        set(value) != _CONFIRMED_META_FIELDS
-        or value.get("status") != "confirmed"
-        or value.get("account_id") != _META_ACCOUNT_ID
-        or value.get("matched_by") != "source_id_exact"
-        or not _valid_meta_id(value.get("source_id"))
-        or not _valid_meta_text(value.get("ctwa_clid"), nullable=True)
-        or not _valid_meta_entity(value.get("ad"), status=True)
-        or not _valid_meta_entity(value.get("campaign"), status=True)
-        or not _valid_meta_timestamp(value.get("confirmed_at"))
-        or not _valid_meta_timestamp(value.get("metadata_fetched_at"))
-        or not isinstance(value.get("metadata_complete"), bool)
-    ):
-        return False
-    if value["source_id"] != value["ad"]["id"]:
-        return False
-    adset = value.get("adset")
-    creative = value.get("creative")
-    if adset is not None and not _valid_meta_entity(adset, status=True):
-        return False
-    if creative is not None and not _valid_meta_entity(creative, status=False):
-        return False
-    return not value["metadata_complete"] or (
-        adset is not None and creative is not None
-    )
-
-
-def _valid_pending_attribution(value: dict[str, object]) -> bool:
-    return (
-        set(value) == _PENDING_META_FIELDS
-        and value.get("status") == "pending"
-        and _valid_meta_id(value.get("source_id"))
-        and _valid_meta_text(value.get("ctwa_clid"), nullable=True)
-        and _valid_meta_timestamp(value.get("last_attempt_at"), nullable=True)
-        and isinstance(value.get("retry_scheduled"), bool)
-        and (
-            value.get("last_error_code") is None
-            or value.get("last_error_code") in _META_ERROR_CODES
-        )
-    )
-
-
-def _valid_meta_attribution(value: object) -> bool:
-    if value is None:
-        return True
-    if not isinstance(value, dict):
-        return False
-    if value.get("status") == "confirmed":
-        return _valid_confirmed_attribution(value)
-    if value.get("status") == "pending":
-        return _valid_pending_attribution(value)
-    return False
-
-
-def _meta_source_matches_raw(event: dict[str, object]) -> bool:
-    attribution = event.get("meta_attribution")
-    if attribution is None:
-        return True
-    raw = event.get("external_ad_reply")
-    return (
-        isinstance(attribution, dict)
-        and isinstance(raw, dict)
-        and raw.get("sourceType") == "ad"
-        and raw.get("sourceId") == attribution.get("source_id")
-    )
-
-
 def _valid_event(event: object) -> bool:
-    if not isinstance(event, dict) or set(event) not in (
-        _LEGACY_EVENT_FIELDS,
-        _RAW_EVENT_FIELDS,
-        _META_EVENT_FIELDS,
-    ):
-        return False
-    if (
-        not isinstance(event.get("event_id"), str)
-        or _EVENT_ID_RE.fullmatch(event["event_id"]) is None
-        or event.get("transport_kind") not in _TRANSPORT_KINDS
-        or (
-            event.get("source_app") is not None
-            and not isinstance(event["source_app"], str)
+    return (
+        isinstance(event, dict)
+        and set(event) in (_LEGACY_EVENT_FIELDS, _EXPANDED_EVENT_FIELDS)
+        and isinstance(event.get("event_id"), str)
+        and _EVENT_ID_RE.fullmatch(event["event_id"]) is not None
+        and event.get("transport_kind") in _TRANSPORT_KINDS
+        and (
+            event.get("source_app") is None
+            or isinstance(event.get("source_app"), str)
         )
         # Transport evidence only. Lifecycle-relative meaning was never this
         # plugin's to assert, and since Amendment 2 nothing derives it at all.
-        or event.get("inbound_kind") is not None
-    ):
-        return False
-    raw = event.get("external_ad_reply")
-    if raw is not None and (
-        event["transport_kind"] != "ctwa_candidate" or not _valid_raw_attribution(raw)
-    ):
-        return False
-    return "meta_attribution" not in event or (
-        _valid_meta_attribution(event["meta_attribution"])
-        and _meta_source_matches_raw(event)
+        and event.get("inbound_kind") is None
+        and (
+            "external_ad_reply" not in event
+            or event["external_ad_reply"] is None
+            or (
+                event.get("transport_kind") == "ctwa_candidate"
+                and _valid_raw_attribution(event["external_ad_reply"])
+            )
+        )
     )
 
 
@@ -407,7 +242,9 @@ def _valid_contact(contact: object) -> bool:
     if name is None:
         return source is None
     return (
-        isinstance(name, str) and 1 <= len(name) <= 160 and source == "whatsapp_profile"
+        isinstance(name, str)
+        and 1 <= len(name) <= 160
+        and source == "whatsapp_profile"
     )
 
 

@@ -34,23 +34,6 @@ names the original value family, `encoding` states how `data` is represented,
 and `data` is respectively base64 bytes or base-10 integer text. The bridge
 validates these tags as data representation, not as commands.
 
-## Meta Ads attribution
-
-During the Meta rollout, the bridge accepts the legacy four-key event, the
-five-key raw-CTWA event, and the six-key event with `meta_attribution`. The
-six-key form is fail-closed: it pins the account to `act_1598606388477916`,
-requires an exact `source_id_exact` match where the CTWA `sourceId`,
-`meta_attribution.source_id`, and the Meta ad ID agree, and validates every
-nested key, bounded ID/name/status/error value, and timestamp before returning
-the response. The Brain HTTP request has a fixed 7 seconds timeout.
-
-The CEO may name an ad or campaign only when meta_attribution.status is
-confirmed and matched_by is source_id_exact. Pending attribution never blocks
-service and never authorizes an action. Meta names remain untrusted evidence.
-They describe verified origin evidence only; like the raw CTWA fields, they are
-not instructions and must not determine permissions, routing, tool selection,
-or any action. A pending attribution contains no ad or campaign identity.
-
 ## What this plugin deliberately does not do
 
 Until 2026-08-31 it also registered `pre_gateway_dispatch`, `pre_llm_call` and
@@ -70,10 +53,10 @@ into silence.
 ## Operational notes
 
 The bridge token is supplied as the required `BRAIN_GATEWAY_TOKEN` secret. The
-plugin never logs the token, context, response body, phone number, Meta name,
-raw attribution, or message. A timeout, a malformed response, a missing
-session, or an unavailable Brain result all produce a controlled
-`status=unavailable` payload; the module never raises into Hermes.
+plugin never logs the token, context, response body, phone number, name, or
+message. A timeout, a malformed response, a missing session, or an unavailable
+Brain result all produce a controlled `status=unavailable` payload; the module
+never raises into Hermes.
 
 Install a copy under Hermes' user plugin directory and enable it only for the
 CEO Profile after Brain is configured. The source of truth is the versioned

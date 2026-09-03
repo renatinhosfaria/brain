@@ -9,11 +9,10 @@ import sqlite3
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .config import BrainSettings
 from .errors import DatabaseUnavailable
-from .meta_ads_models import eligible_source
 from .raw_attribution import (
     RawAttributionError,
     RawAttributionLimits,
@@ -28,9 +27,6 @@ from .runtime_db import RuntimeDatabase
 RETENTION_INTERVAL_SECONDS = 3_600.0
 from .transport_models import RuntimeIds
 from .whatsapp_identity import verify_transport_identity
-
-if TYPE_CHECKING:
-    from .meta_attribution import MetaAttributionService
 
 logger = logging.getLogger("brain.transport")
 
@@ -184,9 +180,7 @@ class TransportEnvelope:
                     raw_limits or RawAttributionLimits(),
                 )
             except RawAttributionError:
-                raise TransportRequestError(
-                    "external_ad_reply_raw is invalid"
-                ) from None
+                raise TransportRequestError("external_ad_reply_raw is invalid") from None
         expected_kind = _expected_transport_kind(external)
         if transport_kind != expected_kind:
             raise TransportRequestError("transport_kind disagrees with metadata")
@@ -371,12 +365,10 @@ class TransportService:
         settings: BrainSettings,
         runtime: RuntimeDatabase,
         transport_ids: RuntimeIds | None,
-        meta_attribution: MetaAttributionService | None = None,
     ) -> None:
         self.settings = settings
         self.runtime = runtime
         self.transport_ids = transport_ids
-        self.meta_attribution = meta_attribution
         # Never run, so the first ingestion after start also enforces policy.
         self._retention_ran_at = 0.0
 
@@ -389,7 +381,6 @@ class TransportService:
         envelope = TransportEnvelope.parse(payload, raw_limits)
         if self.transport_ids is None:
             raise TransportIdentityUnavailable("transport IDs are unavailable")
-        raw: object | None = None
         if envelope.external_ad_reply_raw_json is not None:
             try:
                 raw = decode_canonical_raw_attribution(
@@ -399,9 +390,7 @@ class TransportService:
                     raw, envelope.external_ad_reply, self.transport_ids
                 )
             except RawAttributionError:
-                raise TransportRequestError(
-                    "raw attribution disagrees with metadata"
-                ) from None
+                raise TransportRequestError("raw attribution disagrees with metadata") from None
         identity = verify_transport_identity(
             remote_jid_hmac=envelope.remote_jid_hmac,
             contact_key=envelope.contact_key or None,
@@ -414,7 +403,7 @@ class TransportService:
         ingestion_now = time.time()
         try:
             duplicate = self.runtime.write(
-                lambda conn: self._persist(conn, envelope, raw, ingestion_now)
+                lambda conn: self._persist(conn, envelope, ingestion_now)
             )
         except TransportRequestError:
             raise
@@ -443,7 +432,7 @@ class TransportService:
             return
         transport_cutoff = now - self.settings.transport_retention_days * 86_400
 
-        def purge(conn: sqlite3.Connection) -> tuple[int, int, int]:
+        def purge(conn: sqlite3.Connection) -> tuple[int, int]:
             names = conn.execute(
                 "UPDATE contact_ephemera SET display_name = NULL, "
                 "updated_at = ? WHERE display_name IS NOT NULL AND expires_at <= ?",
@@ -453,38 +442,27 @@ class TransportService:
                 "DELETE FROM transport_events WHERE created_at <= ?",
                 (transport_cutoff,),
             ).rowcount
-            jobs = 0
-            if self.meta_attribution is not None:
-                jobs = conn.execute(
-                    "DELETE FROM meta_attribution_jobs AS job WHERE NOT EXISTS ("
-                    "SELECT 1 FROM ctwa_meta_attributions AS attribution "
-                    "WHERE attribution.account_id = job.account_id "
-                    "AND attribution.source_id = job.source_id"
-                    ")"
-                ).rowcount
-            return names or 0, events or 0, jobs or 0
+            return names or 0, events or 0
 
         try:
-            names, events, jobs = self.runtime.write(purge)
+            names, events = self.runtime.write(purge)
         except sqlite3.Error:
             # The throttle is deliberately not advanced here: a failed pass
             # must be retried by the next event, not suppressed for an hour.
             logger.warning("retention pass failed after transport ingestion")
             return
         self._retention_ran_at = now
-        if names or events or jobs:
+        if names or events:
             logger.info(
-                "retention removed %d display names, %d transport events, and %d Meta jobs",
+                "retention removed %d display names and %d transport events",
                 names,
                 events,
-                jobs,
             )
 
     def _persist(
         self,
         conn: sqlite3.Connection,
         envelope: TransportEnvelope,
-        raw: object | None,
         ingestion_now: float,
     ) -> bool:
         values = self._event_values(envelope, ingestion_now)
@@ -503,7 +481,6 @@ class TransportService:
             existing = tuple(row)
             if existing != values[1:-1]:
                 raise TransportRequestError("event_id conflicts with existing event")
-            self._stage_meta_attribution(conn, envelope, raw, ingestion_now)
             self._persist_ephemera(conn, envelope, ingestion_now)
             return True
 
@@ -518,31 +495,8 @@ class TransportService:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             values,
         )
-        self._stage_meta_attribution(conn, envelope, raw, ingestion_now)
         self._persist_ephemera(conn, envelope, ingestion_now)
         return False
-
-    def _stage_meta_attribution(
-        self,
-        conn: sqlite3.Connection,
-        envelope: TransportEnvelope,
-        raw: object | None,
-        ingestion_now: float,
-    ) -> None:
-        """Stage only a decoded, eligible v2 CTWA capture in this transaction."""
-        if (
-            self.meta_attribution is None
-            or raw is None
-            or envelope.transport_kind != "ctwa_candidate"
-            or eligible_source(raw) is None
-        ):
-            return
-        self.meta_attribution.stage_event(
-            conn,
-            event_id=envelope.event_id,
-            raw=raw,
-            now=ingestion_now,
-        )
 
     def _persist_ephemera(
         self,

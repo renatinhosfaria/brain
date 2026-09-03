@@ -24,14 +24,11 @@ from starlette.routing import Route
 from .errors import BrainError
 from .gateway_api import GatewayAPI
 from .service import BrainService
-from .transport_api import TransportAPI
 
 # One pass an hour, matching the ingestion-path throttle. Far finer than the
 # 24-hour and 90-day limits it enforces.
 RETENTION_LOOP_SECONDS = 3_600.0
-META_ATTRIBUTION_LOOP_SECONDS = 5.0
-META_ATTRIBUTION_ERROR_DELAY_SECONDS = 5.0
-logger = logging.getLogger("brain.meta_attribution")
+from .transport_api import TransportAPI
 
 RECENT_SCHEMA = {
     "type": "object",
@@ -82,7 +79,6 @@ def _tools() -> list[Tool]:
 class BrainMCPServer:
     def __init__(self, service: BrainService) -> None:
         self.service = service
-        self._meta_attribution_task: asyncio.Task[None] | None = None
         self.gateway_api = GatewayAPI(service)
         self.transport_api = TransportAPI(service)
         self.server = Server(
@@ -155,58 +151,6 @@ class BrainMCPServer:
             except Exception:  # noqa: BLE001 - housekeeping never kills the app
                 logging.getLogger("brain").warning("periodic retention pass failed")
 
-    async def _run_meta_attribution_tick(self) -> bool:
-        """Run one bounded attribution pass without exposing SDK response data."""
-        attribution = self.service.meta_attribution
-        if attribution is None:
-            return True
-        started = time.monotonic()
-        try:
-            confirmed = await asyncio.to_thread(attribution.tick, time.time())
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - remote metadata must never stop Brain
-            logger.warning(
-                json.dumps(
-                    {
-                        "operation": "meta_attribution_tick",
-                        "duration_ms": round((time.monotonic() - started) * 1000, 3),
-                        "decision": "failed",
-                        "error_code": "meta_operation_failed",
-                    },
-                    separators=(",", ":"),
-                )
-            )
-            return False
-        confirmed_count = (
-            min(max(confirmed, 0), 1_000_000)
-            if isinstance(confirmed, int) and not isinstance(confirmed, bool)
-            else 0
-        )
-        logger.info(
-            json.dumps(
-                {
-                    "operation": "meta_attribution_tick",
-                    "duration_ms": round((time.monotonic() - started) * 1000, 3),
-                    "decision": "completed",
-                    "confirmed_count": confirmed_count,
-                },
-                separators=(",", ":"),
-            )
-        )
-        return True
-
-    async def _meta_attribution_loop(self, initial_delay_seconds: float) -> None:
-        """Keep due jobs and catalog schedules moving under the app lifespan."""
-        await asyncio.sleep(initial_delay_seconds)
-        while True:
-            succeeded = await self._run_meta_attribution_tick()
-            await asyncio.sleep(
-                META_ATTRIBUTION_LOOP_SECONDS
-                if succeeded
-                else META_ATTRIBUTION_ERROR_DELAY_SECONDS
-            )
-
     def app(self):
         application = self.server.streamable_http_app(
             streamable_http_path="/mcp",
@@ -238,31 +182,14 @@ class BrainMCPServer:
 
         @contextlib.asynccontextmanager
         async def lifespan(app):
-            retention_task = asyncio.create_task(self._retention_loop())
+            task = asyncio.create_task(self._retention_loop())
             try:
                 async with inner_lifespan(app):
-                    attribution = self.service.meta_attribution
-                    if attribution is not None and getattr(
-                        attribution, "enabled", True
-                    ):
-                        initial_succeeded = await self._run_meta_attribution_tick()
-                        self._meta_attribution_task = asyncio.create_task(
-                            self._meta_attribution_loop(
-                                META_ATTRIBUTION_LOOP_SECONDS
-                                if initial_succeeded
-                                else META_ATTRIBUTION_ERROR_DELAY_SECONDS
-                            )
-                        )
                     yield
             finally:
-                if self._meta_attribution_task is not None:
-                    self._meta_attribution_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._meta_attribution_task
-                    self._meta_attribution_task = None
-                retention_task.cancel()
+                task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await retention_task
+                    await task
 
         application.router.lifespan_context = lifespan
         return application
