@@ -63,36 +63,57 @@ class MetaAttributionService:
             self._store.stage_event(conn, event_id, observed, now)
 
     def resolve_source(
-        self, source_id: str, now: float, budget_seconds: float | None = None
+        self,
+        source_id: str,
+        now: float,
+        budget_seconds: float | None = None,
+        *,
+        deadline: float | None = None,
     ) -> bool:
         if not self._settings.meta_ads_mcp_enabled:
             return False
         try:
             ObservedCtwaSource(source_id, None)
-            budget = self._budget(budget_seconds)
+            deadline = self._deadline(budget_seconds, deadline)
         except (TypeError, ValueError):
+            return False
+        if self._remaining(deadline) <= 0:
             return False
         if self._auth_circuit_open(now):
             return False
 
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            return False
         lease_token = self._runtime.write(
             lambda conn: self._store.claim_source_job(
-                conn, source_id, now, self._lease_seconds(budget)
+                conn, source_id, now, self._lease_seconds(remaining)
             )
         )
         if lease_token is None:
             return False
 
+        if self._remaining(deadline) <= 0:
+            self._fail(source_id, MetaAdsError("meta_timeout"), now, str(lease_token))
+            return False
         probe_revision = self._runtime.read(self._store.auth_state_revision)
-        deadline = time.monotonic() + budget
+        if self._remaining(deadline) <= 0:
+            self._fail(source_id, MetaAdsError("meta_timeout"), now, str(lease_token))
+            return False
         try:
+            if self._remaining(deadline) <= 0:
+                raise _ResolutionFailure("meta_timeout")
             client = self._client()
             client.probe(deadline)
             self._runtime.write(
                 lambda conn: self._store.close_auth_circuit(conn, now, probe_revision)
             )
+            if self._remaining(deadline) <= 0:
+                raise _ResolutionFailure("meta_timeout")
             ad = client.get_ad(source_id, deadline)
             confirmed = self._confirmed(source_id, ad, client, deadline)
+            if self._remaining(deadline) <= 0:
+                raise _ResolutionFailure("meta_timeout")
         except MetaAdsError as error:
             if error.code == "meta_auth_unavailable":
                 self._invalidate_client()
@@ -111,20 +132,26 @@ class MetaAttributionService:
         )
 
     def resolve_pending_for_contact(
-        self, event_ids: list[str], now: float, budget_seconds: float
+        self,
+        event_ids: list[str],
+        now: float,
+        budget_seconds: float | None = None,
+        *,
+        deadline: float | None = None,
     ) -> int:
         if not self._settings.meta_ads_mcp_enabled:
             return 0
         try:
-            budget = self._budget(budget_seconds)
+            deadline = self._deadline(budget_seconds, deadline)
         except (TypeError, ValueError):
             return 0
-        deadline = time.monotonic() + budget
         resolved = 0
         seen: set[str] = set()
         for event_id in event_ids:
             if not isinstance(event_id, str) or not event_id:
                 continue
+            if self._remaining(deadline) <= 0:
+                break
             source_id = self._runtime.read(
                 lambda conn, event_id=event_id: self._pending_source_for_event(
                     conn, event_id
@@ -133,10 +160,9 @@ class MetaAttributionService:
             if source_id is None or source_id in seen:
                 continue
             seen.add(source_id)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if self._remaining(deadline) <= 0:
                 break
-            if self.resolve_source(source_id, now, remaining):
+            if self.resolve_source(source_id, now, deadline=deadline):
                 resolved += 1
             break
         return resolved
@@ -217,6 +243,8 @@ class MetaAttributionService:
                 raise _ResolutionFailure("meta_not_found")
             if checked_ad.effective_status != "ACTIVE":
                 raise _ResolutionFailure("meta_inactive")
+            if self._remaining(deadline) <= 0:
+                raise _ResolutionFailure("meta_timeout")
             campaign = client.get_campaign(campaign_id, deadline)
             checked_campaign = RemoteCampaign(
                 campaign.campaign_id,  # type: ignore[attr-defined]
@@ -293,6 +321,23 @@ class MetaAttributionService:
         ):
             raise ValueError("budget_seconds must be a positive finite number")
         return float(value)
+
+    def _deadline(
+        self, budget_seconds: float | None, deadline: float | None
+    ) -> float:
+        if deadline is None:
+            return time.monotonic() + self._budget(budget_seconds)
+        if (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+        ):
+            raise ValueError("deadline must be a finite monotonic timestamp")
+        return float(deadline)
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        return deadline - time.monotonic()
 
     @staticmethod
     def _lease_seconds(budget: float) -> float:

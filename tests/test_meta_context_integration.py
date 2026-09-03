@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -330,6 +331,42 @@ class MetaContextIntegrationTests(unittest.TestCase):
 
         self.assertTrue(self.client.calls)
         self.assertTrue(self.client.closed)
+
+    def test_lifespan_waits_for_a_blocking_tick_before_closing_the_client(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        close_finished = threading.Event()
+        ordering = {"closed_before_release": False}
+
+        class BlockingAttribution:
+            def tick(self, _now: float) -> int:
+                entered.set()
+                release.wait(1.0)
+                return 0
+
+        class BlockingService:
+            settings = self.brain.settings
+            meta_attribution = BlockingAttribution()
+
+            def close(self) -> None:
+                ordering["closed_before_release"] = not release.is_set()
+                close_finished.set()
+
+        object.__setattr__(
+            self.brain.settings, "meta_ads_mcp_worker_interval_seconds", 0.01
+        )
+        app = BrainMCPServer(BlockingService()).app()  # type: ignore[arg-type]
+
+        async def lifespan() -> None:
+            async with app.router.lifespan_context(app):
+                self.assertTrue(await asyncio.to_thread(entered.wait, 0.5))
+                timer = threading.Timer(0.03, release.set)
+                timer.start()
+            timer.join()
+
+        asyncio.run(lifespan())
+        self.assertTrue(close_finished.is_set())
+        self.assertFalse(ordering["closed_before_release"])
 
 
 if __name__ == "__main__":

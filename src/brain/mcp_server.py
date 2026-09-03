@@ -79,6 +79,7 @@ def _tools() -> list[Tool]:
 class BrainMCPServer:
     def __init__(self, service: BrainService) -> None:
         self.service = service
+        self._meta_ads_tick_task: asyncio.Task[int] | None = None
         self.gateway_api = GatewayAPI(service)
         self.transport_api = TransportAPI(service)
         self.server = Server(
@@ -160,11 +161,33 @@ class BrainMCPServer:
                 )
                 attribution = getattr(self.service, "meta_attribution", None)
                 if attribution is not None:
-                    await asyncio.to_thread(attribution.tick, time.time())
+                    tick_task = asyncio.create_task(
+                        asyncio.to_thread(attribution.tick, time.time())
+                    )
+                    self._meta_ads_tick_task = tick_task
+                    try:
+                        await asyncio.shield(tick_task)
+                    finally:
+                        if tick_task.done() and self._meta_ads_tick_task is tick_task:
+                            self._meta_ads_tick_task = None
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - housekeeping never kills the app
                 logging.getLogger("brain").warning("Meta Ads MCP worker pass failed")
+
+    async def _await_meta_ads_tick(self) -> None:
+        tick_task = self._meta_ads_tick_task
+        if tick_task is None:
+            return
+        try:
+            await asyncio.shield(tick_task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - worker failure is contained above
+            logging.getLogger("brain").warning("Meta Ads MCP worker pass failed")
+        finally:
+            if self._meta_ads_tick_task is tick_task and tick_task.done():
+                self._meta_ads_tick_task = None
 
     def app(self):
         application = self.server.streamable_http_app(
@@ -208,6 +231,7 @@ class BrainMCPServer:
                 for task in (retention_task, meta_ads_task):
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
+                await self._await_meta_ads_tick()
                 await asyncio.to_thread(self.service.close)
 
         application.router.lifespan_context = lifespan

@@ -409,7 +409,8 @@ class BrainService:
     ) -> dict[str, Any]:
         started = time.perf_counter()
         request_deadline = (
-            time.monotonic() + self.settings.meta_ads_mcp_context_budget_seconds
+            time.monotonic()
+            + min(1.5, self.settings.meta_ads_mcp_context_budget_seconds)
         )
         identity: dict[str, Any] = {
             "profile": "unknown",
@@ -501,9 +502,7 @@ class BrainService:
         """Best-effort lookup for only the most recent unresolved CTWA event."""
         if self.meta_attribution is None:
             return
-        remaining = request_deadline - time.monotonic()
-        budget = min(1.5, remaining)
-        if budget <= 0:
+        if request_deadline <= time.monotonic():
             return
         try:
             event_ids = self.runtime.read(
@@ -511,9 +510,9 @@ class BrainService:
                     conn, contact_key, context_now
                 )
             )
-            if event_ids is not None:
+            if event_ids is not None and request_deadline > time.monotonic():
                 self.meta_attribution.resolve_pending_for_contact(
-                    [event_ids], time.time(), budget
+                    [event_ids], time.time(), deadline=request_deadline
                 )
         except Exception:  # noqa: BLE001 - remote context enrichment is fail-open
             logging.getLogger("brain").warning(

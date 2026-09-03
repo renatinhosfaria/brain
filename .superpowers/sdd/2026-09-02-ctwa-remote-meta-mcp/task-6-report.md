@@ -116,3 +116,80 @@ and retention-fixture warnings.
   Brain's dedicated attribution instance is intentionally used only for
   context and worker lifecycle, so those two paths share the required client
   lock without changing Task 5's ingestion transaction boundary.
+
+## Fix round 1: absolute deadline and shutdown join
+
+### RED evidence
+
+Added three focused regressions before changing production code:
+
+- `resolve_source(..., deadline=...)` was not accepted, which showed that the
+  context's absolute deadline was discarded and replaced by a fresh relative
+  budget after its SQLite work:
+
+  ```text
+  TypeError: MetaAttributionService.resolve_source() got an unexpected
+  keyword argument 'deadline'
+  ```
+
+- A fake probe advancing the monotonic clock beyond the deadline exposed that
+  the following ad call could still receive the old deadline allowance.
+- A blocking fake worker tick showed shutdown called `service.close()` before
+  the tick thread was released:
+
+  ```text
+  AssertionError: True is not false
+  ```
+
+### Implementation
+
+- `gateway_conversation_context` creates one absolute monotonic deadline
+  capped at 1.5 seconds. It passes that unchanged through the newest-pending
+  context resolver, which checks it again after its SQLite lookup.
+- `resolve_pending_for_contact` and `resolve_source` accept the optional
+  absolute `deadline` keyword. Reads, the lease claim, the durable probe-state
+  read, probe, ad, campaign, and completion boundary re-check remaining time;
+  no remote operation begins once it is expired. The worker keeps its existing
+  configured relative budget by creating its own absolute deadline only when
+  no deadline is supplied.
+- `BrainMCPServer` keeps the `asyncio.to_thread` tick in its own task and
+  shields it from cancellation. Lifespan shutdown cancels the loop, then joins
+  any in-flight tick before calling `service.close()`, preventing concurrent
+  use/close of the shared client.
+
+### Verification
+
+```text
+PYTHONPATH=src .venv/bin/python -m unittest \
+  tests.test_meta_attribution tests.test_meta_context_integration \
+  tests.test_gateway_api tests.test_brain -q
+Ran 101 tests in 26.601s
+OK
+
+PYTHONPATH=src .venv/bin/python -m unittest tests.test_transport_ingest -q
+Ran 189 tests in 16.586s
+OK
+
+.venv/bin/ruff check .
+All checks passed!
+
+git diff --check
+exit 0
+
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q
+Ran 589 tests in 74.533s
+OK
+```
+
+The full suite emitted only its established ephemeral cursor-secret diagnostics
+and retention-fixture warnings.
+
+### Fix-round self-review and ruling
+
+- The request deadline is never reconstructed from a remaining duration after
+  a SQLite operation: nested context resolver calls receive the original
+  monotonic timestamp, and each remote boundary checks it again.
+- Python cannot force-cancel a running `to_thread` worker. The safe ruling is
+  to cancel its scheduling loop, shield and join the already-started tick, and
+  only then close the shared client. This can delay shutdown by the bounded
+  Task 5 worker operation, but it removes the use-after-close race.

@@ -6,6 +6,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from brain.config import BrainSettings, PrincipalConfig, token_digest
 from brain.meta_ads_models import MetaAdsError, RemoteAd, RemoteCampaign
@@ -56,6 +57,16 @@ class _Client:
     def get_campaign(self, campaign_id: str, deadline: float | None = None) -> object:
         self.calls.append(("campaign", campaign_id, deadline))
         return self.campaign
+
+
+class _AdvancingClient(_Client):
+    def __init__(self, clock: list[float]) -> None:
+        super().__init__()
+        self.clock = clock
+
+    def probe(self, deadline: float | None = None) -> None:
+        super().probe(deadline)
+        self.clock[0] = (deadline or self.clock[0]) + 0.01
 
 
 class MetaAttributionServiceTests(unittest.TestCase):
@@ -155,6 +166,39 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertEqual(len({call[2] for call in self.client.calls}), 1)
         self.assertFalse(self.service.resolve_source("101", 21.0, 1.0))
         self.assertEqual(len(self.client.calls), 3)
+
+    def test_absolute_deadline_prevents_ad_call_after_probe_consumes_budget(self) -> None:
+        clock = [100.0]
+        self.client = _AdvancingClient(clock)
+        self.service = MetaAttributionService(self.settings, self.runtime, self.client)
+        self.stage()
+
+        with patch("brain.meta_attribution.time.monotonic", side_effect=lambda: clock[0]):
+            self.assertFalse(self.service.resolve_source("101", 20.0, deadline=101.0))
+
+        self.assertEqual([call[:2] for call in self.client.calls], [("probe", None)])
+
+    def test_absolute_deadline_prevents_probe_after_claim_consumes_budget(self) -> None:
+        clock = [100.0]
+        self.stage()
+        original_write = self.runtime.write
+        writes = 0
+
+        def advancing_write(callback):
+            nonlocal writes
+            result = original_write(callback)
+            writes += 1
+            if writes == 1:
+                clock[0] = 101.01
+            return result
+
+        with (
+            patch.object(self.runtime, "write", side_effect=advancing_write),
+            patch("brain.meta_attribution.time.monotonic", side_effect=lambda: clock[0]),
+        ):
+            self.assertFalse(self.service.resolve_source("101", 20.0, deadline=101.0))
+
+        self.assertEqual(self.client.calls, [])
 
     def test_rejects_each_unconfirmed_ad_or_campaign_predicate_without_names(
         self,
