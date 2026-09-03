@@ -16,23 +16,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     try:
         settings = BrainSettings.from_env()
-    except (OSError, TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - probe output must never expose config text.
         print("error config_invalid")
         return 1
     if not settings.meta_ads_mcp_enabled:
         print("disabled")
-        return 0
-    client = RemoteMetaAdsMcpClient(settings)
+        return 1
+    try:
+        client = RemoteMetaAdsMcpClient(settings)
+    except Exception:  # noqa: BLE001 - constructor may contain secret-bearing text.
+        print("error meta_server_unavailable")
+        return 1
+    cleanup_failed = False
     try:
         client.probe()
     except MetaAdsError as error:
         print(f"error {error.code}")
         return 1
-    except (OSError, RuntimeError, TimeoutError, TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - remote errors are content-free by contract.
         print("error meta_server_unavailable")
         return 1
     finally:
-        client.close()
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - cleanup failure must not leak or replace output.
+            cleanup_failed = True
+    if cleanup_failed:
+        # The probe already succeeded; cleanup errors remain content-free.
+        print(f"ready account={settings.meta_ad_account_id}")
+        return 0
     print(f"ready account={settings.meta_ad_account_id}")
     return 0
 

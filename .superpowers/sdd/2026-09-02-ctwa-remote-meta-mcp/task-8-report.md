@@ -61,3 +61,33 @@ git diff --check
   systemd filesystem/network permissions were used.
 - The client remains responsible for all HTTP/MCP logic and bounded error
   mapping, as required.
+
+## Round-1 fix report
+
+### RED
+
+Added focused cases for nonzero disabled status, constructor failure,
+unexpected probe failure, and cleanup failure. Before the fix, the disabled
+assertion failed (`0 != 1`) and constructor/close failures raised unbounded
+`RuntimeError: secret` tracebacks.
+
+### GREEN
+
+The probe now returns 1 for `disabled`, catches ordinary exceptions around
+settings, client construction, probing, and cleanup, and keeps successful
+output/exit status stable if cleanup fails. Verification:
+
+```text
+ruff check ...
+All checks passed!
+Ran 38 tests ... OK
+Ran 600 tests in 80.247s
+OK
+```
+
+### Self-review
+
+No API/URL arguments, live credentials, network calls, or payload output were
+introduced. `BaseException` remains uncaught intentionally so process-level
+termination signals retain normal behavior; all ordinary exceptions are
+mapped to content-free bounded codes.
