@@ -57,6 +57,13 @@ _BASE64_RE = re.compile(
     r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
 )
 _DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
+_META_DECIMAL_ID_RE = re.compile(r"^[0-9]{1,64}$")
+_META_CONFIRMED_FIELDS = {
+    "status", "ad_id", "ad_name", "campaign_id", "campaign_name"
+}
+_META_PENDING_FIELDS = {"status", "reason"}
+_MAX_META_NAME = 160
+_MAX_META_REASON = 80
 _LEGACY_EVENT_FIELDS = {
     "event_id",
     "transport_kind",
@@ -77,6 +84,13 @@ def _safe_context_value(value: object) -> bool:
         isinstance(value, str)
         and 0 < len(value) <= 512
         and all(0x21 <= ord(char) <= 0x7E for char in value)
+        and "${" not in value
+    )
+
+
+def _safe_meta_text(value: str) -> bool:
+    return (
+        all(0x20 <= ord(char) <= 0x7E for char in value)
         and "${" not in value
     )
 
@@ -204,10 +218,48 @@ def _valid_raw_attribution(value: object) -> bool:
     return isinstance(value, dict) and _valid_raw_value(value, 0, [0])
 
 
+def _valid_meta_attribution(value: object) -> bool:
+    """Validate Brain's resolved Meta attribution projection, fail closed."""
+    if not isinstance(value, dict) or not isinstance(value.get("status"), str):
+        return False
+    status = value["status"]
+    if status == "confirmed":
+        if set(value) != _META_CONFIRMED_FIELDS:
+            return False
+        return (
+            all(
+                isinstance(value[field], str)
+                and _META_DECIMAL_ID_RE.fullmatch(value[field]) is not None
+                for field in ("ad_id", "campaign_id")
+            )
+            and all(
+                isinstance(value[field], str)
+                and 0 < len(value[field]) <= _MAX_META_NAME
+                and _safe_meta_text(value[field])
+                for field in ("ad_name", "campaign_name")
+            )
+        )
+    if status in {"pending", "unavailable"}:
+        if set(value) != _META_PENDING_FIELDS:
+            return False
+        reason = value["reason"]
+        return (
+            isinstance(reason, str)
+            and 0 < len(reason) <= _MAX_META_REASON
+            and _safe_meta_text(reason)
+        )
+    return False
+
+
 def _valid_event(event: object) -> bool:
     return (
         isinstance(event, dict)
-        and set(event) in (_LEGACY_EVENT_FIELDS, _EXPANDED_EVENT_FIELDS)
+        and set(event) in (
+            _LEGACY_EVENT_FIELDS,
+            _EXPANDED_EVENT_FIELDS,
+            _LEGACY_EVENT_FIELDS | {"meta_attribution"},
+            _EXPANDED_EVENT_FIELDS | {"meta_attribution"},
+        )
         and isinstance(event.get("event_id"), str)
         and _EVENT_ID_RE.fullmatch(event["event_id"]) is not None
         and event.get("transport_kind") in _TRANSPORT_KINDS
@@ -224,6 +276,13 @@ def _valid_event(event: object) -> bool:
             or (
                 event.get("transport_kind") == "ctwa_candidate"
                 and _valid_raw_attribution(event["external_ad_reply"])
+            )
+        )
+        and (
+            "meta_attribution" not in event
+            or (
+                event.get("transport_kind") == "ctwa_candidate"
+                and _valid_meta_attribution(event["meta_attribution"])
             )
         )
     )

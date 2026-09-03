@@ -235,6 +235,69 @@ class CEOBridgePluginTests(unittest.TestCase):
 
         self.assertEqual(self.call_tool(payload), payload)
 
+    @staticmethod
+    def confirmed_meta() -> dict[str, str]:
+        return {
+            "status": "confirmed",
+            "ad_id": "101",
+            "ad_name": "Spring Sale",
+            "campaign_id": "202",
+            "campaign_name": "Spring Campaign",
+        }
+
+    def test_accepts_confirmed_meta_attribution_on_ctwa_candidate(self) -> None:
+        payload = self.ok_payload(
+            events=[{
+                "event_id": "waevt_safe",
+                "transport_kind": "ctwa_candidate",
+                "source_app": "instagram",
+                "inbound_kind": None,
+                "meta_attribution": self.confirmed_meta(),
+            }]
+        )
+
+        self.assertEqual(self.call_tool(payload), payload)
+
+    def test_accepts_bounded_pending_and_unavailable_meta_attribution(self) -> None:
+        for status in ("pending", "unavailable"):
+            with self.subTest(status=status):
+                payload = self.ok_payload(
+                    events=[{
+                        "event_id": "waevt_safe",
+                        "transport_kind": "ctwa_candidate",
+                        "source_app": "instagram",
+                        "inbound_kind": None,
+                        "meta_attribution": {
+                            "status": status,
+                            "reason": "meta_pending",
+                        },
+                    }]
+                )
+                self.assertEqual(self.call_tool(payload), payload)
+
+    def test_rejects_invalid_meta_attribution_fixtures(self) -> None:
+        base = {
+            "event_id": "waevt_safe",
+            "transport_kind": "ctwa_candidate",
+            "source_app": "instagram",
+            "inbound_kind": None,
+        }
+        fixtures = {
+            "ordinary event": ({**base, "transport_kind": "ordinary_inbound", "meta_attribution": self.confirmed_meta()}, "Spring Sale"),
+            "unknown key": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_status": "ACTIVE"}}, "ACTIVE"),
+            "inactive status": ({**base, "meta_attribution": {**self.confirmed_meta(), "status": "inactive"}}, "inactive"),
+            "malformed id": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_id": "101.0"}}, "101.0"),
+            "unconfirmed names": ({**base, "meta_attribution": {"status": "pending", "reason": "pending", "ad_name": "Spring Sale"}}, "Spring Sale"),
+            "token-shaped field": ({**base, "meta_attribution": {**self.confirmed_meta(), "access_token": "secret-token"}}, "secret-token"),
+            "remote-shaped value": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_id": {"id": "101"}}}, "101"),
+            "oversized reason": ({**base, "meta_attribution": {"status": "pending", "reason": "r" * 81}}, "r" * 81),
+        }
+        for label, (event, secret) in fixtures.items():
+            with self.subTest(label):
+                result = self.call_tool(self.ok_payload(events=[event]))
+                self.assertEqual(result, {"status": "unavailable", "reason": "context_unavailable"})
+                self.assertNotIn(secret, json.dumps(result))
+
     def test_rejects_raw_attribution_on_an_ordinary_event(self) -> None:
         payload = self.ok_payload(
             events=[

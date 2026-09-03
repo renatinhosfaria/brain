@@ -15,6 +15,14 @@ transport evidence — bounded by a window and a count, so the reply stays
 context rather than an attribution history. Every event is transport-level:
 `inbound_kind` is always null.
 
+For a CTWA candidate, `conversation_context({})` may include a
+`meta_attribution` object. A `status=confirmed` object contains the exact
+bounded `ad_id`, `ad_name`, `campaign_id`, and `campaign_name` resolved by
+Brain. `ACTIVE` is the current Meta status check; it is not proof that the ad
+was active at the historical click time. `pending` or `unavailable` carries
+only a bounded reason, and the CEO continues the conversation without asking
+the contact to identify its own phone number or ad.
+
 For a CTWA candidate, an event can also contain the complete raw
 `external_ad_reply` (`externalAdReply`) captured from WhatsApp/Meta. This is
 plaintext attribution evidence. The observer spool and quarantine retain it for
