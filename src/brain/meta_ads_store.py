@@ -53,16 +53,24 @@ class MetaAdsStore:
             ):
                 raise ValueError("event replay changes original CTWA source")
             return
+        lease = conn.execute(
+            "SELECT lease_until, lease_token FROM meta_attribution_jobs "
+            "WHERE account_id = ? AND source_id = ? AND lease_until > ?",
+            (self.account_id, observed.source_id, now),
+        ).fetchone()
         conn.execute(
             "INSERT INTO ctwa_meta_attributions "
             "(event_id, account_id, source_id, ctwa_clid, status, next_attempt_at, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+            "lease_until, lease_token, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
             (
                 event_id,
                 self.account_id,
                 observed.source_id,
                 observed.ctwa_clid,
                 now,
+                None if lease is None else lease["lease_until"],
+                None if lease is None else lease["lease_token"],
                 now,
                 now,
             ),
@@ -134,13 +142,6 @@ class MetaAdsStore:
         now = _time(now)
         if not _lease_token(lease_token):
             return 0
-        owned = conn.execute(
-            "DELETE FROM meta_attribution_jobs "
-            "WHERE account_id = ? AND source_id = ? AND lease_token = ?",
-            (self.account_id, source_id, lease_token),
-        ).rowcount
-        if owned != 1:
-            return 0
         updated = conn.execute(
             "UPDATE ctwa_meta_attributions SET status = 'confirmed', "
             "ad_id = ?, ad_name = ?, campaign_id = ?, campaign_name = ?, "
@@ -148,7 +149,8 @@ class MetaAdsStore:
             "campaign_effective_status = ?, match_method = 'source_id_exact', "
             "reason_code = NULL, confirmed_at = ?, next_attempt_at = NULL, "
             "lease_until = NULL, lease_token = NULL, updated_at = ? "
-            "WHERE account_id = ? AND source_id = ? AND status = 'pending'",
+            "WHERE account_id = ? AND source_id = ? AND status = 'pending' "
+            "AND lease_token = ? AND lease_until > ?",
             (
                 confirmed.ad_id,
                 confirmed.ad_name,
@@ -162,8 +164,18 @@ class MetaAdsStore:
                 now,
                 self.account_id,
                 source_id,
+                lease_token,
+                now,
             ),
         ).rowcount
+        owned = conn.execute(
+            "DELETE FROM meta_attribution_jobs "
+            "WHERE account_id = ? AND source_id = ? AND lease_token = ? "
+            "AND lease_until > ?",
+            (self.account_id, source_id, lease_token, now),
+        ).rowcount
+        if owned != 1:
+            return 0
         return updated or 0
 
     def fail_source(
@@ -181,8 +193,9 @@ class MetaAdsStore:
             return False
         job = conn.execute(
             "SELECT attempt_count FROM meta_attribution_jobs "
-            "WHERE account_id = ? AND source_id = ? AND lease_token = ?",
-            (self.account_id, source_id, lease_token),
+            "WHERE account_id = ? AND source_id = ? AND lease_token = ? "
+            "AND lease_until > ?",
+            (self.account_id, source_id, lease_token, now),
         ).fetchone()
         if job is None:
             return False
@@ -190,30 +203,33 @@ class MetaAdsStore:
             conn.execute(
                 "UPDATE ctwa_meta_attributions SET status = 'unavailable', reason_code = ?, "
                 "next_attempt_at = NULL, lease_until = NULL, lease_token = NULL, "
-                "updated_at = ? WHERE account_id = ? AND source_id = ? AND status = 'pending'",
-                (reason_code, now, self.account_id, source_id),
+                "updated_at = ? WHERE account_id = ? AND source_id = ? AND status = 'pending' "
+                "AND lease_token = ? AND lease_until > ?",
+                (reason_code, now, self.account_id, source_id, lease_token, now),
             )
-            conn.execute(
+            owned = conn.execute(
                 "DELETE FROM meta_attribution_jobs WHERE account_id = ? AND source_id = ? "
-                "AND lease_token = ?",
-                (self.account_id, source_id, lease_token),
-            )
-            return True
+                "AND lease_token = ? AND lease_until > ?",
+                (self.account_id, source_id, lease_token, now),
+            ).rowcount
+            return owned == 1
         delay = _retry_delay(int(job["attempt_count"]), reason_code)
         due = now + delay
         conn.execute(
-            "UPDATE meta_attribution_jobs SET next_attempt_at = ?, last_error_code = ?, "
-            "lease_until = NULL, lease_token = NULL, updated_at = ? "
-            "WHERE account_id = ? AND source_id = ? AND lease_token = ?",
-            (due, reason_code, now, self.account_id, source_id, lease_token),
-        )
-        conn.execute(
             "UPDATE ctwa_meta_attributions SET reason_code = ?, next_attempt_at = ?, "
             "lease_until = NULL, lease_token = NULL, updated_at = ? "
-            "WHERE account_id = ? AND source_id = ? AND status = 'pending'",
-            (reason_code, due, now, self.account_id, source_id),
+            "WHERE account_id = ? AND source_id = ? AND status = 'pending' "
+            "AND lease_token = ? AND lease_until > ?",
+            (reason_code, due, now, self.account_id, source_id, lease_token, now),
         )
-        return True
+        released = conn.execute(
+            "UPDATE meta_attribution_jobs SET next_attempt_at = ?, last_error_code = ?, "
+            "lease_until = NULL, lease_token = NULL, updated_at = ? "
+            "WHERE account_id = ? AND source_id = ? AND lease_token = ? "
+            "AND lease_until > ?",
+            (due, reason_code, now, self.account_id, source_id, lease_token, now),
+        ).rowcount
+        return released == 1
 
     def due_source_ids(
         self, conn: sqlite3.Connection, now: float, limit: int

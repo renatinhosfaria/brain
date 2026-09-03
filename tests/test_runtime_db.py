@@ -201,6 +201,91 @@ class RuntimeDatabaseTests(unittest.TestCase):
         with self.assertRaises(sqlite3.OperationalError):
             self.initialize()
 
+    def test_initialize_rejects_nullable_or_mistyped_job_columns(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE meta_attribution_jobs ("
+                "account_id TEXT, source_id BLOB NOT NULL, "
+                "next_attempt_at TEXT NOT NULL, attempt_count TEXT NOT NULL DEFAULT '0', "
+                "last_error_code TEXT, lease_until REAL, lease_token TEXT, "
+                "created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+                "PRIMARY KEY(account_id, source_id))"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.initialize()
+
+    def test_initialize_rejects_changed_attribution_default(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE ctwa_meta_attributions ("
+                "event_id TEXT PRIMARY KEY REFERENCES transport_events(event_id) ON DELETE CASCADE, "
+                "account_id TEXT NOT NULL, source_id TEXT NOT NULL, ctwa_clid TEXT, "
+                "status TEXT NOT NULL CHECK(status IN ('pending','confirmed','unavailable')), "
+                "ad_id TEXT, ad_name TEXT, campaign_id TEXT, campaign_name TEXT, "
+                "ad_status TEXT, ad_effective_status TEXT, campaign_status TEXT, "
+                "campaign_effective_status TEXT, "
+                "match_method TEXT CHECK(match_method IS NULL OR match_method='source_id_exact'), "
+                "reason_code TEXT, confirmed_at REAL, last_attempt_at REAL, "
+                "attempt_count INTEGER NOT NULL DEFAULT 1 CHECK(attempt_count >= 0), "
+                "next_attempt_at REAL, lease_until REAL, lease_token TEXT, "
+                "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.initialize()
+
+    def test_initialize_rejects_weakened_attribution_check(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE ctwa_meta_attributions ("
+                "event_id TEXT PRIMARY KEY REFERENCES transport_events(event_id) ON DELETE CASCADE, "
+                "account_id TEXT NOT NULL, source_id TEXT NOT NULL, ctwa_clid TEXT, "
+                "status TEXT NOT NULL CHECK(status IN ('pending','confirmed','unavailable')), "
+                "ad_id TEXT, ad_name TEXT, campaign_id TEXT, campaign_name TEXT, "
+                "ad_status TEXT, ad_effective_status TEXT, campaign_status TEXT, "
+                "campaign_effective_status TEXT, "
+                "match_method TEXT CHECK(match_method IS NULL OR match_method='source_id_exact'), "
+                "reason_code TEXT, confirmed_at REAL, last_attempt_at REAL, "
+                "attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= -1), "
+                "next_attempt_at REAL, lease_until REAL, lease_token TEXT, "
+                "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.initialize()
+
+    def test_initialize_rejects_conflicting_named_attribution_index(self) -> None:
+        self.initialize()
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("DROP INDEX idx_ctwa_meta_attributions_status_due")
+            conn.execute(
+                "CREATE INDEX idx_ctwa_meta_attributions_status_due "
+                "ON ctwa_meta_attributions(source_id, status)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.initialize()
+
     def test_write_commits_on_success(self) -> None:
         self.initialize()
 

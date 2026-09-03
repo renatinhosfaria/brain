@@ -216,6 +216,46 @@ class MetaAdsStoreTests(unittest.TestCase):
             0,
         )
 
+    def test_expired_lease_token_cannot_complete_or_reschedule_after_reclaim(
+        self,
+    ) -> None:
+        self.stage("event-1")
+        expired_token = self.claim(now=10.0)
+        self.stage("event-2", source_id="102")
+        expired_fail_token = self.claim(source_id="102", now=10.0)
+
+        self.assertEqual(
+            self.runtime.write(
+                lambda conn: self.store.complete_source(
+                    conn, "101", self.confirmed(), 41.0, expired_token
+                )
+            ),
+            0,
+        )
+        self.assertFalse(
+            self.runtime.write(
+                lambda conn: self.store.fail_source(
+                    conn, "102", "meta_timeout", 41.0, expired_fail_token
+                )
+            )
+        )
+        states = self.runtime.read(
+            lambda conn: tuple(
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT source_id, status, lease_token, next_attempt_at "
+                    "FROM ctwa_meta_attributions ORDER BY source_id"
+                )
+            )
+        )
+        self.assertEqual(
+            states,
+            (
+                ("101", "pending", expired_token, 10.0),
+                ("102", "pending", expired_fail_token, 10.0),
+            ),
+        )
+
     def test_transient_failures_follow_bounded_retry_schedule(self) -> None:
         self.stage("event-1")
         now = 10.0
