@@ -384,9 +384,7 @@ class MetaAttributionService:
             raise ValueError("budget_seconds must be a positive finite number")
         return float(value)
 
-    def _deadline(
-        self, budget_seconds: float | None, deadline: float | None
-    ) -> float:
+    def _deadline(self, budget_seconds: float | None, deadline: float | None) -> float:
         if deadline is None:
             return time.monotonic() + self._budget(budget_seconds)
         if (

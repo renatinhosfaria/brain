@@ -14,7 +14,10 @@ def _settings(*, enabled: bool) -> BrainSettings:
     return BrainSettings(
         principals={
             "default": PrincipalConfig(
-                "default", "gateway", token_digest("gateway"), frozenset({"conversation_context"})
+                "default",
+                "gateway",
+                token_digest("gateway"),
+                frozenset({"conversation_context"}),
             )
         },
         cursor_secret=b"c" * 32,
@@ -48,9 +51,11 @@ class ProbeTests(unittest.TestCase):
                     raise close_error
 
         output = io.StringIO()
-        with patch.object(module.BrainSettings, "from_env", return_value=settings), patch.object(
-            module, "RemoteMetaAdsMcpClient", FakeClient
-        ), contextlib.redirect_stdout(output):
+        with (
+            patch.object(module.BrainSettings, "from_env", return_value=settings),
+            patch.object(module, "RemoteMetaAdsMcpClient", FakeClient),
+            contextlib.redirect_stdout(output),
+        ):
             code = module.main([])
         return code, output.getvalue()
 
@@ -63,20 +68,28 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual((code, output), (0, "ready account=act_1598606388477916\n"))
 
     def test_failure_prints_bounded_code_and_nonzero(self):
-        code, output = self._run(_settings(enabled=True), MetaAdsError("meta_auth_unavailable"))
+        code, output = self._run(
+            _settings(enabled=True), MetaAdsError("meta_auth_unavailable")
+        )
         self.assertEqual((code, output), (1, "error meta_auth_unavailable\n"))
         self.assertNotIn("probe-secret", output)
 
     def test_constructor_failure_is_bounded(self):
-        code, output = self._run(_settings(enabled=True), constructor_error=RuntimeError("secret"))
+        code, output = self._run(
+            _settings(enabled=True), constructor_error=RuntimeError("secret")
+        )
         self.assertEqual((code, output), (1, "error meta_server_unavailable\n"))
 
     def test_unexpected_probe_failure_is_bounded(self):
-        code, output = self._run(_settings(enabled=True), probe_error=RuntimeError("secret"))
+        code, output = self._run(
+            _settings(enabled=True), probe_error=RuntimeError("secret")
+        )
         self.assertEqual((code, output), (1, "error meta_server_unavailable\n"))
 
     def test_close_failure_does_not_replace_success(self):
-        code, output = self._run(_settings(enabled=True), close_error=RuntimeError("secret"))
+        code, output = self._run(
+            _settings(enabled=True), close_error=RuntimeError("secret")
+        )
         self.assertEqual((code, output), (0, "ready account=act_1598606388477916\n"))
 
     def test_cli_rejects_arguments(self):

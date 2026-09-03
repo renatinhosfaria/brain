@@ -179,7 +179,9 @@ class MetaContextIntegrationTests(unittest.TestCase):
             )
         )
 
-    def test_disabled_startup_does_not_construct_or_call_the_remote_client(self) -> None:
+    def test_disabled_startup_does_not_construct_or_call_the_remote_client(
+        self,
+    ) -> None:
         disabled = BrainSettings(
             state_db=self.state_path,
             kanban_db=self.kanban_path,
@@ -274,11 +276,14 @@ class MetaContextIntegrationTests(unittest.TestCase):
         events = {event["event_id"]: event for event in result["events"]}
         self.assertEqual(events["newest"]["meta_attribution"]["status"], "confirmed")
         self.assertEqual(events["older"]["meta_attribution"]["status"], "pending")
-        self.assertEqual([call[:2] for call in self.client.calls], [
-            ("probe", None), ("ad", "102"), ("campaign", "202")
-        ])
+        self.assertEqual(
+            [call[:2] for call in self.client.calls],
+            [("probe", None), ("ad", "102"), ("campaign", "202")],
+        )
 
-    def test_context_remote_failure_is_fail_open_and_does_not_log_sensitive_values(self) -> None:
+    def test_context_remote_failure_is_fail_open_and_does_not_log_sensitive_values(
+        self,
+    ) -> None:
         self.client.error = MetaAdsError("meta_server_unavailable")
         self._seed_event("pending")
         self._stage("pending", "101")
@@ -292,7 +297,9 @@ class MetaContextIntegrationTests(unittest.TestCase):
         self.assertNotIn("test-key", output)
         self.assertNotIn("Confirmed Ad", output)
 
-    def test_expired_context_budget_returns_pending_raw_context_without_remote_work(self) -> None:
+    def test_expired_context_budget_returns_pending_raw_context_without_remote_work(
+        self,
+    ) -> None:
         self._seed_event("pending")
         self._stage("pending", "101")
 
@@ -308,7 +315,9 @@ class MetaContextIntegrationTests(unittest.TestCase):
             {"status": "pending"},
         )
 
-    def test_context_does_not_resolve_a_pending_ctwa_outside_the_context_window(self) -> None:
+    def test_context_does_not_resolve_a_pending_ctwa_outside_the_context_window(
+        self,
+    ) -> None:
         self._seed_event(
             "old-pending",
             received_at=time.time() - service.CONTEXT_WINDOW_SECONDS - 1,

@@ -442,7 +442,8 @@ class TransportIngestTests(unittest.TestCase):
         stored = self.rows("transport_events")
         self.assertEqual(len(stored), 1)
         self.assertEqual(
-            json.loads(stored[0]["external_ad_reply_raw_json"]), original["external_ad_reply_raw"]
+            json.loads(stored[0]["external_ad_reply_raw_json"]),
+            original["external_ad_reply_raw"],
         )
 
     def test_v2_raw_must_match_normalized_external_metadata(self) -> None:
@@ -493,7 +494,9 @@ class TransportIngestTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsNone(self.rows("transport_events")[0]["external_ad_reply_raw_json"])
+        self.assertIsNone(
+            self.rows("transport_events")[0]["external_ad_reply_raw_json"]
+        )
 
     def test_show_ad_attribution_is_not_required_for_ctwa(self) -> None:
         response = self.post(
@@ -585,9 +588,7 @@ class TransportIngestTests(unittest.TestCase):
                 self.assertEqual(self.post(payload).status_code, 400)
 
     def test_oversized_declared_length_is_rejected_before_reading(self) -> None:
-        response = self.post(
-            self.envelope(), declared_length=5 * 1024 * 1024 + 1
-        )
+        response = self.post(self.envelope(), declared_length=5 * 1024 * 1024 + 1)
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.rows("transport_events"), [])
 
@@ -624,7 +625,9 @@ class TransportIngestTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.rows("transport_events"), [])
 
-    def test_json_integer_past_python_limit_is_rejected_at_the_http_boundary(self) -> None:
+    def test_json_integer_past_python_limit_is_rejected_at_the_http_boundary(
+        self,
+    ) -> None:
         body = b'{"value":' + b"1" * 5_000 + b"}"
 
         response = self.post(body)
@@ -796,9 +799,7 @@ class RetentionTests(TransportIngestTests):
     def test_expired_display_name_is_deleted_not_merely_hidden(self) -> None:
         self.post(self.envelope(display_name="Maria Silva"))
         self.service.runtime.write(
-            lambda conn: conn.execute(
-                "UPDATE contact_ephemera SET expires_at = 1.0"
-            )
+            lambda conn: conn.execute("UPDATE contact_ephemera SET expires_at = 1.0")
         )
         self.service.transport_service._retention_ran_at = 0.0
 
@@ -892,7 +893,10 @@ class RetentionTests(TransportIngestTests):
             )
             self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            (len(self.rows("ctwa_meta_attributions")), len(self.rows("meta_attribution_jobs"))),
+            (
+                len(self.rows("ctwa_meta_attributions")),
+                len(self.rows("meta_attribution_jobs")),
+            ),
             (2, 1),
         )
         cutoff_days = self.service.settings.transport_retention_days

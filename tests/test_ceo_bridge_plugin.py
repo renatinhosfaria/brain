@@ -155,9 +155,7 @@ class CEOBridgePluginTests(unittest.TestCase):
         seen: list[dict] = []
 
         def opener(request, timeout):
-            seen.append(
-                {"url": request.full_url, "body": json.loads(request.data)}
-            )
+            seen.append({"url": request.full_url, "body": json.loads(request.data)})
             return _Response(payload)
 
         with patch.object(self.tools_module.urllib.request, "urlopen", opener):
@@ -231,14 +229,12 @@ class CEOBridgePluginTests(unittest.TestCase):
 
     def test_registers_one_tool_and_no_hooks(self) -> None:
         """Amendment 2 removed every hook; none may come back by accident."""
-        self.assertEqual([tool["name"] for tool in self.ctx.tools], [
-            "conversation_context"
-        ])
+        self.assertEqual(
+            [tool["name"] for tool in self.ctx.tools], ["conversation_context"]
+        )
         self.assertEqual(self.ctx.hooks, {})
         self.assertEqual(self.ctx.tools[0]["toolset"], "brain-context")
-        self.assertEqual(
-            self.ctx.tools[0]["schema"]["parameters"]["properties"], {}
-        )
+        self.assertEqual(self.ctx.tools[0]["schema"]["parameters"]["properties"], {})
         self.assertIs(
             self.ctx.tools[0]["schema"]["parameters"]["additionalProperties"], False
         )
@@ -320,13 +316,15 @@ class CEOBridgePluginTests(unittest.TestCase):
 
     def test_accepts_confirmed_meta_attribution_on_ctwa_candidate(self) -> None:
         payload = self.ok_payload(
-            events=[{
-                "event_id": "waevt_safe",
-                "transport_kind": "ctwa_candidate",
-                "source_app": "instagram",
-                "inbound_kind": None,
-                "meta_attribution": self.confirmed_meta(),
-            }]
+            events=[
+                {
+                    "event_id": "waevt_safe",
+                    "transport_kind": "ctwa_candidate",
+                    "source_app": "instagram",
+                    "inbound_kind": None,
+                    "meta_attribution": self.confirmed_meta(),
+                }
+            ]
         )
 
         self.assertEqual(self.call_tool(payload), payload)
@@ -356,13 +354,15 @@ class CEOBridgePluginTests(unittest.TestCase):
             ):
                 with self.subTest(status=status, meta=meta):
                     payload = self.ok_payload(
-                        events=[{
-                            "event_id": "waevt_safe",
-                            "transport_kind": "ctwa_candidate",
-                            "source_app": "instagram",
-                            "inbound_kind": None,
-                            "meta_attribution": meta,
-                        }]
+                        events=[
+                            {
+                                "event_id": "waevt_safe",
+                                "transport_kind": "ctwa_candidate",
+                                "source_app": "instagram",
+                                "inbound_kind": None,
+                                "meta_attribution": meta,
+                            }
+                        ]
                     )
                     self.assertEqual(self.call_tool(payload), payload)
 
@@ -374,27 +374,149 @@ class CEOBridgePluginTests(unittest.TestCase):
             "inbound_kind": None,
         }
         fixtures = {
-            "ordinary event": ({**base, "transport_kind": "ordinary_inbound", "meta_attribution": self.confirmed_meta()}, "Spring Sale"),
-            "unknown key": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_status": "ACTIVE"}}, "ACTIVE"),
-            "inactive status": ({**base, "meta_attribution": {**self.confirmed_meta(), "status": "inactive"}}, "inactive"),
-            "malformed id": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_id": "101.0"}}, "101.0"),
-            "malformed campaign id": ({**base, "meta_attribution": {**self.confirmed_meta(), "campaign_id": "act_202"}}, "act_202"),
+            "ordinary event": (
+                {
+                    **base,
+                    "transport_kind": "ordinary_inbound",
+                    "meta_attribution": self.confirmed_meta(),
+                },
+                "Spring Sale",
+            ),
+            "unknown key": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        **self.confirmed_meta(),
+                        "ad_status": "ACTIVE",
+                    },
+                },
+                "ACTIVE",
+            ),
+            "inactive status": (
+                {
+                    **base,
+                    "meta_attribution": {**self.confirmed_meta(), "status": "inactive"},
+                },
+                "inactive",
+            ),
+            "malformed id": (
+                {
+                    **base,
+                    "meta_attribution": {**self.confirmed_meta(), "ad_id": "101.0"},
+                },
+                "101.0",
+            ),
+            "malformed campaign id": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        **self.confirmed_meta(),
+                        "campaign_id": "act_202",
+                    },
+                },
+                "act_202",
+            ),
             "missing status": ({**base, "meta_attribution": {"ad_id": "101"}}, "101"),
-            "malformed status": ({**base, "meta_attribution": {**self.confirmed_meta(), "status": None}}, "Spring Sale"),
-            "missing confirmed field": ({**base, "meta_attribution": {key: value for key, value in self.confirmed_meta().items() if key != "campaign_name"}}, "Spring Sale"),
-            "unconfirmed names": ({**base, "meta_attribution": {"status": "pending", "reason": "pending", "ad_name": "Spring Sale"}}, "Spring Sale"),
-            "token-shaped field": ({**base, "meta_attribution": {**self.confirmed_meta(), "access_token": "secret-token"}}, "secret-token"),
-            "remote-shaped value": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_id": {"id": "101"}}}, "101"),
-            "unsafe name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "Spring\nSale"}}, "Spring"),
-            "oversized name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "n" * 513}}, "n" * 513),
-            "template name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "${authorization}"}}, "authorization"),
-            "surrogate name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "bad\ud800name"}}, "bad"),
-            "arbitrary bearer reason": ({**base, "meta_attribution": {"status": "pending", "reason": "Authorization: Bearer fixture-secret"}}, "fixture-secret"),
+            "malformed status": (
+                {**base, "meta_attribution": {**self.confirmed_meta(), "status": None}},
+                "Spring Sale",
+            ),
+            "missing confirmed field": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        key: value
+                        for key, value in self.confirmed_meta().items()
+                        if key != "campaign_name"
+                    },
+                },
+                "Spring Sale",
+            ),
+            "unconfirmed names": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        "status": "pending",
+                        "reason": "pending",
+                        "ad_name": "Spring Sale",
+                    },
+                },
+                "Spring Sale",
+            ),
+            "token-shaped field": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        **self.confirmed_meta(),
+                        "access_token": "secret-token",
+                    },
+                },
+                "secret-token",
+            ),
+            "remote-shaped value": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        **self.confirmed_meta(),
+                        "ad_id": {"id": "101"},
+                    },
+                },
+                "101",
+            ),
+            "unsafe name": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        **self.confirmed_meta(),
+                        "ad_name": "Spring\nSale",
+                    },
+                },
+                "Spring",
+            ),
+            "oversized name": (
+                {
+                    **base,
+                    "meta_attribution": {**self.confirmed_meta(), "ad_name": "n" * 513},
+                },
+                "n" * 513,
+            ),
+            "template name": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        **self.confirmed_meta(),
+                        "ad_name": "${authorization}",
+                    },
+                },
+                "authorization",
+            ),
+            "surrogate name": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        **self.confirmed_meta(),
+                        "ad_name": "bad\ud800name",
+                    },
+                },
+                "bad",
+            ),
+            "arbitrary bearer reason": (
+                {
+                    **base,
+                    "meta_attribution": {
+                        "status": "pending",
+                        "reason": "Authorization: Bearer fixture-secret",
+                    },
+                },
+                "fixture-secret",
+            ),
         }
         for label, (event, secret) in fixtures.items():
             with self.subTest(label):
                 result = self.call_tool(self.ok_payload(events=[event]))
-                self.assertEqual(result, {"status": "unavailable", "reason": "context_unavailable"})
+                self.assertEqual(
+                    result, {"status": "unavailable", "reason": "context_unavailable"}
+                )
                 self.assertNotIn(secret, json.dumps(result))
 
     def test_rejects_raw_attribution_on_an_ordinary_event(self) -> None:
@@ -475,8 +597,9 @@ class CEOBridgePluginTests(unittest.TestCase):
             ("depth", too_deep, "depth-secret"),
             ("nodes", too_many_nodes, "nodes"),
         ):
-            with self.subTest(label=label), patch.object(
-                self.tools_module, "_MAX_RESPONSE_BYTES", 1024 * 1024
+            with (
+                self.subTest(label=label),
+                patch.object(self.tools_module, "_MAX_RESPONSE_BYTES", 1024 * 1024),
             ):
                 payload = self.ok_payload(
                     events=[
@@ -517,28 +640,52 @@ class CEOBridgePluginTests(unittest.TestCase):
         for label, payload in (
             ("extra field", self.ok_payload(turn={"wa_turn_id": "waturn_x"})),
             ("no events", self.ok_payload(events=[])),
-            ("bad phone", self.ok_payload(contact={
-                "phone_e164": "not-a-phone",
-                "display_name": None,
-                "display_name_source": None,
-            })),
-            ("named without source", self.ok_payload(contact={
-                "phone_e164": "5534999772714",
-                "display_name": "Maria",
-                "display_name_source": None,
-            })),
-            ("asserted inbound_kind", self.ok_payload(events=[{
-                "event_id": "waevt_safe",
-                "transport_kind": "ctwa_candidate",
-                "source_app": "instagram",
-                "inbound_kind": "ctwa_first_contact",
-            }])),
-            ("unknown transport kind", self.ok_payload(events=[{
-                "event_id": "waevt_safe",
-                "transport_kind": "something_new",
-                "source_app": None,
-                "inbound_kind": None,
-            }])),
+            (
+                "bad phone",
+                self.ok_payload(
+                    contact={
+                        "phone_e164": "not-a-phone",
+                        "display_name": None,
+                        "display_name_source": None,
+                    }
+                ),
+            ),
+            (
+                "named without source",
+                self.ok_payload(
+                    contact={
+                        "phone_e164": "5534999772714",
+                        "display_name": "Maria",
+                        "display_name_source": None,
+                    }
+                ),
+            ),
+            (
+                "asserted inbound_kind",
+                self.ok_payload(
+                    events=[
+                        {
+                            "event_id": "waevt_safe",
+                            "transport_kind": "ctwa_candidate",
+                            "source_app": "instagram",
+                            "inbound_kind": "ctwa_first_contact",
+                        }
+                    ]
+                ),
+            ),
+            (
+                "unknown transport kind",
+                self.ok_payload(
+                    events=[
+                        {
+                            "event_id": "waevt_safe",
+                            "transport_kind": "something_new",
+                            "source_app": None,
+                            "inbound_kind": None,
+                        }
+                    ]
+                ),
+            ),
         ):
             with self.subTest(label):
                 self.assertEqual(
@@ -594,9 +741,7 @@ class CEOBridgePluginTests(unittest.TestCase):
             ]
         )
 
-        with patch.dict(
-            os.environ, {"BRAIN_CONTEXT_RESPONSE_MAX_BYTES": "256"}
-        ):
+        with patch.dict(os.environ, {"BRAIN_CONTEXT_RESPONSE_MAX_BYTES": "256"}):
             result = self.call_tool(huge)
 
         self.assertEqual(
@@ -627,8 +772,9 @@ class CEOBridgePluginTests(unittest.TestCase):
             reached = True
             return _Response(self.ok_payload())
 
-        with patch.dict(os.environ, {}, clear=True), patch.object(
-            self.tools_module.urllib.request, "urlopen", opener
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(self.tools_module.urllib.request, "urlopen", opener),
         ):
             raw = self.tools_module.conversation_context({})
 

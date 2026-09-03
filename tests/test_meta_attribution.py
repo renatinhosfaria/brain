@@ -167,13 +167,17 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertFalse(self.service.resolve_source("101", 21.0, 1.0))
         self.assertEqual(len(self.client.calls), 3)
 
-    def test_absolute_deadline_prevents_ad_call_after_probe_consumes_budget(self) -> None:
+    def test_absolute_deadline_prevents_ad_call_after_probe_consumes_budget(
+        self,
+    ) -> None:
         clock = [100.0]
         self.client = _AdvancingClient(clock)
         self.service = MetaAttributionService(self.settings, self.runtime, self.client)
         self.stage()
 
-        with patch("brain.meta_attribution.time.monotonic", side_effect=lambda: clock[0]):
+        with patch(
+            "brain.meta_attribution.time.monotonic", side_effect=lambda: clock[0]
+        ):
             self.assertFalse(self.service.resolve_source("101", 20.0, deadline=101.0))
 
         self.assertEqual([call[:2] for call in self.client.calls], [("probe", None)])
@@ -194,7 +198,9 @@ class MetaAttributionServiceTests(unittest.TestCase):
 
         with (
             patch.object(self.runtime, "write", side_effect=advancing_write),
-            patch("brain.meta_attribution.time.monotonic", side_effect=lambda: clock[0]),
+            patch(
+                "brain.meta_attribution.time.monotonic", side_effect=lambda: clock[0]
+            ),
         ):
             self.assertFalse(self.service.resolve_source("101", 20.0, deadline=101.0))
 
@@ -461,9 +467,7 @@ class MetaAttributionServiceTests(unittest.TestCase):
         clock = [20.0]
 
         class BatchClient(_Client):
-            def get_ad(
-                self, source_id: str, deadline: float | None = None
-            ) -> RemoteAd:
+            def get_ad(self, source_id: str, deadline: float | None = None) -> RemoteAd:
                 self.calls.append(("ad", source_id, deadline))
                 return RemoteAd(source_id, "Ad", "202", "ACTIVE", "ACTIVE")
 

@@ -181,7 +181,9 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertEqual(environment_files, ["EnvironmentFile=/etc/brain/brain.env"])
         self.assertIn("UMask=0077", unit)
 
-    def test_meta_ads_probe_deployment_contract_is_exact_and_disabled_by_default(self) -> None:
+    def test_meta_ads_probe_deployment_contract_is_exact_and_disabled_by_default(
+        self,
+    ) -> None:
         env = (ROOT / "deploy/brain.env.example").read_text(encoding="utf-8")
         toml_text = (ROOT / "deploy/brain.toml.example").read_text(encoding="utf-8")
         toml = tomllib.loads(toml_text)

@@ -181,7 +181,9 @@ class TransportEnvelope:
                     raw_limits or RawAttributionLimits(),
                 )
             except RawAttributionError:
-                raise TransportRequestError("external_ad_reply_raw is invalid") from None
+                raise TransportRequestError(
+                    "external_ad_reply_raw is invalid"
+                ) from None
         expected_kind = _expected_transport_kind(external)
         if transport_kind != expected_kind:
             raise TransportRequestError("transport_kind disagrees with metadata")
@@ -393,7 +395,9 @@ class TransportService:
                     raw, envelope.external_ad_reply, self.transport_ids
                 )
             except RawAttributionError:
-                raise TransportRequestError("raw attribution disagrees with metadata") from None
+                raise TransportRequestError(
+                    "raw attribution disagrees with metadata"
+                ) from None
         identity = verify_transport_identity(
             remote_jid_hmac=envelope.remote_jid_hmac,
             contact_key=envelope.contact_key or None,

@@ -59,9 +59,7 @@ _BASE64_RE = re.compile(
 )
 _DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
 _META_DECIMAL_ID_RE = re.compile(r"^[0-9]{1,64}$")
-_META_CONFIRMED_FIELDS = {
-    "status", "ad_id", "ad_name", "campaign_id", "campaign_name"
-}
+_META_CONFIRMED_FIELDS = {"status", "ad_id", "ad_name", "campaign_id", "campaign_name"}
 _META_PENDING_FIELDS = {"status", "reason"}
 _META_ERROR_CODES = frozenset(
     {
@@ -215,9 +213,7 @@ def _valid_raw_value(value: object, depth: int, nodes: list[int]) -> bool:
                 and abs(value) > _MAX_SAFE_INTEGER
             )
             and not (
-                isinstance(value, float)
-                and value == 0
-                and math.copysign(1, value) < 0
+                isinstance(value, float) and value == 0 and math.copysign(1, value) < 0
             )
         )
     if isinstance(value, list):
@@ -245,16 +241,12 @@ def _valid_meta_attribution(value: object) -> bool:
     if status == "confirmed":
         if set(value) != _META_CONFIRMED_FIELDS:
             return False
-        return (
-            all(
-                isinstance(value[field], str)
-                and _META_DECIMAL_ID_RE.fullmatch(value[field]) is not None
-                for field in ("ad_id", "campaign_id")
-            )
-            and all(
-                _safe_meta_name(value[field])
-                for field in ("ad_name", "campaign_name")
-            )
+        return all(
+            isinstance(value[field], str)
+            and _META_DECIMAL_ID_RE.fullmatch(value[field]) is not None
+            for field in ("ad_id", "campaign_id")
+        ) and all(
+            _safe_meta_name(value[field]) for field in ("ad_name", "campaign_name")
         )
     if status in {"pending", "unavailable"}:
         if set(value) not in ({"status"}, _META_PENDING_FIELDS):
@@ -269,7 +261,8 @@ def _valid_meta_attribution(value: object) -> bool:
 def _valid_event(event: object) -> bool:
     return (
         isinstance(event, dict)
-        and set(event) in (
+        and set(event)
+        in (
             _LEGACY_EVENT_FIELDS,
             _EXPANDED_EVENT_FIELDS,
             _LEGACY_EVENT_FIELDS | {"meta_attribution"},
@@ -279,8 +272,7 @@ def _valid_event(event: object) -> bool:
         and _EVENT_ID_RE.fullmatch(event["event_id"]) is not None
         and event.get("transport_kind") in _TRANSPORT_KINDS
         and (
-            event.get("source_app") is None
-            or isinstance(event.get("source_app"), str)
+            event.get("source_app") is None or isinstance(event.get("source_app"), str)
         )
         # Transport evidence only. Lifecycle-relative meaning was never this
         # plugin's to assert, and since Amendment 2 nothing derives it at all.
@@ -316,9 +308,7 @@ def _valid_contact(contact: object) -> bool:
     if name is None:
         return source is None
     return (
-        isinstance(name, str)
-        and 1 <= len(name) <= 160
-        and source == "whatsapp_profile"
+        isinstance(name, str) and 1 <= len(name) <= 160 and source == "whatsapp_profile"
     )
 
 

@@ -408,9 +408,8 @@ class BrainService:
         context: GatewaySessionContext,
     ) -> dict[str, Any]:
         started = time.perf_counter()
-        request_deadline = (
-            time.monotonic()
-            + min(1.5, self.settings.meta_ads_mcp_context_budget_seconds)
+        request_deadline = time.monotonic() + min(
+            1.5, self.settings.meta_ads_mcp_context_budget_seconds
         )
         identity: dict[str, Any] = {
             "profile": "unknown",
@@ -515,9 +514,7 @@ class BrainService:
                     [event_ids], time.time(), deadline=request_deadline
                 )
         except Exception:  # noqa: BLE001 - remote context enrichment is fail-open
-            logging.getLogger("brain").warning(
-                "Meta Ads context enrichment failed"
-            )
+            logging.getLogger("brain").warning("Meta Ads context enrichment failed")
 
     @staticmethod
     def _newest_pending_ctwa_event_id(

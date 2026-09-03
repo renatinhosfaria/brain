@@ -8,17 +8,27 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from re import fullmatch
 
-META_READ_TOOLS = frozenset({
-    "meta_list_ad_accounts",
-    "meta_get_ad",
-    "meta_get_campaign",
-})
-META_ERROR_CODES = frozenset({
-    "meta_timeout", "meta_rate_limited", "meta_server_unavailable",
-    "meta_auth_unavailable", "meta_required_tool_unavailable",
-    "meta_account_mismatch", "meta_not_found", "meta_invalid_response",
-    "meta_incomplete_result", "meta_inactive",
-})
+META_READ_TOOLS = frozenset(
+    {
+        "meta_list_ad_accounts",
+        "meta_get_ad",
+        "meta_get_campaign",
+    }
+)
+META_ERROR_CODES = frozenset(
+    {
+        "meta_timeout",
+        "meta_rate_limited",
+        "meta_server_unavailable",
+        "meta_auth_unavailable",
+        "meta_required_tool_unavailable",
+        "meta_account_mismatch",
+        "meta_not_found",
+        "meta_invalid_response",
+        "meta_incomplete_result",
+        "meta_inactive",
+    }
+)
 
 _ACCOUNT_ID = "1598606388477916"
 
@@ -86,7 +96,9 @@ class RemoteAd:
         object.__setattr__(self, "name", _text(self.name, "name"))
         object.__setattr__(self, "campaign_id", _id(self.campaign_id, "campaign_id"))
         object.__setattr__(self, "status", _text(self.status, "status"))
-        object.__setattr__(self, "effective_status", _text(self.effective_status, "effective_status"))
+        object.__setattr__(
+            self, "effective_status", _text(self.effective_status, "effective_status")
+        )
 
 
 @dataclass(frozen=True)
@@ -100,7 +112,9 @@ class RemoteCampaign:
         object.__setattr__(self, "campaign_id", _id(self.campaign_id, "campaign_id"))
         object.__setattr__(self, "name", _text(self.name, "name"))
         object.__setattr__(self, "status", _text(self.status, "status"))
-        object.__setattr__(self, "effective_status", _text(self.effective_status, "effective_status"))
+        object.__setattr__(
+            self, "effective_status", _text(self.effective_status, "effective_status")
+        )
 
 
 @dataclass(frozen=True)
@@ -117,9 +131,19 @@ class ConfirmedMetaAttribution:
     def __post_init__(self) -> None:
         for field in ("ad_id", "campaign_id"):
             object.__setattr__(self, field, _id(getattr(self, field), field))
-        for field in ("ad_name", "campaign_name", "ad_status", "ad_effective_status", "campaign_status", "campaign_effective_status"):
+        for field in (
+            "ad_name",
+            "campaign_name",
+            "ad_status",
+            "ad_effective_status",
+            "campaign_status",
+            "campaign_effective_status",
+        ):
             object.__setattr__(self, field, _text(getattr(self, field), field))
-        if self.ad_effective_status != "ACTIVE" or self.campaign_effective_status != "ACTIVE":
+        if (
+            self.ad_effective_status != "ACTIVE"
+            or self.campaign_effective_status != "ACTIVE"
+        ):
             raise ValueError("both effective statuses must be ACTIVE")
 
 
