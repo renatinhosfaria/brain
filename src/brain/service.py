@@ -24,6 +24,9 @@ from .authorization import (
 from .config import BrainSettings
 from .db import ReadOnlyDatabase, SchemaGuard
 from .errors import BrainError, DatabaseUnavailable, InvalidRequest
+from .meta_ads_mcp import RemoteMetaAdsMcpClient
+from .meta_ads_models import META_ERROR_CODES
+from .meta_attribution import MetaAttributionService
 from .projection import ProjectedMessage, project_rows
 from .raw_attribution import (
     RawAttributionLimits,
@@ -72,6 +75,7 @@ class Health:
     gateway_bridge: str
     schema: str
     hermes_compatibility: str
+    meta_ads_mcp: str = "disabled"
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -83,6 +87,7 @@ class Health:
             "gateway_bridge": self.gateway_bridge,
             "schema": self.schema,
             "hermes_compatibility": self.hermes_compatibility,
+            "meta_ads_mcp": self.meta_ads_mcp,
         }
 
 
@@ -104,9 +109,19 @@ class BrainService:
             timeout_seconds=settings.busy_timeout_seconds,
         )
         self.runtime_ids: RuntimeIds | None = None
+        self.meta_ads_mcp_client: RemoteMetaAdsMcpClient | None = None
+        self.meta_attribution: MetaAttributionService | None = None
+        self._closed = False
         if settings.transport_hmac_secret:
             self.runtime_ids = RuntimeIds(settings.transport_hmac_secret)
             self.runtime.initialize()
+            if settings.meta_ads_mcp_enabled and settings.meta_ads_mcp_api_key:
+                # Construction starts no remote operation. The client owns the
+                # shared session lock used by context and the worker later.
+                self.meta_ads_mcp_client = RemoteMetaAdsMcpClient(settings)
+            self.meta_attribution = MetaAttributionService(
+                settings, self.runtime, self.meta_ads_mcp_client
+            )
         self.transport_service = TransportService(
             settings,
             self.runtime,
@@ -122,6 +137,7 @@ class BrainService:
         identity_ok = self._identity_directory_compatible()
         gateway_ok = self._gateway_bridge_configured()
         runtime_ok = self._runtime_compatible()
+        meta_ads_mcp = self._meta_ads_mcp_health()
         compatibility_ok = schema_ok and gateway_ok
         return Health(
             status=(
@@ -136,7 +152,30 @@ class BrainService:
             gateway_bridge="configured" if gateway_ok else "unconfigured",
             schema="compatible" if schema_ok else "incompatible",
             hermes_compatibility=("compatible" if compatibility_ok else "incompatible"),
+            meta_ads_mcp=meta_ads_mcp,
         )
+
+    def _meta_ads_mcp_health(self) -> str:
+        if not self.settings.meta_ads_mcp_enabled:
+            return "disabled"
+        if not self.settings.meta_ads_mcp_api_key or self.meta_attribution is None:
+            return "degraded"
+        try:
+            return self.meta_attribution.health(time.time())
+        except (OSError, sqlite3.Error, ValueError):
+            return "degraded"
+
+    def close(self) -> None:
+        """Release the optional shared remote client during app shutdown."""
+        if self._closed:
+            return
+        self._closed = True
+        if self.meta_ads_mcp_client is None:
+            return
+        try:
+            self.meta_ads_mcp_client.close()
+        except Exception:  # noqa: BLE001 - shutdown must not leak remote details
+            logging.getLogger("brain").warning("Meta Ads MCP client close failed")
 
     def _identity_directory_compatible(self) -> bool:
         path = self.settings.whatsapp_session_dir
@@ -369,6 +408,9 @@ class BrainService:
         context: GatewaySessionContext,
     ) -> dict[str, Any]:
         started = time.perf_counter()
+        request_deadline = (
+            time.monotonic() + self.settings.meta_ads_mcp_context_budget_seconds
+        )
         identity: dict[str, Any] = {
             "profile": "unknown",
             "mode": "unknown",
@@ -391,13 +433,17 @@ class BrainService:
                 raise DatabaseUnavailable()
             else:
                 contact_key = self.runtime_ids.contact_key(resolution.phone)
+                context_now = time.time()
+                self._resolve_newest_pending_context_source(
+                    contact_key, context_now, request_deadline
+                )
                 try:
                     result = self.runtime.read(
                         lambda conn: self._conversation_context_from_runtime(
                             conn,
                             contact_key=contact_key,
                             phone_e164=resolution.phone,
-                            now=time.time(),
+                            now=context_now,
                             raw_limits=RawAttributionLimits(
                                 max_bytes=self.settings.ctwa_raw_max_bytes,
                                 max_depth=self.settings.ctwa_raw_max_depth,
@@ -449,6 +495,47 @@ class BrainService:
             )
             raise DatabaseUnavailable() from exc
 
+    def _resolve_newest_pending_context_source(
+        self, contact_key: str, context_now: float, request_deadline: float
+    ) -> None:
+        """Best-effort lookup for only the most recent unresolved CTWA event."""
+        if self.meta_attribution is None:
+            return
+        remaining = request_deadline - time.monotonic()
+        budget = min(1.5, remaining)
+        if budget <= 0:
+            return
+        try:
+            event_ids = self.runtime.read(
+                lambda conn: self._newest_pending_ctwa_event_id(
+                    conn, contact_key, context_now
+                )
+            )
+            if event_ids is not None:
+                self.meta_attribution.resolve_pending_for_contact(
+                    [event_ids], time.time(), budget
+                )
+        except Exception:  # noqa: BLE001 - remote context enrichment is fail-open
+            logging.getLogger("brain").warning(
+                "Meta Ads context enrichment failed"
+            )
+
+    @staticmethod
+    def _newest_pending_ctwa_event_id(
+        conn: sqlite3.Connection, contact_key: str, now: float
+    ) -> str | None:
+        row = conn.execute(
+            "SELECT event.event_id FROM transport_events AS event "
+            "JOIN ctwa_meta_attributions AS attribution "
+            "ON attribution.event_id = event.event_id "
+            "WHERE event.contact_key = ? AND event.received_at > ? "
+            "AND event.transport_kind = 'ctwa_candidate' "
+            "AND attribution.status = 'pending' "
+            "ORDER BY event.received_at DESC, event.event_id DESC LIMIT 1",
+            (contact_key, now - CONTEXT_WINDOW_SECONDS),
+        ).fetchone()
+        return None if row is None else str(row["event_id"])
+
     @staticmethod
     def _conversation_context_from_runtime(
         conn: sqlite3.Connection,
@@ -473,10 +560,17 @@ class BrainService:
         `inbound_kind` is null here and always will be.
         """
         rows = conn.execute(
-            "SELECT event_id, transport_kind, source_app, "
-            "external_ad_reply_raw_json FROM transport_events "
-            "WHERE contact_key = ? AND received_at > ? "
-            "ORDER BY received_at DESC, event_id LIMIT ?",
+            "SELECT event.event_id, event.transport_kind, event.source_app, "
+            "event.external_ad_reply_raw_json, attribution.status AS meta_status, "
+            "attribution.reason_code AS meta_reason, attribution.ad_id AS meta_ad_id, "
+            "attribution.ad_name AS meta_ad_name, "
+            "attribution.campaign_id AS meta_campaign_id, "
+            "attribution.campaign_name AS meta_campaign_name "
+            "FROM transport_events AS event "
+            "LEFT JOIN ctwa_meta_attributions AS attribution "
+            "ON attribution.event_id = event.event_id "
+            "WHERE event.contact_key = ? AND event.received_at > ? "
+            "ORDER BY event.received_at DESC, event.event_id LIMIT ?",
             (contact_key, now - CONTEXT_WINDOW_SECONDS, CONTEXT_MAX_EVENTS),
         ).fetchall()
         if not rows:
@@ -506,18 +600,49 @@ class BrainService:
                 "display_name_source": "whatsapp_profile" if display_name else None,
             },
             "events": [
-                {
-                    "event_id": str(row["event_id"]),
-                    "transport_kind": str(row["transport_kind"]),
-                    "source_app": str(row["source_app"])
-                    if row["source_app"] is not None
-                    else None,
-                    "inbound_kind": None,
-                    "external_ad_reply": decoded_raw[str(row["event_id"])],
-                }
-                for row in reversed(rows)
+                BrainService._context_event(row, decoded_raw) for row in reversed(rows)
             ],
         }
+
+    @staticmethod
+    def _context_event(
+        row: sqlite3.Row, decoded_raw: Mapping[str, object | None]
+    ) -> dict[str, object]:
+        event_id = str(row["event_id"])
+        event: dict[str, object] = {
+            "event_id": event_id,
+            "transport_kind": str(row["transport_kind"]),
+            "source_app": str(row["source_app"])
+            if row["source_app"] is not None
+            else None,
+            "inbound_kind": None,
+            "external_ad_reply": decoded_raw[event_id],
+        }
+        if row["transport_kind"] != "ctwa_candidate" or row["meta_status"] is None:
+            return event
+        status = str(row["meta_status"])
+        if status == "confirmed":
+            fields = {
+                "ad_id": row["meta_ad_id"],
+                "ad_name": row["meta_ad_name"],
+                "campaign_id": row["meta_campaign_id"],
+                "campaign_name": row["meta_campaign_name"],
+            }
+            if all(isinstance(value, str) and value for value in fields.values()):
+                event["meta_attribution"] = {"status": status, **fields}
+            else:
+                event["meta_attribution"] = {
+                    "status": "unavailable",
+                    "reason": "meta_incomplete_result",
+                }
+            return event
+        if status in {"pending", "unavailable"}:
+            meta: dict[str, object] = {"status": status}
+            reason = row["meta_reason"]
+            if isinstance(reason, str) and reason in META_ERROR_CODES:
+                meta["reason"] = reason
+            event["meta_attribution"] = meta
+        return event
 
     @staticmethod
     def _validate_limit(

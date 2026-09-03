@@ -151,6 +151,21 @@ class BrainMCPServer:
             except Exception:  # noqa: BLE001 - housekeeping never kills the app
                 logging.getLogger("brain").warning("periodic retention pass failed")
 
+    async def _meta_ads_mcp_worker_loop(self) -> None:
+        """Run bounded attribution housekeeping without blocking the event loop."""
+        while True:
+            try:
+                await asyncio.sleep(
+                    self.service.settings.meta_ads_mcp_worker_interval_seconds
+                )
+                attribution = getattr(self.service, "meta_attribution", None)
+                if attribution is not None:
+                    await asyncio.to_thread(attribution.tick, time.time())
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - housekeeping never kills the app
+                logging.getLogger("brain").warning("Meta Ads MCP worker pass failed")
+
     def app(self):
         application = self.server.streamable_http_app(
             streamable_http_path="/mcp",
@@ -182,14 +197,18 @@ class BrainMCPServer:
 
         @contextlib.asynccontextmanager
         async def lifespan(app):
-            task = asyncio.create_task(self._retention_loop())
+            retention_task = asyncio.create_task(self._retention_loop())
+            meta_ads_task = asyncio.create_task(self._meta_ads_mcp_worker_loop())
             try:
                 async with inner_lifespan(app):
                     yield
             finally:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+                for task in (retention_task, meta_ads_task):
+                    task.cancel()
+                for task in (retention_task, meta_ads_task):
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                await asyncio.to_thread(self.service.close)
 
         application.router.lifespan_context = lifespan
         return application

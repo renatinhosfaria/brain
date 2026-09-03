@@ -269,6 +269,7 @@ class BrainFixture(unittest.TestCase):
                 "gateway_bridge": "configured",
                 "schema": "compatible",
                 "hermes_compatibility": "compatible",
+                "meta_ads_mcp": "disabled",
             },
         )
 
@@ -430,6 +431,7 @@ class BrainFixture(unittest.TestCase):
                 "gateway_bridge": "configured",
                 "schema": "compatible",
                 "hermes_compatibility": "compatible",
+                "meta_ads_mcp": "disabled",
             },
         )
 
@@ -501,6 +503,9 @@ class BrainFixture(unittest.TestCase):
                     "incompatible",
                     "configured",
                     "unconfigured",
+                    "disabled",
+                    "ready",
+                    "degraded",
                 }
                 for value in health.values()
             )

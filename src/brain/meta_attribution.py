@@ -176,6 +176,12 @@ class MetaAttributionService:
         return "ready"
 
     def tick(self, now: float) -> int:
+        if not self._settings.meta_ads_mcp_enabled:
+            return 0
+        if self._auth_circuit_open(now):
+            return 0
+        if self.probe(now) != "ready":
+            return 0
         return self.run_due_jobs(now)
 
     def health(self, now: float) -> str:
