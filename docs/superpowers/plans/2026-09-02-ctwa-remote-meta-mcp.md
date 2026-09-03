@@ -54,7 +54,7 @@ fail-open and represented by bounded state.
   implementation, then focused tests and a commit. Run the complete Python
   suite and Observer suite before declaring completion.
 
-## 1. Configuration and dependency boundary
+## Task 1: Configuration and dependency boundary
 
 **Files:**
 
@@ -100,7 +100,7 @@ Brain environment file with `UMask=0077`.
 
 Commit: `config: add remote Meta Ads MCP settings`.
 
-## 2. Validated remote/domain models
+## Task 2: Validated remote/domain models
 
 **Files:**
 
@@ -173,7 +173,7 @@ and safe `MetaAdsError` stringification (code only).
 
 Commit: `feat: define remote Meta attribution models`.
 
-## 3. Streamable HTTP client with a strict read-only allowlist
+## Task 3: Streamable HTTP client with a strict read-only allowlist
 
 **Files:**
 
@@ -224,7 +224,7 @@ write-tool names are never called.
 
 Commit: `feat: add read-only remote Meta Ads MCP client`.
 
-## 4. Durable attribution schema and store
+## Task 4: Durable attribution schema and store
 
 **Files:**
 
@@ -300,7 +300,7 @@ bounded reason codes, and retention cleanup.
 
 Commit: `feat: persist durable CTWA Meta attribution jobs`.
 
-## 5. Attribution orchestration and exact confirmation
+## Task 5: Attribution orchestration and exact confirmation
 
 **Files:**
 
@@ -356,7 +356,7 @@ behavior, idempotent confirmation, worker retry, and fail-open ACK guarantees.
 
 Commit: `feat: resolve CTWA sources through remote Meta MCP`.
 
-## 6. Brain lifecycle, context projection, and health
+## Task 6: Brain lifecycle, context projection, and health
 
 **Files:**
 
@@ -401,7 +401,7 @@ secret/raw-remote-payload leakage in context or logs.
 
 Commit: `feat: expose Meta attribution through Brain context`.
 
-## 7. CEO bridge contract
+## Task 7: CEO bridge contract
 
 **Files:**
 
@@ -427,7 +427,7 @@ rejection path.
 
 Commit: `feat: validate Meta attribution in CEO bridge`.
 
-## 8. Probe command, deployment, and operator runbook
+## Task 8: Probe command, deployment, and operator runbook
 
 **Files:**
 
@@ -464,7 +464,7 @@ disabled-by-default rollout, and absence of secrets in documentation.
 
 Commit: `docs: add remote Meta MCP rollout and probe`.
 
-## 9. Verification and acceptance checkpoint
+## Task 9: Verification and acceptance checkpoint
 
 - [ ] Run focused tests after each task and keep every task commit small.
 - [ ] Run `python -m unittest discover -s tests -v` from the Brain virtualenv.
