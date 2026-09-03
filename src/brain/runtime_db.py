@@ -58,7 +58,119 @@ _SCHEMA = (
         updated_at REAL NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS ctwa_meta_attributions (
+        event_id TEXT PRIMARY KEY REFERENCES transport_events(event_id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        ctwa_clid TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending','confirmed','unavailable')),
+        ad_id TEXT, ad_name TEXT, campaign_id TEXT, campaign_name TEXT,
+        ad_status TEXT, ad_effective_status TEXT,
+        campaign_status TEXT, campaign_effective_status TEXT,
+        match_method TEXT CHECK(match_method IS NULL OR match_method='source_id_exact'),
+        reason_code TEXT, confirmed_at REAL, last_attempt_at REAL,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        next_attempt_at REAL, lease_until REAL, lease_token TEXT,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meta_attribution_jobs (
+        account_id TEXT NOT NULL, source_id TEXT NOT NULL,
+        next_attempt_at REAL NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error_code TEXT, lease_until REAL, lease_token TEXT,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL,
+        PRIMARY KEY(account_id, source_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS meta_attribution_state (
+        account_id TEXT PRIMARY KEY, auth_circuit_until REAL NOT NULL DEFAULT 0,
+        last_probe_at REAL, last_success_at REAL, updated_at REAL NOT NULL
+    )
+    """,
+    (
+        "CREATE INDEX IF NOT EXISTS idx_ctwa_meta_attributions_status_due "
+        "ON ctwa_meta_attributions(status, next_attempt_at)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_ctwa_meta_attributions_source_status "
+        "ON ctwa_meta_attributions(source_id, status)"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_transport_events_contact_received "
+        "ON transport_events(contact_key, received_at)"
+    ),
 )
+
+_ATTRIBUTION_TABLE_COLUMNS = {
+    "ctwa_meta_attributions": frozenset(
+        {
+            "event_id",
+            "account_id",
+            "source_id",
+            "ctwa_clid",
+            "status",
+            "ad_id",
+            "ad_name",
+            "campaign_id",
+            "campaign_name",
+            "ad_status",
+            "ad_effective_status",
+            "campaign_status",
+            "campaign_effective_status",
+            "match_method",
+            "reason_code",
+            "confirmed_at",
+            "last_attempt_at",
+            "attempt_count",
+            "next_attempt_at",
+            "lease_until",
+            "lease_token",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "meta_attribution_jobs": frozenset(
+        {
+            "account_id",
+            "source_id",
+            "next_attempt_at",
+            "attempt_count",
+            "last_error_code",
+            "lease_until",
+            "lease_token",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "meta_attribution_state": frozenset(
+        {
+            "account_id",
+            "auth_circuit_until",
+            "last_probe_at",
+            "last_success_at",
+            "updated_at",
+        }
+    ),
+}
+
+_ATTRIBUTION_CONSTRAINTS = {
+    "ctwa_meta_attributions": (
+        "check(statusin('pending','confirmed','unavailable'))",
+        "check(match_methodisnullormatch_method='source_id_exact')",
+        "check(attempt_count>=0)",
+    ),
+    "meta_attribution_jobs": (),
+    "meta_attribution_state": (),
+}
+
+_ATTRIBUTION_PRIMARY_KEYS = {
+    "ctwa_meta_attributions": ("event_id",),
+    "meta_attribution_jobs": ("account_id", "source_id"),
+    "meta_attribution_state": ("account_id",),
+}
 
 
 class RuntimeDatabase:
@@ -97,12 +209,59 @@ class RuntimeDatabase:
                         "ALTER TABLE transport_events "
                         "ADD COLUMN external_ad_reply_raw_json TEXT"
                     )
+                self._validate_attribution_schema(conn)
                 conn.commit()
             except BaseException:
                 conn.rollback()
                 raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _validate_attribution_schema(conn: sqlite3.Connection) -> None:
+        """Reject legacy lookalikes that would silently drop durable invariants."""
+        for table, expected_columns in _ATTRIBUTION_TABLE_COLUMNS.items():
+            column_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            actual_columns = {str(row[1]) for row in column_info}
+            if actual_columns != expected_columns:
+                raise sqlite3.OperationalError(
+                    f"incompatible runtime attribution schema for {table}"
+                )
+            primary_key = tuple(
+                str(row[1])
+                for row in sorted(column_info, key=lambda row: int(row[5]))
+                if int(row[5])
+            )
+            if primary_key != _ATTRIBUTION_PRIMARY_KEYS[table]:
+                raise sqlite3.OperationalError(
+                    f"incompatible runtime attribution primary key for {table}"
+                )
+            sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            sql = "" if sql_row is None or sql_row[0] is None else str(sql_row[0])
+            normalized = "".join(sql.lower().split())
+            if any(
+                constraint not in normalized
+                for constraint in _ATTRIBUTION_CONSTRAINTS[table]
+            ):
+                raise sqlite3.OperationalError(
+                    f"incompatible runtime attribution constraints for {table}"
+                )
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(ctwa_meta_attributions)"
+        ).fetchall()
+        if not any(
+            row[2] == "transport_events"
+            and row[3] == "event_id"
+            and row[4] == "event_id"
+            and str(row[6]).upper() == "CASCADE"
+            for row in foreign_keys
+        ):
+            raise sqlite3.OperationalError(
+                "ctwa attribution parent cascade is incompatible"
+            )
 
     def read(self, callback: Callable[[sqlite3.Connection], T]) -> T:
         conn = self._connect()

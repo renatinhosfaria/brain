@@ -14,6 +14,9 @@ from brain.transport_models import RuntimeIds
 BUSINESS_TABLES = {
     "transport_events",
     "contact_ephemera",
+    "ctwa_meta_attributions",
+    "meta_attribution_jobs",
+    "meta_attribution_state",
 }
 
 
@@ -126,6 +129,78 @@ class RuntimeDatabaseTests(unittest.TestCase):
 
         self.assertEqual(pragmas, ("wal", 1, 0))
 
+    def test_attribution_schema_has_required_indexes_and_foreign_key_cascade(
+        self,
+    ) -> None:
+        self.initialize()
+        self.runtime.write(lambda conn: self._insert_event(conn, "event-cascade"))
+        self.runtime.write(
+            lambda conn: conn.execute(
+                "INSERT INTO ctwa_meta_attributions "
+                "(event_id, account_id, source_id, status, created_at, updated_at) "
+                "VALUES ('event-cascade', 'act_1598606388477916', '101', 'pending', 1.0, 1.0)"
+            )
+        )
+        index_names = self.runtime.read(
+            lambda conn: {
+                str(row[1])
+                for row in conn.execute("PRAGMA index_list(ctwa_meta_attributions)")
+            }
+        )
+        self.assertTrue(
+            {
+                "idx_ctwa_meta_attributions_status_due",
+                "idx_ctwa_meta_attributions_source_status",
+            }.issubset(index_names)
+        )
+        self.runtime.write(
+            lambda conn: conn.execute(
+                "DELETE FROM transport_events WHERE event_id = 'event-cascade'"
+            )
+        )
+        self.assertEqual(
+            self.runtime.read(
+                lambda conn: conn.execute(
+                    "SELECT COUNT(*) FROM ctwa_meta_attributions"
+                ).fetchone()[0]
+            ),
+            0,
+        )
+
+    def test_initialize_rejects_incompatible_existing_attribution_schema(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE ctwa_meta_attributions (event_id TEXT PRIMARY KEY)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.initialize()
+
+    def test_initialize_rejects_attribution_job_table_without_its_composite_key(
+        self,
+    ) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE meta_attribution_jobs ("
+                "account_id TEXT NOT NULL, source_id TEXT NOT NULL, "
+                "next_attempt_at REAL NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0, "
+                "last_error_code TEXT, lease_until REAL, lease_token TEXT, "
+                "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.initialize()
+
     def test_write_commits_on_success(self) -> None:
         self.initialize()
 
@@ -162,6 +237,7 @@ class RuntimeDatabaseTests(unittest.TestCase):
             ).fetchone()[0]
         )
         self.assertEqual(count, 0)
+
 
 class RuntimeIdsTests(unittest.TestCase):
     def setUp(self) -> None:
