@@ -30,6 +30,8 @@ class _MetaClient(Protocol):
         self, campaign_id: str, deadline: float | None = None
     ) -> object: ...
 
+    def invalidate(self) -> None: ...
+
 
 class _ResolutionFailure(Exception):
     def __init__(self, code: str) -> None:
@@ -81,14 +83,19 @@ class MetaAttributionService:
         if lease_token is None:
             return False
 
+        probe_started_at = now
         deadline = time.monotonic() + budget
         try:
             client = self._client()
             client.probe(deadline)
-            self._runtime.write(lambda conn: self._store.close_auth_circuit(conn, now))
+            self._runtime.write(
+                lambda conn: self._store.close_auth_circuit(conn, now, probe_started_at)
+            )
             ad = client.get_ad(source_id, deadline)
             confirmed = self._confirmed(source_id, ad, client, deadline)
         except MetaAdsError as error:
+            if error.code == "meta_auth_unavailable":
+                self._invalidate_client()
             self._fail(source_id, error, now, str(lease_token))
             return False
         except _ResolutionFailure as error:
@@ -156,12 +163,13 @@ class MetaAttributionService:
             self._client().probe(time.monotonic() + self._budget(None))
         except MetaAdsError as error:
             if error.code == "meta_auth_unavailable":
+                self._invalidate_client()
                 retry_after = error.retry_after_seconds or 0.0
                 self._runtime.write(
                     lambda conn: self._store.open_auth_circuit(conn, now, retry_after)
                 )
             return "degraded"
-        self._runtime.write(lambda conn: self._store.close_auth_circuit(conn, now))
+        self._runtime.write(lambda conn: self._store.close_auth_circuit(conn, now, now))
         return "ready"
 
     def tick(self, now: float) -> int:
@@ -178,6 +186,10 @@ class MetaAttributionService:
                 raise MetaAdsError("meta_auth_unavailable")
             self._client_instance = RemoteMetaAdsMcpClient(self._settings)
         return self._client_instance
+
+    def _invalidate_client(self) -> None:
+        if self._client_instance is not None:
+            self._client_instance.invalidate()
 
     def _confirmed(
         self, source_id: str, ad: object, client: _MetaClient, deadline: float

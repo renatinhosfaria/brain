@@ -279,8 +279,21 @@ class MetaAdsStore:
         )
         return until
 
-    def close_auth_circuit(self, conn: sqlite3.Connection, now: float) -> None:
+    def close_auth_circuit(
+        self,
+        conn: sqlite3.Connection,
+        now: float,
+        probe_started_at: float | None = None,
+    ) -> bool:
         now = _time(now)
+        if probe_started_at is not None:
+            probe_started_at = _time(probe_started_at)
+            state = conn.execute(
+                "SELECT updated_at FROM meta_attribution_state WHERE account_id = ?",
+                (self.account_id,),
+            ).fetchone()
+            if state is not None and float(state["updated_at"]) > probe_started_at:
+                return False
         conn.execute(
             "INSERT INTO meta_attribution_state "
             "(account_id, auth_circuit_until, last_success_at, updated_at) VALUES (?, 0, ?, ?) "
@@ -288,6 +301,7 @@ class MetaAdsStore:
             "last_success_at = excluded.last_success_at, updated_at = excluded.updated_at",
             (self.account_id, now, now),
         )
+        return True
 
     def context_for_event(
         self, conn: sqlite3.Connection, event_id: str

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ class _Client:
         campaign: object | None = None,
         probe_error: MetaAdsError | None = None,
         ad_error: MetaAdsError | None = None,
+        on_probe: Callable[[], None] | None = None,
     ) -> None:
         self.ad = ad or RemoteAd("101", "Ad", "202", "PAUSED", "ACTIVE")
         self.campaign = campaign or RemoteCampaign(
@@ -27,12 +29,23 @@ class _Client:
         )
         self.probe_error = probe_error
         self.ad_error = ad_error
+        self.on_probe = on_probe
+        self.auth_latched = False
         self.calls: list[tuple[str, str | None, float | None]] = []
 
     def probe(self, deadline: float | None = None) -> None:
         self.calls.append(("probe", None, deadline))
+        if self.on_probe is not None:
+            self.on_probe()
         if self.probe_error:
+            if self.probe_error.code == "meta_auth_unavailable":
+                self.auth_latched = True
             raise self.probe_error
+        if self.auth_latched:
+            raise MetaAdsError("meta_auth_unavailable")
+
+    def invalidate(self) -> None:
+        self.auth_latched = False
 
     def get_ad(self, source_id: str, deadline: float | None = None) -> object:
         self.calls.append(("ad", source_id, deadline))
@@ -261,6 +274,30 @@ class MetaAttributionServiceTests(unittest.TestCase):
         calls = list(self.client.calls)
         self.assertFalse(self.service.resolve_source("101", 21.0, 1.0))
         self.assertEqual(self.client.calls, calls)
+        self.assertEqual(self.service.health(21.0), "degraded")
+
+    def test_expired_durable_auth_circuit_recreates_the_latched_remote_client(
+        self,
+    ) -> None:
+        self.stage("event-recovery", "102")
+        self.client = _Client(probe_error=MetaAdsError("meta_auth_unavailable"))
+        self.service = MetaAttributionService(self.settings, self.runtime, self.client)
+
+        self.assertEqual(self.service.probe(20.0), "degraded")
+        self.client.probe_error = None
+        self.client.ad = RemoteAd("102", "Ad", "202", "ACTIVE", "ACTIVE")
+        self.assertTrue(self.service.resolve_source("102", 81.0, 1.0))
+        self.assertEqual(self.row("event-recovery")[0], "confirmed")
+
+    def test_stale_successful_probe_cannot_clear_a_newer_auth_failure(self) -> None:
+        self.stage()
+        self.client = _Client()
+        self.service = MetaAttributionService(self.settings, self.runtime, self.client)
+
+        self.client.on_probe = lambda: self.runtime.write(
+            lambda conn: self.service._store.open_auth_circuit(conn, 21.0, 0.0)
+        )
+        self.assertTrue(self.service.resolve_source("101", 20.0, 1.0))
         self.assertEqual(self.service.health(21.0), "degraded")
 
     def test_account_and_required_tool_probe_failures_are_terminal_without_values(
