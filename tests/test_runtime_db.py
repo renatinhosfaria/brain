@@ -270,6 +270,32 @@ class RuntimeDatabaseTests(unittest.TestCase):
         with self.assertRaises(sqlite3.OperationalError):
             self.initialize()
 
+    def test_initialize_rejects_weakened_check_hidden_by_a_comment(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute(
+                "CREATE TABLE ctwa_meta_attributions ("
+                "event_id TEXT PRIMARY KEY REFERENCES transport_events(event_id) ON DELETE CASCADE, "
+                "account_id TEXT NOT NULL, source_id TEXT NOT NULL, ctwa_clid TEXT, "
+                "status TEXT NOT NULL CHECK(status IN ('pending','confirmed','unavailable')), "
+                "ad_id TEXT, ad_name TEXT, campaign_id TEXT, campaign_name TEXT, "
+                "ad_status TEXT, ad_effective_status TEXT, campaign_status TEXT, "
+                "campaign_effective_status TEXT, "
+                "match_method TEXT CHECK(match_method IS NULL OR match_method='source_id_exact'), "
+                "reason_code TEXT, confirmed_at REAL, last_attempt_at REAL, "
+                "attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= -1) "
+                "/* CHECK(attempt_count >= 0) */, next_attempt_at REAL, "
+                "lease_until REAL, lease_token TEXT, created_at REAL NOT NULL, "
+                "updated_at REAL NOT NULL)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.initialize()
+
     def test_initialize_rejects_conflicting_named_attribution_index(self) -> None:
         self.initialize()
         conn = sqlite3.connect(self.path)

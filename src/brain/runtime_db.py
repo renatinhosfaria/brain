@@ -104,6 +104,29 @@ _SCHEMA = (
     ),
 )
 
+
+def _canonical_table_sql(value: str) -> str:
+    """Normalize only whitespace/case; comments must make a legacy schema fail."""
+    return "".join(value.lower().split()).replace(
+        "createtableifnotexists", "createtable", 1
+    )
+
+
+_ATTRIBUTION_TABLE_SQL = {
+    table: _canonical_table_sql(
+        next(
+            statement
+            for statement in _SCHEMA
+            if f"CREATE TABLE IF NOT EXISTS {table}" in statement
+        )
+    )
+    for table in (
+        "ctwa_meta_attributions",
+        "meta_attribution_jobs",
+        "meta_attribution_state",
+    )
+}
+
 _ATTRIBUTION_COLUMN_DEFINITIONS = {
     "ctwa_meta_attributions": (
         ("event_id", "TEXT", 0, None, 1),
@@ -148,16 +171,6 @@ _ATTRIBUTION_COLUMN_DEFINITIONS = {
         ("last_success_at", "REAL", 0, None, 0),
         ("updated_at", "REAL", 1, None, 0),
     ),
-}
-
-_ATTRIBUTION_CONSTRAINTS = {
-    "ctwa_meta_attributions": (
-        "check(statusin('pending','confirmed','unavailable'))",
-        "check(match_methodisnullormatch_method='source_id_exact')",
-        "check(attempt_count>=0)",
-    ),
-    "meta_attribution_jobs": (),
-    "meta_attribution_state": (),
 }
 
 _ATTRIBUTION_PRIMARY_KEYS = {
@@ -259,13 +272,9 @@ class RuntimeDatabase:
                 (table,),
             ).fetchone()
             sql = "" if sql_row is None or sql_row[0] is None else str(sql_row[0])
-            normalized = "".join(sql.lower().split())
-            if any(
-                constraint not in normalized
-                for constraint in _ATTRIBUTION_CONSTRAINTS[table]
-            ):
+            if _canonical_table_sql(sql) != _ATTRIBUTION_TABLE_SQL[table]:
                 raise sqlite3.OperationalError(
-                    f"incompatible runtime attribution constraints for {table}"
+                    f"incompatible runtime attribution definition for {table}"
                 )
         foreign_keys = conn.execute(
             "PRAGMA foreign_key_list(ctwa_meta_attributions)"
