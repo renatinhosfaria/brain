@@ -260,20 +260,18 @@ class CEOBridgePluginTests(unittest.TestCase):
 
     def test_accepts_bounded_pending_and_unavailable_meta_attribution(self) -> None:
         for status in ("pending", "unavailable"):
-            with self.subTest(status=status):
-                payload = self.ok_payload(
-                    events=[{
-                        "event_id": "waevt_safe",
-                        "transport_kind": "ctwa_candidate",
-                        "source_app": "instagram",
-                        "inbound_kind": None,
-                        "meta_attribution": {
-                            "status": status,
-                            "reason": "meta_pending",
-                        },
-                    }]
-                )
-                self.assertEqual(self.call_tool(payload), payload)
+            for meta in ({"status": status}, {"status": status, "reason": "meta_pending"}):
+                with self.subTest(status=status, meta=meta):
+                    payload = self.ok_payload(
+                        events=[{
+                            "event_id": "waevt_safe",
+                            "transport_kind": "ctwa_candidate",
+                            "source_app": "instagram",
+                            "inbound_kind": None,
+                            "meta_attribution": meta,
+                        }]
+                    )
+                    self.assertEqual(self.call_tool(payload), payload)
 
     def test_rejects_invalid_meta_attribution_fixtures(self) -> None:
         base = {
@@ -287,10 +285,17 @@ class CEOBridgePluginTests(unittest.TestCase):
             "unknown key": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_status": "ACTIVE"}}, "ACTIVE"),
             "inactive status": ({**base, "meta_attribution": {**self.confirmed_meta(), "status": "inactive"}}, "inactive"),
             "malformed id": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_id": "101.0"}}, "101.0"),
+            "malformed campaign id": ({**base, "meta_attribution": {**self.confirmed_meta(), "campaign_id": "act_202"}}, "act_202"),
+            "missing status": ({**base, "meta_attribution": {"ad_id": "101"}}, "101"),
+            "malformed status": ({**base, "meta_attribution": {**self.confirmed_meta(), "status": None}}, "Spring Sale"),
+            "missing confirmed field": ({**base, "meta_attribution": {key: value for key, value in self.confirmed_meta().items() if key != "campaign_name"}}, "Spring Sale"),
             "unconfirmed names": ({**base, "meta_attribution": {"status": "pending", "reason": "pending", "ad_name": "Spring Sale"}}, "Spring Sale"),
             "token-shaped field": ({**base, "meta_attribution": {**self.confirmed_meta(), "access_token": "secret-token"}}, "secret-token"),
             "remote-shaped value": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_id": {"id": "101"}}}, "101"),
+            "unsafe name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "Spring\nSale"}}, "Spring"),
+            "oversized name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "n" * 161}}, "n" * 161),
             "oversized reason": ({**base, "meta_attribution": {"status": "pending", "reason": "r" * 81}}, "r" * 81),
+            "unsafe reason": ({**base, "meta_attribution": {"status": "pending", "reason": "bad\tvalue"}}, "bad"),
         }
         for label, (event, secret) in fixtures.items():
             with self.subTest(label):

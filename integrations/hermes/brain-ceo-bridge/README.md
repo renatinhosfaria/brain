@@ -20,7 +20,7 @@ For a CTWA candidate, `conversation_context({})` may include a
 bounded `ad_id`, `ad_name`, `campaign_id`, and `campaign_name` resolved by
 Brain. `ACTIVE` is the current Meta status check; it is not proof that the ad
 was active at the historical click time. `pending` or `unavailable` carries
-only a bounded reason, and the CEO continues the conversation without asking
+an optional bounded reason, and the CEO continues the conversation without asking
 the contact to identify its own phone number or ad.
 
 For a CTWA candidate, an event can also contain the complete raw

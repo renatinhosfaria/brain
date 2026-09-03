@@ -37,3 +37,19 @@
   while rejecting control characters and template interpolation markers.
 - Full-suite output includes pre-existing warnings about an ephemeral cursor
   secret and simulated retention failures; the suite still completed OK.
+
+## Round 1 fixes
+
+- Updated pending/unavailable validation to accept either status-only or
+  status plus one bounded safe reason, matching Brain's legitimate
+  `{"status":"pending"}` projection.
+- Added fixtures for status-only cases and missing/malformed status,
+  missing confirmed fields, malformed IDs, unsafe and oversized names/reasons,
+  with fail-closed and no-echo assertions.
+- Updated README contract wording to make the reason optional.
+
+Validation after fixes:
+
+- `./.venv/bin/python -m unittest -q tests.test_ceo_bridge_plugin` — 21 passed.
+- `/tmp/brain-uv-bin/uv run --offline ruff check integrations/hermes/brain-ceo-bridge/tools.py tests/test_ceo_bridge_plugin.py` — all checks passed.
+- `./.venv/bin/python -m unittest discover -s tests -p 'test_*.py'` — 592 passed in 62.513s (same pre-existing warnings noted above).

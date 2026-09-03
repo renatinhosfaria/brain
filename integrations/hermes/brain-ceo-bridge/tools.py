@@ -240,8 +240,10 @@ def _valid_meta_attribution(value: object) -> bool:
             )
         )
     if status in {"pending", "unavailable"}:
-        if set(value) != _META_PENDING_FIELDS:
+        if set(value) not in ({"status"}, _META_PENDING_FIELDS):
             return False
+        if "reason" not in value:
+            return True
         reason = value["reason"]
         return (
             isinstance(reason, str)
