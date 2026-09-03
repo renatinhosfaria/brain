@@ -435,7 +435,7 @@ class TransportService:
             return
         transport_cutoff = now - self.settings.transport_retention_days * 86_400
 
-        def purge(conn: sqlite3.Connection) -> tuple[int, int]:
+        def purge(conn: sqlite3.Connection) -> tuple[int, int, int]:
             names = conn.execute(
                 "UPDATE contact_ephemera SET display_name = NULL, "
                 "updated_at = ? WHERE display_name IS NOT NULL AND expires_at <= ?",
@@ -445,21 +445,24 @@ class TransportService:
                 "DELETE FROM transport_events WHERE created_at <= ?",
                 (transport_cutoff,),
             ).rowcount
-            return names or 0, events or 0
+            jobs = self.meta_attribution.purge_expired(conn, now)
+            return names or 0, events or 0, jobs
 
         try:
-            names, events = self.runtime.write(purge)
+            names, events, jobs = self.runtime.write(purge)
         except sqlite3.Error:
             # The throttle is deliberately not advanced here: a failed pass
             # must be retried by the next event, not suppressed for an hour.
             logger.warning("retention pass failed after transport ingestion")
             return
         self._retention_ran_at = now
-        if names or events:
+        if names or events or jobs:
             logger.info(
-                "retention removed %d display names and %d transport events",
+                "retention removed %d display names, %d transport events, "
+                "and %d Meta attribution jobs",
                 names,
                 events,
+                jobs,
             )
 
     def _persist(

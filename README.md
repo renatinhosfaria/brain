@@ -109,15 +109,23 @@ The optional remote Meta Ads MCP is disabled by default. Follow the exact
 rollout and rollback procedure in [`docs/runbook.md`](docs/runbook.md): restrict
 the remote token to `act_1598606388477916`, verify its HTTPS host and
 certificate, install the API key only in root-only `/etc/brain/brain.env`
-(mode `0600`), and run:
+(mode `0600`), and run the probe from a root shell with that service
+environment exported only to the probe subprocess:
 
 ```sh
-python scripts/meta_ads_mcp_probe.py
+(
+  set -a
+  . /etc/brain/brain.env
+  set +a
+  exec /root/brain/.venv/bin/python /root/brain/scripts/meta_ads_mcp_probe.py
+)
 ```
 
 The probe prints only `disabled`, the exact-account readiness line, or a
 bounded error code. It never accepts credentials or URL arguments and never
-prints remote response data.
+prints remote response data. After replacing the key during rotation, rerun
+this environment-sourcing probe and restart `brain.service`; invalidating the
+old client session cannot reload Brain's frozen settings.
 
 ## Hermes integration
 

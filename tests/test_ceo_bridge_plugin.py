@@ -3,12 +3,25 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
+import tempfile
+import time
 import types
 import unittest
 from contextvars import ContextVar
 from pathlib import Path
 from unittest.mock import patch
+
+from brain.meta_ads_models import (
+    META_ERROR_CODES,
+    ConfirmedMetaAttribution,
+    ObservedCtwaSource,
+)
+from brain.meta_ads_store import MetaAdsStore
+from brain.raw_attribution import RawAttributionLimits
+from brain.runtime_db import RuntimeDatabase
+from brain.service import BrainService
 
 PLUGIN_DIR = Path(__file__).parents[1] / "integrations/hermes/brain-ceo-bridge"
 PLUGIN_MODULE_NAME = "brain_ceo_bridge_test"
@@ -154,6 +167,66 @@ class CEOBridgePluginTests(unittest.TestCase):
         self.requests = seen
         return json.loads(raw)
 
+    @staticmethod
+    def producer_projection(ad_name: str, campaign_name: str) -> dict:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = RuntimeDatabase(
+                Path(temp_dir) / "runtime.db", timeout_seconds=0.25
+            )
+            runtime.initialize()
+            store = MetaAdsStore("act_1598606388477916")
+            now = time.time()
+
+            def stage(conn: sqlite3.Connection) -> None:
+                conn.execute(
+                    "INSERT INTO transport_events "
+                    "(event_id, observer_device_id, contact_key, direction, received_at, "
+                    "transport_kind, source_app, created_at) "
+                    "VALUES ('waevt_producer', 'observer', 'contact', 'inbound', ?, "
+                    "'ctwa_candidate', 'instagram', ?)",
+                    (now, now),
+                )
+                store.stage_event(
+                    conn,
+                    "waevt_producer",
+                    ObservedCtwaSource("101", "clid"),
+                    now,
+                )
+
+            runtime.write(stage)
+            lease_token = runtime.write(
+                lambda conn: store.claim_source_job(conn, "101", now, 30.0)
+            )
+            if lease_token is None:
+                raise AssertionError("producer fixture did not claim its source")
+            runtime.write(
+                lambda conn: store.complete_source(
+                    conn,
+                    "101",
+                    ConfirmedMetaAttribution(
+                        "101",
+                        ad_name,
+                        "202",
+                        campaign_name,
+                        "ACTIVE",
+                        "ACTIVE",
+                        "ACTIVE",
+                        "ACTIVE",
+                    ),
+                    now,
+                    lease_token,
+                )
+            )
+            return runtime.read(
+                lambda conn: BrainService._conversation_context_from_runtime(
+                    conn,
+                    contact_key="contact",
+                    phone_e164="5534999772714",
+                    now=now,
+                    raw_limits=RawAttributionLimits(),
+                )
+            )
+
     # ------------------------------------------------------------------
 
     def test_registers_one_tool_and_no_hooks(self) -> None:
@@ -258,9 +331,29 @@ class CEOBridgePluginTests(unittest.TestCase):
 
         self.assertEqual(self.call_tool(payload), payload)
 
+    def test_accepts_real_producer_projection_with_unicode_and_512_byte_names(
+        self,
+    ) -> None:
+        for ad_name, campaign_name in (
+            ("Promoção São João – café", "Campanha verão 🇧🇷"),
+            ("é" * 256, "x" * 512),
+        ):
+            with self.subTest(ad_bytes=len(ad_name.encode("utf-8"))):
+                payload = self.producer_projection(ad_name, campaign_name)
+                self.assertEqual(
+                    payload["events"][0]["meta_attribution"]["ad_name"], ad_name
+                )
+                self.assertEqual(self.call_tool(payload), payload)
+
     def test_accepts_bounded_pending_and_unavailable_meta_attribution(self) -> None:
         for status in ("pending", "unavailable"):
-            for meta in ({"status": status}, {"status": status, "reason": "meta_pending"}):
+            for meta in (
+                {"status": status},
+                *(
+                    {"status": status, "reason": reason}
+                    for reason in sorted(META_ERROR_CODES)
+                ),
+            ):
                 with self.subTest(status=status, meta=meta):
                     payload = self.ok_payload(
                         events=[{
@@ -293,9 +386,10 @@ class CEOBridgePluginTests(unittest.TestCase):
             "token-shaped field": ({**base, "meta_attribution": {**self.confirmed_meta(), "access_token": "secret-token"}}, "secret-token"),
             "remote-shaped value": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_id": {"id": "101"}}}, "101"),
             "unsafe name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "Spring\nSale"}}, "Spring"),
-            "oversized name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "n" * 161}}, "n" * 161),
-            "oversized reason": ({**base, "meta_attribution": {"status": "pending", "reason": "r" * 81}}, "r" * 81),
-            "unsafe reason": ({**base, "meta_attribution": {"status": "pending", "reason": "bad\tvalue"}}, "bad"),
+            "oversized name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "n" * 513}}, "n" * 513),
+            "template name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "${authorization}"}}, "authorization"),
+            "surrogate name": ({**base, "meta_attribution": {**self.confirmed_meta(), "ad_name": "bad\ud800name"}}, "bad"),
+            "arbitrary bearer reason": ({**base, "meta_attribution": {"status": "pending", "reason": "Authorization: Bearer fixture-secret"}}, "fixture-secret"),
         }
         for label, (event, secret) in fixtures.items():
             with self.subTest(label):

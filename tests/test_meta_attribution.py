@@ -320,18 +320,76 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertEqual(self.client.calls, calls)
         self.assertEqual(self.service.health(21.0), "degraded")
 
+    def test_health_requires_a_successful_probe_and_recovers_after_every_failure(
+        self,
+    ) -> None:
+        self.assertEqual(self.service.health(20.0), "degraded")
+        self.assertEqual(self.service.probe(20.0), "ready")
+        self.assertEqual(self.service.health(20.0), "ready")
+
+        for index, code in enumerate(
+            (
+                "meta_account_mismatch",
+                "meta_required_tool_unavailable",
+                "meta_timeout",
+                "meta_server_unavailable",
+            )
+        ):
+            with self.subTest(code=code):
+                now = 21.0 + index
+                self.client.probe_error = MetaAdsError(code)
+                self.assertEqual(self.service.probe(now), "degraded")
+                self.assertEqual(self.service.health(now), "degraded")
+                self.client.probe_error = None
+                self.assertEqual(self.service.probe(now + 0.5), "ready")
+                self.assertEqual(self.service.health(now + 0.5), "ready")
+
+    def test_revision_fenced_probe_close_never_marks_the_process_ready(self) -> None:
+        self.client.on_probe = lambda: self.runtime.write(
+            lambda conn: self.service._store.open_auth_circuit(conn, 20.0, 0.0)
+        )
+
+        self.assertEqual(self.service.probe(20.0), "degraded")
+        self.assertEqual(self.service.health(81.0), "degraded")
+
     def test_expired_durable_auth_circuit_recreates_the_latched_remote_client(
         self,
     ) -> None:
+        clock = [20.0]
         self.stage("event-recovery", "102")
         self.client = _Client(probe_error=MetaAdsError("meta_auth_unavailable"))
         self.service = MetaAttributionService(self.settings, self.runtime, self.client)
 
-        self.assertEqual(self.service.probe(20.0), "degraded")
-        self.client.probe_error = None
-        self.client.ad = RemoteAd("102", "Ad", "202", "ACTIVE", "ACTIVE")
-        self.assertTrue(self.service.resolve_source("102", 81.0, 1.0))
+        with patch("brain.meta_attribution.time.time", side_effect=lambda: clock[0]):
+            self.assertEqual(self.service.probe(20.0), "degraded")
+            self.client.probe_error = None
+            self.client.ad = RemoteAd("102", "Ad", "202", "ACTIVE", "ACTIVE")
+            clock[0] = 81.0
+            self.assertTrue(self.service.resolve_source("102", 81.0, 1.0))
         self.assertEqual(self.row("event-recovery")[0], "confirmed")
+
+    def test_claimed_lookup_auth_failure_resolves_after_circuit_probe_recovery(
+        self,
+    ) -> None:
+        clock = [20.0]
+        self.stage()
+        self.client = _Client(ad_error=MetaAdsError("meta_auth_unavailable"))
+        self.service = MetaAttributionService(self.settings, self.runtime, self.client)
+
+        with patch("brain.meta_attribution.time.time", side_effect=lambda: clock[0]):
+            self.assertFalse(self.service.resolve_source("101", 20.0))
+            self.assertEqual(self.row()[:2], ("pending", "meta_auth_unavailable"))
+            calls_after_failure = list(self.client.calls)
+            self.client.ad_error = None
+
+            clock[0] = 79.0
+            self.assertEqual(self.service.tick(79.0), 0)
+            self.assertEqual(self.client.calls, calls_after_failure)
+
+            clock[0] = 81.0
+            self.assertEqual(self.service.tick(81.0), 1)
+
+        self.assertEqual(self.row()[0], "confirmed")
 
     def test_stale_successful_probe_cannot_clear_a_newer_auth_failure(self) -> None:
         self.stage()
@@ -377,21 +435,127 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertEqual(self.row("event-2")[0], "pending")
 
     def test_timeout_is_retried_and_worker_claims_due_jobs(self) -> None:
+        clock = [20.0]
         self.stage()
         self.client = _Client(ad_error=MetaAdsError("meta_timeout"))
         self.service = MetaAttributionService(self.settings, self.runtime, self.client)
 
-        self.assertEqual(self.service.run_due_jobs(20.0), 0)
-        self.assertEqual(self.row()[:2], ("pending", "meta_timeout"))
-        due = self.runtime.read(
+        with patch("brain.meta_attribution.time.time", side_effect=lambda: clock[0]):
+            self.assertEqual(self.service.run_due_jobs(20.0), 0)
+            self.assertEqual(self.row()[:2], ("pending", "meta_timeout"))
+            due = self.runtime.read(
+                lambda conn: conn.execute(
+                    "SELECT next_attempt_at FROM meta_attribution_jobs "
+                    "WHERE source_id = '101'"
+                ).fetchone()[0]
+            )
+            self.client = _Client()
+            self.service = MetaAttributionService(
+                self.settings, self.runtime, self.client
+            )
+            clock[0] = float(due)
+            self.assertEqual(self.service.run_due_jobs(float(due)), 1)
+        self.assertEqual(self.row()[0], "confirmed")
+
+    def test_worker_refreshes_wall_clock_before_each_job_claim(self) -> None:
+        clock = [20.0]
+
+        class BatchClient(_Client):
+            def get_ad(
+                self, source_id: str, deadline: float | None = None
+            ) -> RemoteAd:
+                self.calls.append(("ad", source_id, deadline))
+                return RemoteAd(source_id, "Ad", "202", "ACTIVE", "ACTIVE")
+
+            def get_campaign(
+                self, campaign_id: str, deadline: float | None = None
+            ) -> RemoteCampaign:
+                campaign = super().get_campaign(campaign_id, deadline)
+                if sum(call[0] == "campaign" for call in self.calls) == 1:
+                    clock[0] = 22.0
+                return campaign  # type: ignore[return-value]
+
+        self.stage("event-1", "101")
+        self.stage("event-2", "102")
+        self.client = BatchClient()
+        self.service = MetaAttributionService(self.settings, self.runtime, self.client)
+
+        with patch("brain.meta_attribution.time.time", side_effect=lambda: clock[0]):
+            self.assertEqual(self.service.run_due_jobs(20.0, limit=2), 2)
+
+        timestamps = self.runtime.read(
+            lambda conn: [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT source_id, last_attempt_at, confirmed_at "
+                    "FROM ctwa_meta_attributions ORDER BY source_id"
+                )
+            ]
+        )
+        self.assertEqual(timestamps, [("101", 20.0, 22.0), ("102", 22.0, 22.0)])
+
+    def test_completion_uses_advanced_wall_clock_and_cannot_cross_lease_expiry(
+        self,
+    ) -> None:
+        clock = [20.0]
+
+        class SlowCompletionClient(_Client):
+            def get_campaign(
+                self, campaign_id: str, deadline: float | None = None
+            ) -> object:
+                campaign = super().get_campaign(campaign_id, deadline)
+                clock[0] = 26.0
+                return campaign
+
+        self.stage()
+        self.client = SlowCompletionClient()
+        self.service = MetaAttributionService(self.settings, self.runtime, self.client)
+
+        with patch("brain.meta_attribution.time.time", side_effect=lambda: clock[0]):
+            self.assertFalse(self.service.resolve_source("101", 20.0))
+
+        self.assertEqual(self.row()[0], "pending")
+        lease_until = self.runtime.read(
             lambda conn: conn.execute(
-                "SELECT next_attempt_at FROM meta_attribution_jobs WHERE source_id = '101'"
+                "SELECT lease_until FROM meta_attribution_jobs WHERE source_id = '101'"
             ).fetchone()[0]
         )
-        self.client = _Client()
+        self.assertLess(float(lease_until), clock[0])
+
+    def test_failure_retry_uses_wall_clock_at_the_failure_write(self) -> None:
+        clock = [20.0]
+
+        class AdvancingFailureClient(_Client):
+            def get_ad(self, source_id: str, deadline: float | None = None) -> object:
+                self.calls.append(("ad", source_id, deadline))
+                clock[0] = 22.0
+                raise MetaAdsError("meta_timeout")
+
+        self.stage()
+        self.client = AdvancingFailureClient()
         self.service = MetaAttributionService(self.settings, self.runtime, self.client)
-        self.assertEqual(self.service.run_due_jobs(float(due)), 1)
-        self.assertEqual(self.row()[0], "confirmed")
+
+        with patch("brain.meta_attribution.time.time", side_effect=lambda: clock[0]):
+            self.assertFalse(self.service.resolve_source("101", 20.0))
+
+        attribution = self.runtime.read(
+            lambda conn: tuple(
+                conn.execute(
+                    "SELECT reason_code, next_attempt_at, updated_at "
+                    "FROM ctwa_meta_attributions WHERE source_id = '101'"
+                ).fetchone()
+            )
+        )
+        job = self.runtime.read(
+            lambda conn: tuple(
+                conn.execute(
+                    "SELECT last_error_code, next_attempt_at, updated_at "
+                    "FROM meta_attribution_jobs WHERE source_id = '101'"
+                ).fetchone()
+            )
+        )
+        self.assertEqual(attribution, ("meta_timeout", 82.0, 22.0))
+        self.assertEqual(job, ("meta_timeout", 82.0, 22.0))
 
     def test_disabled_service_does_not_stage_or_call_the_remote_client(self) -> None:
         disabled = BrainSettings(

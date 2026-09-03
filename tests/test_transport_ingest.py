@@ -869,6 +869,48 @@ class RetentionTests(TransportIngestTests):
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["external_ad_reply_raw_json"])
 
+    def test_retention_removes_cascaded_attributions_and_the_deduplicated_job(
+        self,
+    ) -> None:
+        self.settings = replace(self.settings, meta_ads_mcp_enabled=True)
+        self.service = BrainService(self.settings)
+        self.api = TransportAPI(self.service)
+        external = self.normalized_ctwa_for_raw()
+        external["source_id_length"] = 3
+        external["source_id_hmac"] = self.runtime_ids.opaque_hmac("101")
+        for message_id in ("old-meta-one", "old-meta-two"):
+            raw = self.raw_ctwa()
+            raw["sourceId"] = "101"
+            response = self.post(
+                self.envelope(
+                    message_id=message_id,
+                    transport_kind="ctwa_candidate",
+                    external=external,
+                    observer_event_version=2,
+                    raw=raw,
+                )
+            )
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            (len(self.rows("ctwa_meta_attributions")), len(self.rows("meta_attribution_jobs"))),
+            (2, 1),
+        )
+        cutoff_days = self.service.settings.transport_retention_days
+        self.service.runtime.write(
+            lambda conn: conn.execute(
+                "UPDATE transport_events SET created_at = ?",
+                (time.time() - (cutoff_days + 1) * 86_400,),
+            )
+        )
+        self.service.transport_service._retention_ran_at = 0.0
+
+        response = self.post(self.envelope(message_id="new", body="recente"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.rows("transport_events")), 1)
+        self.assertEqual(len(self.rows("ctwa_meta_attributions")), 0)
+        self.assertEqual(len(self.rows("meta_attribution_jobs")), 0)
+
     def test_retention_is_throttled_between_passes(self) -> None:
         self.post(self.envelope(message_id="one", body="um"))
         first = self.service.transport_service._retention_ran_at

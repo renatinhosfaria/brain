@@ -194,6 +194,30 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("UMask=0077", unit)
         self.assertNotIn("ReadWritePaths=", unit)
 
+    def test_meta_ads_probe_docs_source_the_service_env_and_restart_on_rotation(
+        self,
+    ) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
+        probe_command = """(
+  set -a
+  . /etc/brain/brain.env
+  set +a
+  exec /root/brain/.venv/bin/python /root/brain/scripts/meta_ads_mcp_probe.py
+)"""
+        for source in (readme, runbook):
+            self.assertIn(probe_command, source)
+            self.assertNotIn("BRAIN_META_ADS_MCP_API_KEY=", source)
+
+        rotation_steps = (
+            "1. Replace `BRAIN_META_ADS_MCP_API_KEY` in `/etc/brain/brain.env`.",
+            "2. Run the environment-sourcing probe command above; stop if it is not ready.",
+            "3. Run `systemctl restart brain.service`; session invalidation alone cannot",
+            "4. Verify `/health` reports `ready`.",
+        )
+        positions = [runbook.index(step) for step in rotation_steps]
+        self.assertEqual(positions, sorted(positions))
+
     def test_examples_do_not_enable_observer_or_lifecycle_writes(self) -> None:
         unit = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
         ceo = (ROOT / "deploy/hermes-ceo-brain.example.yaml").read_text(

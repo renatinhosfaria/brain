@@ -213,7 +213,7 @@ class MetaAdsStore:
                 (self.account_id, source_id, lease_token, now),
             ).rowcount
             return owned == 1
-        delay = _retry_delay(int(job["attempt_count"]), reason_code)
+        delay = _retry_delay(int(job["attempt_count"]))
         due = now + delay
         conn.execute(
             "UPDATE ctwa_meta_attributions SET reason_code = ?, next_attempt_at = ?, "
@@ -356,9 +356,7 @@ class MetaAdsStore:
         return removed or 0
 
 
-def _retry_delay(attempt_count: int, reason_code: str) -> float:
-    if reason_code == "meta_auth_unavailable":
-        return _AUTH_MAXIMUM_DELAY_SECONDS
+def _retry_delay(attempt_count: int) -> float:
     return _RETRY_DELAYS[min(max(attempt_count, 1), len(_RETRY_DELAYS)) - 1]
 
 

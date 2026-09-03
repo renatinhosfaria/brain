@@ -111,6 +111,13 @@ class _OperationBudget:
 
     def observe_response(self, response: httpx2.Response) -> None:
         self.status_code = response.status_code
+        content_encoding = response.headers.get("content-encoding")
+        if content_encoding is not None and content_encoding.strip().lower() not in {
+            "",
+            "identity",
+        }:
+            self.invalid_response = True
+            return
         content_length = response.headers.get("content-length")
         if content_length is None:
             return
@@ -308,7 +315,9 @@ class RemoteMetaAdsMcpClient:
     def _submit(
         self, operation: str, identifier: str | None, deadline: float | None
     ) -> RemoteAd | RemoteCampaign | None:
-        if deadline is not None and deadline <= time.monotonic():
+        if deadline is None:
+            deadline = time.monotonic() + self._settings.meta_ads_mcp_timeout_seconds
+        if deadline <= time.monotonic():
             raise MetaAdsError("meta_timeout")
         coroutine = self._operate(operation, identifier, deadline)
         with self._lifecycle_lock:
@@ -495,7 +504,10 @@ class RemoteMetaAdsMcpClient:
             httpx2.AsyncHTTPTransport(trust_env=False), lambda: self._active_budget
         )
         return self._http_client_factory(
-            headers={"Authorization": f"Bearer {self._settings.meta_ads_mcp_api_key}"},
+            headers={
+                "Authorization": f"Bearer {self._settings.meta_ads_mcp_api_key}",
+                "Accept-Encoding": "identity",
+            },
             timeout=self._settings.meta_ads_mcp_timeout_seconds,
             follow_redirects=False,
             trust_env=False,

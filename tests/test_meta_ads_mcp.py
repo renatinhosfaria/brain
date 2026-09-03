@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
 import threading
 import time
 import unittest
+import zlib
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Self
@@ -83,6 +85,7 @@ class _FakeSession:
         started: threading.Event | None = None,
         teardown_error: BaseException | None = None,
         teardown_hangs: bool = False,
+        ignore_cancellation_until: threading.Event | None = None,
     ) -> None:
         self.tools = tools or _tools(*sorted(META_READ_TOOLS))
         self.responses = responses or {}
@@ -91,6 +94,7 @@ class _FakeSession:
         self.started = started
         self.teardown_error = teardown_error
         self.teardown_hangs = teardown_hangs
+        self.ignore_cancellation_until = ignore_cancellation_until
         self.initialize_calls = 0
         self.list_calls = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -112,6 +116,12 @@ class _FakeSession:
             self.started.set()
         if self.pause_seconds:
             await asyncio.sleep(self.pause_seconds)
+        if self.ignore_cancellation_until is not None:
+            while not self.ignore_cancellation_until.is_set():
+                try:
+                    await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    continue
         if self.initialize_error is not None:
             raise self.initialize_error
 
@@ -142,11 +152,19 @@ class _ByteStream(httpx2.AsyncByteStream):
 
 
 class _StaticTransport(httpx2.AsyncBaseTransport):
-    def __init__(self, body: list[bytes]) -> None:
+    def __init__(
+        self, body: list[bytes], *, headers: dict[str, str] | None = None
+    ) -> None:
         self._body = body
+        self._headers = headers or {}
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, request=request, stream=_ByteStream(self._body))
+        return httpx2.Response(
+            200,
+            headers=self._headers,
+            request=request,
+            stream=_ByteStream(self._body),
+        )
 
     async def aclose(self) -> None:
         return None
@@ -232,7 +250,11 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(
-            captured[0]["headers"], {"Authorization": f"Bearer {FIXTURE_KEY}"}
+            captured[0]["headers"],
+            {
+                "Authorization": f"Bearer {FIXTURE_KEY}",
+                "Accept-Encoding": "identity",
+            },
         )
         self.assertEqual(captured[0]["timeout"], 4.0)
         self.assertFalse(captured[0]["follow_redirects"])
@@ -404,6 +426,40 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
 
         self.assertEqual(session.calls, [])
 
+    def test_omitted_deadline_bounds_a_cancellation_resistant_probe(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        errors: list[BaseException] = []
+        session = _FakeSession(
+            responses=self._ready_responses(),
+            started=started,
+            ignore_cancellation_until=release,
+        )
+        client = self._client(
+            session, settings=_settings(meta_ads_mcp_timeout_seconds=0.05)
+        )
+
+        def probe() -> None:
+            try:
+                client.probe()
+            except Exception as error:  # noqa: BLE001 - assert the safe public boundary.
+                errors.append(error)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=probe, daemon=True)
+        thread.start()
+        self.assertTrue(started.wait(timeout=0.5))
+        bounded = finished.wait(timeout=0.3)
+        release.set()
+        thread.join(timeout=0.5)
+        client.close()
+
+        self.assertTrue(bounded)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual([str(error) for error in errors], ["meta_timeout"])
+
     def test_response_stream_budget_rejects_oversized_body_before_it_is_consumed(
         self,
     ) -> None:
@@ -422,6 +478,37 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
         with self.assertRaisesRegex(_ResponseTooLarge, "byte limit"):
             asyncio.run(request())
         self.assertTrue(budget.invalid_response)
+
+    def test_response_budget_rejects_compressed_bodies_before_decompression(
+        self,
+    ) -> None:
+        decoded = b"x" * 1_000
+        for encoding, compressed in (
+            ("gzip", gzip.compress(decoded)),
+            ("deflate", zlib.compress(decoded)),
+        ):
+            with self.subTest(encoding=encoding):
+                self.assertLess(len(compressed), 64)
+                budget = _OperationBudget(64)
+                transport = _ResponseBudgetTransport(
+                    _StaticTransport(
+                        [compressed],
+                        headers={
+                            "content-encoding": encoding,
+                            "content-length": str(len(compressed)),
+                        },
+                    ),
+                    lambda budget=budget: budget,
+                )
+
+                async def request(transport=transport) -> None:
+                    async with httpx2.AsyncClient(transport=transport) as http_client:
+                        response = await http_client.get("https://example.invalid")
+                        await response.aread()
+
+                with self.assertRaisesRegex(_ResponseTooLarge, "byte limit"):
+                    asyncio.run(request())
+                self.assertTrue(budget.invalid_response)
 
     def test_probe_rejects_a_missing_required_tool_before_the_account_call(
         self,

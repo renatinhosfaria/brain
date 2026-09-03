@@ -194,8 +194,13 @@ class MetaContextIntegrationTests(unittest.TestCase):
         self.assertEqual(brain.health().meta_ads_mcp, "disabled")
         remote.assert_not_called()
 
-    def test_health_is_additive_and_missing_key_is_degraded(self) -> None:
+    def test_health_is_additive_enabled_starts_degraded_and_recovers_after_probe(
+        self,
+    ) -> None:
         self.assertEqual(self.brain.health().status, "ok")
+        self.assertEqual(self.brain.health().meta_ads_mcp, "degraded")
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.brain.meta_attribution.probe(time.time()), "ready")
         self.assertEqual(self.brain.health().meta_ads_mcp, "ready")
         missing_key = BrainSettings(
             state_db=self.state_path,

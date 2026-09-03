@@ -27,6 +27,7 @@ import json
 import math
 import os
 import re
+import unicodedata
 import urllib.request
 from typing import Any
 
@@ -62,8 +63,21 @@ _META_CONFIRMED_FIELDS = {
     "status", "ad_id", "ad_name", "campaign_id", "campaign_name"
 }
 _META_PENDING_FIELDS = {"status", "reason"}
-_MAX_META_NAME = 160
-_MAX_META_REASON = 80
+_META_ERROR_CODES = frozenset(
+    {
+        "meta_timeout",
+        "meta_rate_limited",
+        "meta_server_unavailable",
+        "meta_auth_unavailable",
+        "meta_required_tool_unavailable",
+        "meta_account_mismatch",
+        "meta_not_found",
+        "meta_invalid_response",
+        "meta_incomplete_result",
+        "meta_inactive",
+    }
+)
+_MAX_META_TEXT_BYTES = 512
 _LEGACY_EVENT_FIELDS = {
     "event_id",
     "transport_kind",
@@ -88,10 +102,15 @@ def _safe_context_value(value: object) -> bool:
     )
 
 
-def _safe_meta_text(value: str) -> bool:
-    return (
-        all(0x20 <= ord(char) <= 0x7E for char in value)
-        and "${" not in value
+def _safe_meta_name(value: object) -> bool:
+    if not isinstance(value, str) or not value or "${" in value:
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded) <= _MAX_META_TEXT_BYTES and not any(
+        unicodedata.category(char) == "Cc" for char in value
     )
 
 
@@ -233,9 +252,7 @@ def _valid_meta_attribution(value: object) -> bool:
                 for field in ("ad_id", "campaign_id")
             )
             and all(
-                isinstance(value[field], str)
-                and 0 < len(value[field]) <= _MAX_META_NAME
-                and _safe_meta_text(value[field])
+                _safe_meta_name(value[field])
                 for field in ("ad_name", "campaign_name")
             )
         )
@@ -245,11 +262,7 @@ def _valid_meta_attribution(value: object) -> bool:
         if "reason" not in value:
             return True
         reason = value["reason"]
-        return (
-            isinstance(reason, str)
-            and 0 < len(reason) <= _MAX_META_REASON
-            and _safe_meta_text(reason)
-        )
+        return isinstance(reason, str) and reason in _META_ERROR_CODES
     return False
 
 

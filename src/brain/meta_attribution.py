@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
 import time
 from typing import Protocol
 
@@ -51,6 +52,9 @@ class MetaAttributionService:
         self._runtime = runtime
         self._store = MetaAdsStore(settings.meta_ad_account_id)
         self._client_instance = client
+        self._probe_state_lock = threading.Lock()
+        self._probe_generation = 0
+        self._verified_state_revision: int | None = None
 
     def stage_event(
         self, conn: sqlite3.Connection, *, event_id: str, raw: object, now: float
@@ -61,6 +65,10 @@ class MetaAttributionService:
         observed = observed_ctwa_source(raw)
         if observed is not None:
             self._store.stage_event(conn, event_id, observed, now)
+
+    def purge_expired(self, conn: sqlite3.Connection, now: float) -> int:
+        """Remove source jobs whose retained parent attributions are all gone."""
+        return self._store.purge_expired(conn, now)
 
     def resolve_source(
         self,
@@ -79,35 +87,29 @@ class MetaAttributionService:
             return False
         if self._remaining(deadline) <= 0:
             return False
-        if self._auth_circuit_open(now):
+        if self._auth_circuit_open(time.time()):
             return False
 
         remaining = self._remaining(deadline)
         if remaining <= 0:
             return False
+        claim_now = time.time()
         lease_token = self._runtime.write(
             lambda conn: self._store.claim_source_job(
-                conn, source_id, now, self._lease_seconds(remaining)
+                conn, source_id, claim_now, self._lease_seconds(remaining)
             )
         )
         if lease_token is None:
             return False
 
         if self._remaining(deadline) <= 0:
-            self._fail(source_id, MetaAdsError("meta_timeout"), now, str(lease_token))
-            return False
-        probe_revision = self._runtime.read(self._store.auth_state_revision)
-        if self._remaining(deadline) <= 0:
-            self._fail(source_id, MetaAdsError("meta_timeout"), now, str(lease_token))
+            self._fail(source_id, MetaAdsError("meta_timeout"), str(lease_token))
             return False
         try:
             if self._remaining(deadline) <= 0:
                 raise _ResolutionFailure("meta_timeout")
+            self._probe_exact_account(deadline)
             client = self._client()
-            client.probe(deadline)
-            self._runtime.write(
-                lambda conn: self._store.close_auth_circuit(conn, now, probe_revision)
-            )
             if self._remaining(deadline) <= 0:
                 raise _ResolutionFailure("meta_timeout")
             ad = client.get_ad(source_id, deadline)
@@ -117,16 +119,21 @@ class MetaAttributionService:
         except MetaAdsError as error:
             if error.code == "meta_auth_unavailable":
                 self._invalidate_client()
-            self._fail(source_id, error, now, str(lease_token))
+            self._fail(source_id, error, str(lease_token))
             return False
         except _ResolutionFailure as error:
-            self._fail(source_id, MetaAdsError(error.code), now, str(lease_token))
+            self._fail(source_id, MetaAdsError(error.code), str(lease_token))
             return False
 
+        completion_now = time.time()
         return bool(
             self._runtime.write(
                 lambda conn: self._store.complete_source(
-                    conn, source_id, confirmed, now, str(lease_token)
+                    conn,
+                    source_id,
+                    confirmed,
+                    completion_now,
+                    str(lease_token),
                 )
             )
         )
@@ -185,26 +192,27 @@ class MetaAttributionService:
     def probe(self, now: float) -> str:
         if not self._settings.meta_ads_mcp_enabled:
             return "disabled"
-        probe_revision = self._runtime.read(self._store.auth_state_revision)
         try:
-            self._client().probe(time.monotonic() + self._budget(None))
+            closed = self._probe_exact_account(time.monotonic() + self._budget(None))
         except MetaAdsError as error:
             if error.code == "meta_auth_unavailable":
                 self._invalidate_client()
                 retry_after = error.retry_after_seconds or 0.0
+                failure_now = time.time()
                 self._runtime.write(
-                    lambda conn: self._store.open_auth_circuit(conn, now, retry_after)
+                    lambda conn: self._store.open_auth_circuit(
+                        conn, failure_now, retry_after
+                    )
                 )
             return "degraded"
-        self._runtime.write(
-            lambda conn: self._store.close_auth_circuit(conn, now, probe_revision)
-        )
-        return "ready"
+        except Exception:  # noqa: BLE001 - probe state must fail closed.
+            return "degraded"
+        return "ready" if closed else "degraded"
 
     def tick(self, now: float) -> int:
         if not self._settings.meta_ads_mcp_enabled:
             return 0
-        if self._auth_circuit_open(now):
+        if self._auth_circuit_open(time.time()):
             return 0
         if self.probe(now) != "ready":
             return 0
@@ -213,7 +221,58 @@ class MetaAttributionService:
     def health(self, now: float) -> str:
         if not self._settings.meta_ads_mcp_enabled:
             return "disabled"
-        return "degraded" if self._auth_circuit_open(now) else "ready"
+        with self._probe_state_lock:
+            verified_revision = self._verified_state_revision
+        if verified_revision is None:
+            return "degraded"
+        state = self._runtime.read(
+            lambda conn: conn.execute(
+                "SELECT auth_circuit_until, state_revision "
+                "FROM meta_attribution_state WHERE account_id = ?",
+                (self._store.account_id,),
+            ).fetchone()
+        )
+        if (
+            state is None
+            or float(state["auth_circuit_until"]) > now
+            or int(state["state_revision"]) != verified_revision
+        ):
+            return "degraded"
+        return "ready"
+
+    def _probe_exact_account(self, deadline: float) -> bool:
+        generation = self._begin_probe()
+        try:
+            durable_revision = self._runtime.read(self._store.auth_state_revision)
+            self._client().probe(deadline)
+            probe_completed_at = time.time()
+            closed = self._runtime.write(
+                lambda conn: self._store.close_auth_circuit(
+                    conn, probe_completed_at, durable_revision
+                )
+            )
+        except BaseException:
+            self._finish_probe(generation, None)
+            raise
+        verified_revision = durable_revision + 1 if closed else None
+        self._finish_probe(generation, verified_revision)
+        return closed
+
+    def _begin_probe(self) -> int:
+        with self._probe_state_lock:
+            self._probe_generation += 1
+            self._verified_state_revision = None
+            return self._probe_generation
+
+    def _finish_probe(self, generation: int, verified_revision: int | None) -> None:
+        with self._probe_state_lock:
+            if generation == self._probe_generation:
+                self._verified_state_revision = verified_revision
+
+    def _degrade_probe_state(self) -> None:
+        with self._probe_state_lock:
+            self._probe_generation += 1
+            self._verified_state_revision = None
 
     def _client(self) -> _MetaClient:
         if self._client_instance is None:
@@ -271,15 +330,18 @@ class MetaAttributionService:
         except (AttributeError, TypeError, ValueError):
             raise _ResolutionFailure("meta_incomplete_result") from None
 
-    def _fail(
-        self, source_id: str, error: MetaAdsError, now: float, lease_token: str
-    ) -> None:
+    def _fail(self, source_id: str, error: MetaAdsError, lease_token: str) -> None:
+        failure_now = time.time()
+
         def fail(conn: sqlite3.Connection) -> None:
             if error.code == "meta_auth_unavailable":
+                self._degrade_probe_state()
                 self._store.open_auth_circuit(
-                    conn, now, error.retry_after_seconds or 0.0
+                    conn, failure_now, error.retry_after_seconds or 0.0
                 )
-            self._store.fail_source(conn, source_id, error.code, now, lease_token)
+            self._store.fail_source(
+                conn, source_id, error.code, failure_now, lease_token
+            )
 
         self._runtime.write(fail)
 
