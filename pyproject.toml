@@ -9,6 +9,7 @@ description = "Read-only, capability-scoped conversation identity and longitudin
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "idna>=3.10,<4",
+  "httpx2==2.12.0",
   "mcp==2.0.0",
   "uvicorn>=0.24,<1",
 ]

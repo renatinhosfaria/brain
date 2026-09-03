@@ -107,6 +107,158 @@ tools = ["conversation_phone"]
         self.assertEqual(settings.ctwa_raw_max_nodes, 10_000)
         self.assertEqual(settings.context_response_max_bytes, 32 * 1024 * 1024)
 
+    def test_meta_ads_settings_have_safe_disabled_defaults(self) -> None:
+        settings = BrainSettings(
+            principals={
+                "default": self._principal(
+                    "default", "gateway", "gateway", "conversation_phone"
+                )
+            },
+            cursor_secret=b"c" * 32,
+        )
+
+        self.assertFalse(settings.meta_ads_mcp_enabled)
+        self.assertEqual(
+            settings.meta_ads_mcp_url,
+            "https://mcp-facebook-ads.famachat.com.br/mcp",
+        )
+        self.assertEqual(settings.meta_ads_mcp_api_key, "")
+        self.assertEqual(settings.meta_ad_account_id, "act_1598606388477916")
+        self.assertEqual(settings.meta_ads_mcp_timeout_seconds, 4.0)
+        self.assertEqual(settings.meta_ads_mcp_response_max_bytes, 8 * 1024 * 1024)
+        self.assertEqual(settings.meta_ads_mcp_context_budget_seconds, 1.5)
+        self.assertEqual(settings.meta_ads_mcp_worker_interval_seconds, 15.0)
+
+        enabled_without_key = BrainSettings(
+            principals=settings.principals,
+            cursor_secret=b"c" * 32,
+            meta_ads_mcp_enabled=True,
+        )
+        self.assertTrue(enabled_without_key.meta_ads_mcp_enabled)
+        self.assertEqual(enabled_without_key.meta_ads_mcp_api_key, "")
+
+    def test_from_env_reads_meta_ads_settings_without_persisting_api_key(self) -> None:
+        config_path = self.root / "brain.toml"
+        config_path.write_text(
+            f'''[server]
+meta_ads_mcp_enabled = true
+meta_ads_mcp_url = "https://mcp-facebook-ads.famachat.com.br/mcp"
+meta_ad_account_id = "1598606388477916"
+meta_ads_mcp_timeout_seconds = 5.5
+meta_ads_mcp_response_max_bytes = 1000
+meta_ads_mcp_context_budget_seconds = 1.25
+meta_ads_mcp_worker_interval_seconds = 30.0
+
+[principals.default]
+mode = "gateway"
+token_sha256 = "{token_digest("gateway")}"
+tools = ["conversation_phone"]
+''',
+            encoding="utf-8",
+        )
+        secret = "test-meta-api-key"
+        with patch.dict(
+            os.environ,
+            {
+                "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                "BRAIN_META_ADS_MCP_API_KEY": secret,
+            },
+            clear=True,
+        ):
+            settings = BrainSettings.from_env(config_path)
+
+        self.assertTrue(settings.meta_ads_mcp_enabled)
+        self.assertEqual(settings.meta_ads_mcp_api_key, secret)
+        self.assertEqual(settings.meta_ad_account_id, "act_1598606388477916")
+        self.assertNotIn(secret, config_path.read_text(encoding="utf-8"))
+
+    def test_rejects_invalid_meta_ads_url_boolean_account_and_limits(self) -> None:
+        principals = {
+            "default": self._principal(
+                "default", "gateway", "gateway", "conversation_phone"
+            )
+        }
+        invalid_urls = (
+            "http://mcp-facebook-ads.famachat.com.br/mcp",
+            "https://other.example/mcp",
+            "https://mcp-facebook-ads.famachat.com.br/other",
+            "https://user:pass@mcp-facebook-ads.famachat.com.br/mcp",
+            "https://mcp-facebook-ads.famachat.com.br/mcp?api_key=x",
+            "https://mcp-facebook-ads.famachat.com.br/mcp#fragment",
+            "https://mcp-facebook-ads.famachat.com.br:8443/mcp",
+        )
+        for value in invalid_urls:
+            with self.subTest(url=value), self.assertRaises(ValueError):
+                BrainSettings(
+                    principals=principals,
+                    cursor_secret=b"c" * 32,
+                    meta_ads_mcp_url=value,
+                )
+        for value in ("true", "false", "1", "yes"):
+            with self.subTest(enabled=value), self.assertRaises(TypeError):
+                BrainSettings(
+                    principals=principals,
+                    cursor_secret=b"c" * 32,
+                    meta_ads_mcp_enabled=value,  # type: ignore[arg-type]
+                )
+        for value in ("act_1", "act_1598606388477916,act_2", "1598606388477917"):
+            with self.subTest(account=value), self.assertRaises(ValueError):
+                BrainSettings(
+                    principals=principals,
+                    cursor_secret=b"c" * 32,
+                    meta_ad_account_id=value,
+                )
+        for field, value in (
+            ("meta_ads_mcp_timeout_seconds", 0),
+            ("meta_ads_mcp_response_max_bytes", -1),
+            ("meta_ads_mcp_context_budget_seconds", float("inf")),
+            ("meta_ads_mcp_worker_interval_seconds", float("nan")),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                BrainSettings(
+                    principals=principals,
+                    cursor_secret=b"c" * 32,
+                    **{field: value},
+                )
+
+    def test_from_env_strictly_parses_meta_ads_boolean_and_environment_overrides(
+        self,
+    ) -> None:
+        config_path = self._write_production_config()
+        for value in ("1", "yes", "TRUE", " false"):
+            with (
+                self.subTest(enabled=value),
+                patch.dict(
+                    os.environ,
+                    {
+                        "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                        "BRAIN_META_ADS_MCP_ENABLED": value,
+                    },
+                    clear=True,
+                ),
+                self.assertRaises(ValueError),
+            ):
+                BrainSettings.from_env(config_path)
+
+        with patch.dict(
+            os.environ,
+            {
+                "BRAIN_TRANSPORT_HMAC_SECRET": "t" * 32,
+                "BRAIN_META_ADS_MCP_ENABLED": "true",
+                "BRAIN_META_ADS_MCP_URL": "https://mcp-facebook-ads.famachat.com.br/mcp",
+                "BRAIN_META_AD_ACCOUNT_ID": "1598606388477916",
+                "BRAIN_META_ADS_MCP_TIMEOUT_SECONDS": "5",
+                "BRAIN_META_ADS_MCP_RESPONSE_MAX_BYTES": "1000",
+                "BRAIN_META_ADS_MCP_CONTEXT_BUDGET_SECONDS": "1.25",
+                "BRAIN_META_ADS_MCP_WORKER_INTERVAL_SECONDS": "30",
+            },
+            clear=True,
+        ):
+            settings = BrainSettings.from_env(config_path)
+
+        self.assertTrue(settings.meta_ads_mcp_enabled)
+        self.assertEqual(settings.meta_ad_account_id, "act_1598606388477916")
+
     def test_from_env_reads_raw_attribution_limits(self) -> None:
         config_path = self._write_production_config()
         with patch.dict(

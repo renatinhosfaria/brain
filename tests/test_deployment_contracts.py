@@ -158,6 +158,29 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("0600", source)
         self.assertNotIn("0.0.0.0", source)
 
+    def test_meta_ads_examples_keep_the_remote_feature_disabled_and_secret_scoped(
+        self,
+    ) -> None:
+        env = (ROOT / "deploy/brain.env.example").read_text(encoding="utf-8")
+        toml = tomllib.loads(
+            (ROOT / "deploy/brain.toml.example").read_text(encoding="utf-8")
+        )
+        unit = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
+
+        self.assertFalse(toml["server"]["meta_ads_mcp_enabled"])
+        self.assertIn("BRAIN_META_ADS_MCP_API_KEY", env)
+        key_line = next(
+            line for line in env.splitlines() if "BRAIN_META_ADS_MCP_API_KEY" in line
+        )
+        self.assertTrue(key_line.lstrip().startswith("#"))
+        self.assertIn("root-only", env.lower())
+        self.assertNotIn("meta_ads_mcp_api_key", toml["server"])
+        environment_files = [
+            line for line in unit.splitlines() if line.startswith("EnvironmentFile=")
+        ]
+        self.assertEqual(environment_files, ["EnvironmentFile=/etc/brain/brain.env"])
+        self.assertIn("UMask=0077", unit)
+
     def test_examples_do_not_enable_observer_or_lifecycle_writes(self) -> None:
         unit = (ROOT / "deploy/brain.service").read_text(encoding="utf-8")
         ceo = (ROOT / "deploy/hermes-ceo-brain.example.yaml").read_text(
@@ -184,9 +207,9 @@ class DeploymentContractTests(unittest.TestCase):
     def test_docs_define_core_boundary_and_phone_invariant(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         runbook = (ROOT / "docs/runbook.md").read_text(encoding="utf-8")
-        bridge_readme = (ROOT / "integrations/hermes/brain-ceo-bridge/README.md").read_text(
-            encoding="utf-8"
-        )
+        bridge_readme = (
+            ROOT / "integrations/hermes/brain-ceo-bridge/README.md"
+        ).read_text(encoding="utf-8")
         invariant = (ROOT / "docs/conversation-identity-invariant.md").read_text(
             encoding="utf-8"
         )
@@ -196,19 +219,27 @@ class DeploymentContractTests(unittest.TestCase):
         for source in (readme, runbook, bridge_readme):
             self.assertIn("externalAdReply", source)
             self.assertIn("untrusted", source)
-        for required in ("plaintext", "32 MiB", "Rollout and rollback order", "quarantine"):
+        for required in (
+            "plaintext",
+            "32 MiB",
+            "Rollout and rollback order",
+            "quarantine",
+        ):
             self.assertIn(required, runbook)
 
-    def test_raw_ctwa_docs_define_exact_retention_window_and_lossless_tags(self) -> None:
+    def test_raw_ctwa_docs_define_exact_retention_window_and_lossless_tags(
+        self,
+    ) -> None:
         sources = (
             (ROOT / "README.md").read_text(encoding="utf-8"),
             (ROOT / "docs/runbook.md").read_text(encoding="utf-8"),
             (ROOT / "integrations/hermes/brain-ceo-bridge/README.md").read_text(
                 encoding="utf-8"
             ),
-            (ROOT / "docs/superpowers/specs/2026-08-29-ctwa-brain-lifecycle-design.md").read_text(
-                encoding="utf-8"
-            ),
+            (
+                ROOT
+                / "docs/superpowers/specs/2026-08-29-ctwa-brain-lifecycle-design.md"
+            ).read_text(encoding="utf-8"),
         )
         for source in sources:
             for required in (

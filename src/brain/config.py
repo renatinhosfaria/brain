@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import re
 import secrets
@@ -17,6 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 DEFAULT_STATE_DB = Path("/root/.hermes/state.db")
 DEFAULT_KANBAN_DB = Path("/root/.hermes/kanban.db")
@@ -35,6 +37,12 @@ VALID_TOOLS = frozenset(
 )
 _PRINCIPAL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _DECIMAL_INTEGER_RE = re.compile(r"^-?[0-9]+$")
+_META_AD_ACCOUNT_ID = "1598606388477916"
+_META_ADS_MCP_URL = "https://mcp-facebook-ads.famachat.com.br/mcp"
+_META_ADS_MCP_MAX_TIMEOUT_SECONDS = 60.0
+_META_ADS_MCP_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+_META_ADS_MCP_MAX_CONTEXT_BUDGET_SECONDS = 10.0
+_META_ADS_MCP_MAX_WORKER_INTERVAL_SECONDS = 3_600.0
 logger = logging.getLogger("brain.config")
 
 
@@ -87,6 +95,41 @@ def _raw_attribution_limit(
     return configured
 
 
+def _strict_boolean(value: object, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value in {"true", "false"}:
+        return value == "true"
+    raise ValueError(f"{name} must be true or false")
+
+
+def _meta_ads_number(
+    server: Mapping[str, object],
+    key: str,
+    environment_name: str,
+    default: float,
+    *,
+    integer: bool = False,
+) -> float | int:
+    raw = os.environ.get(environment_name)
+    if raw is None:
+        raw = server.get(key, default)
+    if isinstance(raw, bool):
+        raise TypeError(f"{key} must be a number")
+    if integer:
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str) and _DECIMAL_INTEGER_RE.fullmatch(raw):
+            return int(raw)
+        raise ValueError(f"{key} must be a decimal integer")
+    if not isinstance(raw, (int, float, str)):
+        raise TypeError(f"{key} must be a number")
+    try:
+        return float(raw)
+    except ValueError as error:
+        raise ValueError(f"{key} must be a number") from error
+
+
 @dataclass(frozen=True)
 class PrincipalConfig:
     name: str
@@ -133,6 +176,14 @@ class BrainSettings:
     context_response_max_bytes: int = 32 * 1024 * 1024
     busy_retries: int = 2
     busy_timeout_seconds: float = 1.0
+    meta_ads_mcp_enabled: bool = False
+    meta_ads_mcp_url: str = _META_ADS_MCP_URL
+    meta_ads_mcp_api_key: str = ""
+    meta_ad_account_id: str = f"act_{_META_AD_ACCOUNT_ID}"
+    meta_ads_mcp_timeout_seconds: float = 4.0
+    meta_ads_mcp_response_max_bytes: int = 8 * 1024 * 1024
+    meta_ads_mcp_context_budget_seconds: float = 1.5
+    meta_ads_mcp_worker_interval_seconds: float = 15.0
 
     def __post_init__(self) -> None:
         if self.host not in {"127.0.0.1", "localhost", "::1"}:
@@ -163,6 +214,61 @@ class BrainSettings:
             raise ValueError("transport_retention_days must be positive")
         if self.display_name_ttl_hours <= 0:
             raise ValueError("display_name_ttl_hours must be positive")
+        if not isinstance(self.meta_ads_mcp_enabled, bool):
+            raise TypeError("meta_ads_mcp_enabled must be true or false")
+        parsed_url = urlsplit(self.meta_ads_mcp_url)
+        if (
+            parsed_url.scheme != "https"
+            or parsed_url.hostname != "mcp-facebook-ads.famachat.com.br"
+            or parsed_url.path != "/mcp"
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.query
+            or parsed_url.fragment
+            or parsed_url.port not in (None, 443)
+        ):
+            raise ValueError("meta_ads_mcp_url must be the configured HTTPS MCP URL")
+        if not isinstance(self.meta_ads_mcp_api_key, str):
+            raise TypeError("meta_ads_mcp_api_key must be a string")
+        account_id = str(self.meta_ad_account_id)
+        if account_id.startswith("act_"):
+            account_id = account_id.removeprefix("act_")
+        if account_id != _META_AD_ACCOUNT_ID:
+            raise ValueError("meta_ad_account_id must be the configured account")
+        object.__setattr__(self, "meta_ad_account_id", f"act_{account_id}")
+        numeric_limits = (
+            (
+                "meta_ads_mcp_timeout_seconds",
+                self.meta_ads_mcp_timeout_seconds,
+                _META_ADS_MCP_MAX_TIMEOUT_SECONDS,
+            ),
+            (
+                "meta_ads_mcp_context_budget_seconds",
+                self.meta_ads_mcp_context_budget_seconds,
+                _META_ADS_MCP_MAX_CONTEXT_BUDGET_SECONDS,
+            ),
+            (
+                "meta_ads_mcp_worker_interval_seconds",
+                self.meta_ads_mcp_worker_interval_seconds,
+                _META_ADS_MCP_MAX_WORKER_INTERVAL_SECONDS,
+            ),
+        )
+        for name, value, maximum in numeric_limits:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0 < value <= maximum
+            ):
+                raise ValueError(f"{name} must be finite and between 0 and {maximum}")
+        if (
+            isinstance(self.meta_ads_mcp_response_max_bytes, bool)
+            or not isinstance(self.meta_ads_mcp_response_max_bytes, int)
+            or not 0
+            < self.meta_ads_mcp_response_max_bytes
+            <= _META_ADS_MCP_MAX_RESPONSE_BYTES
+        ):
+            raise ValueError("meta_ads_mcp_response_max_bytes is outside its bounds")
         # Transport ingestion derives event IDs from these identities, so a
         # fresh deployment can resolve its first message before any transport
         # event exists to discover the device from.
@@ -268,6 +374,14 @@ class BrainSettings:
 
         transport_hmac_secret = required_hmac_secret("BRAIN_TRANSPORT_HMAC_SECRET")
 
+        meta_ads_enabled = _strict_boolean(
+            os.environ.get(
+                "BRAIN_META_ADS_MCP_ENABLED",
+                server.get("meta_ads_mcp_enabled", False),
+            ),
+            "meta_ads_mcp_enabled",
+        )
+
         return cls(
             state_db=Path(
                 os.environ.get(
@@ -354,5 +468,46 @@ class BrainSettings:
                     "BRAIN_BUSY_TIMEOUT_SECONDS",
                     server.get("busy_timeout_seconds", 1.0),
                 )
+            ),
+            meta_ads_mcp_enabled=meta_ads_enabled,
+            meta_ads_mcp_url=str(
+                os.environ.get(
+                    "BRAIN_META_ADS_MCP_URL",
+                    server.get("meta_ads_mcp_url", _META_ADS_MCP_URL),
+                )
+            ),
+            # This secret is deliberately environment-only. Never fall back to
+            # the TOML mapping, even if an operator accidentally adds it there.
+            meta_ads_mcp_api_key=os.environ.get("BRAIN_META_ADS_MCP_API_KEY", ""),
+            meta_ad_account_id=str(
+                os.environ.get(
+                    "BRAIN_META_AD_ACCOUNT_ID",
+                    server.get("meta_ad_account_id", f"act_{_META_AD_ACCOUNT_ID}"),
+                )
+            ),
+            meta_ads_mcp_timeout_seconds=_meta_ads_number(
+                server,
+                "meta_ads_mcp_timeout_seconds",
+                "BRAIN_META_ADS_MCP_TIMEOUT_SECONDS",
+                4.0,
+            ),
+            meta_ads_mcp_response_max_bytes=_meta_ads_number(
+                server,
+                "meta_ads_mcp_response_max_bytes",
+                "BRAIN_META_ADS_MCP_RESPONSE_MAX_BYTES",
+                8 * 1024 * 1024,
+                integer=True,
+            ),
+            meta_ads_mcp_context_budget_seconds=_meta_ads_number(
+                server,
+                "meta_ads_mcp_context_budget_seconds",
+                "BRAIN_META_ADS_MCP_CONTEXT_BUDGET_SECONDS",
+                1.5,
+            ),
+            meta_ads_mcp_worker_interval_seconds=_meta_ads_number(
+                server,
+                "meta_ads_mcp_worker_interval_seconds",
+                "BRAIN_META_ADS_MCP_WORKER_INTERVAL_SECONDS",
+                15.0,
             ),
         )

@@ -8,6 +8,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/root/brain
+# The only EnvironmentFile is the root-owned Brain secret file (mode 0600).
 EnvironmentFile=/etc/brain/brain.env
 Environment=PYTHONUNBUFFERED=1
 # `/etc/brain/brain.toml` binds 127.0.0.1 and sets the Brain-owned runtime DB to
