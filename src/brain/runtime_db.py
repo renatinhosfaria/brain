@@ -106,10 +106,29 @@ _SCHEMA = (
 
 
 def _canonical_table_sql(value: str) -> str:
-    """Normalize only whitespace/case; comments must make a legacy schema fail."""
-    return "".join(value.lower().split()).replace(
-        "createtableifnotexists", "createtable", 1
-    )
+    """Normalize syntax only; quoted values and comments stay significant."""
+    result: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if quote is not None:
+            result.append(character)
+            if character == quote:
+                if index + 1 < len(value) and value[index + 1] == quote:
+                    result.append(value[index + 1])
+                    index += 1
+                else:
+                    quote = None
+        elif character in {"'", '"', "`"}:
+            quote = character
+            result.append(character)
+        elif character.isspace():
+            pass
+        else:
+            result.append(character.lower())
+        index += 1
+    return "".join(result).replace("createtableifnotexists", "createtable", 1)
 
 
 _ATTRIBUTION_TABLE_SQL = {
