@@ -454,6 +454,18 @@ export async function runObserver({
       }
       permanentlySuppressed.add(event.event_id);
       healthState.incrementPermanentFailure();
+      // Desistir de um evento e definitivo: ele nunca mais e tentado enquanto
+      // este processo viver, e o arquivo fica na fila ate a purga. Sem esta
+      // linha a decisao nao aparece em lugar nenhum e o health degradado nao
+      // tem de onde ser diagnosticado. Nada do evento entra aqui -- so a
+      // classe do erro, o status e o codigo do Brain, todos limitados.
+      logFailure('brain_ingest_permanently_failed', {
+        name: error?.name ?? 'Error',
+        message:
+          `status=${error?.status ?? 'none'} ` +
+          `code=${error?.code ?? 'unknown'} ` +
+          `brain_error=${error?.brainError ?? 'none'}`,
+      });
       return 'permanent';
     }
   }

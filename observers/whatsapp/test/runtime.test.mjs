@@ -981,3 +981,57 @@ test('production config requires own observer subtree and transport-only secrets
   });
   assert.equal(overridden.quarantineMaxBytes, 2_048);
 });
+
+test('giving up on an event is logged with bounded fields and no event content', async () => {
+  const lines = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    lines.push(String(chunk));
+    return true;
+  };
+  let runtime;
+  try {
+    const fixture = dependencies({
+      calls: [],
+      client: {
+        async ingest() {
+          const error = new Error('permanent');
+          error.name = 'BrainClientError';
+          error.retryable = false;
+          error.status = 400;
+          error.code = 'HTTP_ERROR';
+          error.brainError = 'TRANSPORT_REQUEST_INVALID';
+          throw error;
+        },
+      },
+    });
+    runtime = await runObserver(fixture.options);
+    fixture.sockets.sockets[0].ev.emit('messages.upsert', {
+      messages: [rawMessage()],
+    });
+    await runtime.idle();
+    await runtime.drain();
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  const logged = lines
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry) => entry?.reason === 'brain_ingest_permanently_failed');
+
+  assert.equal(logged.length, 1);
+  // O diagnostico que faltava: status, classificacao e o codigo do Brain.
+  assert.match(logged[0].error_message, /status=400/);
+  assert.match(logged[0].error_message, /brain_error=TRANSPORT_REQUEST_INVALID/);
+  // E a regra do modulo: nada do evento pode chegar a um log.
+  const serialized = JSON.stringify(logged[0]);
+  assert.equal(serialized.includes(SAFE_ONE.event_id), false);
+  assert.equal(serialized.includes(SAFE_ONE.body_hmac), false);
+  await runtime.close();
+});

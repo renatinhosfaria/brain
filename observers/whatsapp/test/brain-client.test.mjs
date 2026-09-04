@@ -508,3 +508,71 @@ test('client never acknowledges or deletes spool data on success or failure', as
 test('all HTTP tests target local fake servers and never the production Brain endpoint', () => {
   assert.equal(withServer.toString().includes('127.0.0.1'), true);
 });
+
+test('rejection surfaces the Brain error code so a permanent failure is diagnosable', async () => {
+  const event = safeEvent('brain-error-code');
+  await withServer(
+    (request, response) => {
+      response.writeHead(400, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'TRANSPORT_REQUEST_INVALID' }));
+    },
+    async (baseUrl) => {
+      const client = new BrainClient({ baseUrl, token: TOKEN, timeoutMs: 1_000 });
+      await assert.rejects(client.ingest(event), (error) => {
+        assert.equal(error.status, 400);
+        assert.equal(error.retryable, false);
+        assert.equal(error.brainError, 'TRANSPORT_REQUEST_INVALID');
+        return true;
+      });
+    },
+  );
+});
+
+test('an unrecognizable error body never reaches the caller as free text', async () => {
+  const event = safeEvent('brain-error-garbage');
+  for (const body of [
+    '<html><body>502 Bad Gateway</body></html>',
+    JSON.stringify({ error: 'nao e um codigo' }),
+    JSON.stringify({ error: { nested: true } }),
+    JSON.stringify({ error: `X${'Y'.repeat(200)}` }),
+  ]) {
+    await withServer(
+      (request, response) => {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(body);
+      },
+      async (baseUrl) => {
+        const client = new BrainClient({
+          baseUrl,
+          token: TOKEN,
+          timeoutMs: 1_000,
+        });
+        await assert.rejects(client.ingest(event), (error) => {
+          assert.equal(error.brainError, null);
+          return true;
+        });
+      },
+    );
+  }
+});
+
+test('an oversized error body is not read into the error', async () => {
+  const event = safeEvent('brain-error-oversized');
+  const huge = JSON.stringify({ error: 'A'.repeat(64_000) });
+  await withServer(
+    (request, response) => {
+      response.writeHead(400, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(huge),
+      });
+      response.end(huge);
+    },
+    async (baseUrl) => {
+      const client = new BrainClient({ baseUrl, token: TOKEN, timeoutMs: 1_000 });
+      await assert.rejects(client.ingest(event), (error) => {
+        assert.equal(error.brainError, null);
+        return true;
+      });
+    },
+  );
+});

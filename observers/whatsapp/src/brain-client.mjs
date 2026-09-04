@@ -50,12 +50,37 @@ const SPOOL_ONLY_FIELDS = new Set([
 ]);
 
 export class BrainClientError extends Error {
-  constructor(message, { code, retryable, status = null }) {
+  constructor(message, { code, retryable, status = null, brainError = null }) {
     super(message);
     this.name = 'BrainClientError';
     this.code = code;
     this.retryable = retryable;
     this.status = status;
+    // Codigo de erro do Brain, quando ele mandou um reconhecivel. E o unico
+    // pedaco da resposta que atravessa: um enum curto, nunca o corpo.
+    this.brainError = brainError;
+  }
+}
+
+// O Brain responde erro como {"error":"CODIGO"}, de um conjunto fechado.
+// Sem isto o motivo da recusa e descartado e uma falha definitiva vira um
+// numero solto -- foi assim que um 400 recorrente ficou 41h sem diagnostico.
+const BRAIN_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const MAX_ERROR_BODY_BYTES = 4096;
+
+async function readBrainErrorCode(response) {
+  try {
+    const declared = Number(response.headers?.get?.('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_ERROR_BODY_BYTES) {
+      return null;
+    }
+    const text = (await response.text()).slice(0, MAX_ERROR_BODY_BYTES);
+    const code = JSON.parse(text)?.error;
+    // Vale como codigo so o que casa com o formato do enum: um corpo
+    // inesperado (proxy, HTML de erro) nao entra no log como texto livre.
+    return typeof code === 'string' && BRAIN_ERROR_CODE.test(code) ? code : null;
+  } catch {
+    return null;
   }
 }
 
@@ -247,6 +272,7 @@ export class BrainClient {
           code: 'HTTP_ERROR',
           retryable: retryableStatus(response.status),
           status: response.status,
+          brainError: await readBrainErrorCode(response),
         });
       }
 
