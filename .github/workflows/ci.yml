@@ -18,10 +18,16 @@ jobs:
       - run: python -m pip install uv==0.12.5
       - run: uv sync --frozen
       - run: uv run ruff check src tests scripts integrations
-      - run: uv run ruff format --check src tests scripts integrations
       - run: PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
       - run: npm ci
         working-directory: observers/whatsapp
       - run: npm test
         working-directory: observers/whatsapp
       - run: uv build
+      # Formatacao por ultimo, de proposito. Este passo e o unico puramente
+      # cosmetico, e enquanto ele rodava antes dos testes uma divergencia de
+      # quebra de linha apagava a verificacao inteira: entre 31/08 e 04/09 o
+      # CI falhou dez vezes seguidas aqui e os 767 testes nunca chegaram a
+      # rodar. Continua obrigatorio -- so nao decide mais se o resto executa.
+      # `ruff check` fica antes porque acusa defeito real, nao estilo.
+      - run: uv run ruff format --check src tests scripts integrations
