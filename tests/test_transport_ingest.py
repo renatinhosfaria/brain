@@ -716,6 +716,59 @@ class TransportIngestTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["body_hmac"], first_payload["body_hmac"])
 
+    def test_redelivery_with_new_observation_time_is_idempotent(self) -> None:
+        """Um resync do WhatsApp reentrega a mesma mensagem mais tarde.
+
+        O event_id e device + message id, entao a reentrega chega com o mesmo
+        id e um horario de observacao novo. Antes isso virava 400, o observer
+        marcava falha permanente e o arquivo ficava preso na fila ate a purga.
+        """
+        payload = self.envelope()
+        self.assertEqual(self.post(payload).status_code, 200)
+
+        redelivery = self.envelope()
+        redelivery["received_at"] = payload["received_at"] + 218.0
+        redelivery["message_timestamp"] = payload["message_timestamp"] + 1.0
+        response = self.post(redelivery)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["duplicate"])
+        rows = self.rows("transport_events")
+        self.assertEqual(len(rows), 1)
+        # Quem chegou primeiro permanece: a reentrega nao reescreve a linha.
+        self.assertEqual(rows[0]["received_at"], payload["received_at"])
+        self.assertEqual(rows[0]["message_timestamp"], payload["message_timestamp"])
+
+    def test_attribute_absent_on_stored_row_is_not_a_conflict(self) -> None:
+        """Coluna gravada como NULL nunca recebeu valor.
+
+        Ausencia nao e discordancia: uma linha gravada por uma versao que ainda
+        nao derivava o atributo nao pode brigar com a reentrega que o traz.
+        """
+        external = self.normalized_ctwa_for_raw()
+        del external["click_to_whatsapp_call"]
+        first = self.envelope(transport_kind="ctwa_candidate", external=external)
+        self.assertEqual(self.post(first).status_code, 200)
+        self.assertIsNone(self.rows("transport_events")[0]["click_to_whatsapp_call"])
+
+        later_external = self.normalized_ctwa_for_raw()
+        later_external["click_to_whatsapp_call"] = False
+        later = self.envelope(transport_kind="ctwa_candidate", external=later_external)
+        response = self.post(later)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["duplicate"])
+        rows = self.rows("transport_events")
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["click_to_whatsapp_call"])
+
+    def test_conflicting_body_is_still_rejected_after_tolerances(self) -> None:
+        """As tolerancias nao podem abrir a guarda para conteudo diferente."""
+        self.assertEqual(self.post(self.envelope()).status_code, 200)
+        conflict = self.envelope(body="different")
+        conflict["received_at"] = 9999.0
+        self.assertEqual(self.post(conflict).status_code, 400)
+
     def test_display_name_is_sanitized_and_ephemeral(self) -> None:
         response = self.post(self.envelope(display_name="Jo\não\x00 Silva"))
         self.assertEqual(response.status_code, 200)

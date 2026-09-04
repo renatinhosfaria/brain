@@ -36,6 +36,43 @@ MAX_OPAQUE_LENGTH = 10_000_000
 MAX_DISPLAY_NAME_LENGTH = 160
 _HEX_HMAC_RE = re.compile(r"^[0-9a-f]{64}$")
 _EVENT_ID_RE = re.compile(r"^waevt_[0-9a-f]{64}$")
+
+# Colunas comparadas quando um event_id ja existe. Ficam numa tupla unica
+# porque o SELECT e a comparacao precisam andar juntos: separados, uma coluna
+# nova entra no SELECT e some da checagem sem que nada acuse.
+_EVENT_CONFLICT_COLUMNS = (
+    "observer_device_id",
+    "contact_key",
+    "direction",
+    "received_at",
+    "message_timestamp",
+    "body_hmac",
+    "body_length",
+    "native_type",
+    "transport_kind",
+    "source_type",
+    "source_app",
+    "source_id_present",
+    "source_id_length",
+    "source_id_hmac",
+    "source_url_hostname",
+    "source_url_length",
+    "source_url_hmac",
+    "ctwa_clid_present",
+    "ctwa_clid_length",
+    "ctwa_clid_hmac",
+    "show_ad_attribution",
+    "click_to_whatsapp_call",
+    "contains_auto_reply",
+    "external_ad_reply_raw_json",
+)
+
+# Quando o observer viu a mensagem -- nao o que a mensagem e. O WhatsApp
+# reentrega a mesma mensagem num resync, e a identidade do evento (event_id =
+# device + message id) nao inclui esses campos. Compara-los transformava toda
+# reentrega num 400 permanente: o observer marcava falha definitiva e o
+# arquivo ficava na fila ate a purga de 72h, sem nunca ser aceito.
+_OBSERVATION_ONLY_COLUMNS = frozenset({"received_at", "message_timestamp"})
 _HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 
 _TOP_LEVEL_FIELDS = frozenset(
@@ -478,20 +515,13 @@ class TransportService:
     ) -> bool:
         values = self._event_values(envelope, ingestion_now)
         row = conn.execute(
-            "SELECT observer_device_id, contact_key, direction, received_at, "
-            "message_timestamp, body_hmac, body_length, native_type, transport_kind, "
-            "source_type, source_app, source_id_present, source_id_length, source_id_hmac, "
-            "source_url_hostname, source_url_length, source_url_hmac, ctwa_clid_present, "
-            "ctwa_clid_length, ctwa_clid_hmac, show_ad_attribution, "
-            "click_to_whatsapp_call, contains_auto_reply, external_ad_reply_raw_json "
-            "FROM transport_events "
-            "WHERE event_id = ?",
+            "SELECT "
+            + ", ".join(_EVENT_CONFLICT_COLUMNS)
+            + " FROM transport_events WHERE event_id = ?",
             (envelope.event_id,),
         ).fetchone()
         if row is not None:
-            existing = tuple(row)
-            if existing != values[1:-1]:
-                raise TransportRequestError("event_id conflicts with existing event")
+            self._assert_no_conflict(tuple(row), values[1:-1])
             self._persist_ephemera(conn, envelope, ingestion_now)
             if raw is not None:
                 self.meta_attribution.stage_event(
@@ -581,6 +611,30 @@ class TransportService:
             *metadata,
             ingestion_now,
         )
+
+    @staticmethod
+    def _assert_no_conflict(
+        existing: tuple[object, ...], incoming: tuple[object, ...]
+    ) -> None:
+        """Recusa um event_id reaproveitado para conteudo diferente.
+
+        A guarda protege o conteudo, nao o horario: o teste que a define usa um
+        corpo diferente. Duas tolerancias, ambas estreitas:
+
+        - horario de observacao muda a cada reentrega e nao decide conflito;
+        - coluna gravada como NULL nunca recebeu valor, e ausencia nao e
+          discordancia -- linhas antigas nao carregam atributos que passaram a
+          existir depois.
+
+        A linha gravada nunca e reescrita: quem chegou primeiro permanece.
+        """
+        for column, stored, sent in zip(
+            _EVENT_CONFLICT_COLUMNS, existing, incoming, strict=True
+        ):
+            if column in _OBSERVATION_ONLY_COLUMNS or stored is None:
+                continue
+            if stored != sent:
+                raise TransportRequestError("event_id conflicts with existing event")
 
     def _database_bool(value: bool | None) -> int | None:
         return None if value is None else int(value)
