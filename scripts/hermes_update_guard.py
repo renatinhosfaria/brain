@@ -114,10 +114,14 @@ def _classify_dirty(porcelain: str) -> tuple[list[str], list[str]]:
             path = path.split(" -> ", 1)[1].strip().strip('"')
         if not path:
             continue
-        target = bundled if (
-            path.startswith("skills/")
-            or (path.startswith("profiles/") and EXPECTED_DIRTY_MARKER in path)
-        ) else ours
+        target = (
+            bundled
+            if (
+                path.startswith("skills/")
+                or (path.startswith("profiles/") and EXPECTED_DIRTY_MARKER in path)
+            )
+            else ours
+        )
         target.append(line.strip())
     return bundled, ours
 
@@ -140,8 +144,7 @@ def compare(before: dict, after: dict) -> tuple[list[str], list[str]]:
 
     if before["hermes_home"]["head"] != after["hermes_home"]["head"]:
         findings.append(
-            "the operational Hermes repository moved; an update should not "
-            "commit there"
+            "the operational Hermes repository moved; an update should not commit there"
         )
     bundled, ours = _classify_dirty(after["hermes_home"]["dirty"])
     if bundled:

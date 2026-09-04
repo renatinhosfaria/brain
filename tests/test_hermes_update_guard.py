@@ -13,8 +13,9 @@ guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
 
-def snap(*, upstream="aaa", home="bbb", files=None, dirty_home="", dirty_up="",
-         health=None) -> dict:
+def snap(
+    *, upstream="aaa", home="bbb", files=None, dirty_home="", dirty_up="", health=None
+) -> dict:
     return {
         "upstream": {"head": upstream, "dirty": dirty_up},
         "hermes_home": {"head": home, "dirty": dirty_home},
@@ -87,7 +88,9 @@ class WatchListTests(unittest.TestCase):
         watched = {str(p) for p in guard.WATCHED}
 
         self.assertIn("/root/.hermes/profiles/reno/config.yaml", watched)
-        self.assertIn("/root/.hermes/ops/hermes-team/reno-famachat-allowlist.json", watched)
+        self.assertIn(
+            "/root/.hermes/ops/hermes-team/reno-famachat-allowlist.json", watched
+        )
 
     def test_every_plugin_source_file_is_watched(self) -> None:
         watched = {str(p) for p in guard.WATCHED}
@@ -168,6 +171,7 @@ class DirtyClassificationTests(unittest.TestCase):
         )
 
         self.assertTrue(any("verify_team" in f for f in findings))
+
 
 if __name__ == "__main__":
     unittest.main()

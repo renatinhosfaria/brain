@@ -80,9 +80,7 @@ class GatewayAPITests(unittest.TestCase):
                     "default",
                     "gateway",
                     token_digest("gateway-secret"),
-                    frozenset(
-                        {"conversation_phone", "conversation_context"}
-                    ),
+                    frozenset({"conversation_phone", "conversation_context"}),
                 ),
                 "reno": PrincipalConfig(
                     "reno",

@@ -13,7 +13,9 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
-spec = importlib.util.spec_from_file_location("brain_bundle", SCRIPTS / "brain_bundle.py")
+spec = importlib.util.spec_from_file_location(
+    "brain_bundle", SCRIPTS / "brain_bundle.py"
+)
 bundle = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bundle)
 
@@ -462,13 +464,15 @@ class RollbackTransactionTests(_Fixture, unittest.TestCase):
         """
         first, second = self.two_releases()
         plan = bundle.plan_rollback(self.root)
-        self.assertEqual((plan["target"], plan["expected_active"]),
-                         (first.name, second.name))
+        self.assertEqual(
+            (plan["target"], plan["expected_active"]), (first.name, second.name)
+        )
 
         third = self.release("third")
         before = bundle.read_state(self.root)
-        self.assertEqual((before["active"], before["previous"]),
-                         (third.name, second.name))
+        self.assertEqual(
+            (before["active"], before["previous"]), (third.name, second.name)
+        )
 
         with self.assertRaisesRegex(bundle.BundleError, "changed since"):
             bundle.record_rollback(self.root, plan)
@@ -513,8 +517,12 @@ class StateInvariantTests(_Fixture, unittest.TestCase):
         with self.assertRaisesRegex(bundle.BundleError, "same bundle"):
             bundle.write_state(
                 self.root,
-                {"candidate": first.name, "active": first.name,
-                 "previous": first.name, "revision": 9},
+                {
+                    "candidate": first.name,
+                    "active": first.name,
+                    "previous": first.name,
+                    "revision": 9,
+                },
             )
 
     def test_a_short_sha_is_refused(self) -> None:
@@ -523,8 +531,12 @@ class StateInvariantTests(_Fixture, unittest.TestCase):
         with self.assertRaisesRegex(bundle.BundleError, "full"):
             bundle.write_state(
                 self.root,
-                {"candidate": first.name, "active": first.name[:12],
-                 "previous": None, "revision": 9},
+                {
+                    "candidate": first.name,
+                    "active": first.name[:12],
+                    "previous": None,
+                    "revision": 9,
+                },
             )
 
     def test_a_slot_naming_an_unverifiable_bundle_is_refused(self) -> None:
@@ -534,8 +546,12 @@ class StateInvariantTests(_Fixture, unittest.TestCase):
         with self.assertRaises(bundle.BundleError):
             bundle.write_state(
                 self.root,
-                {"candidate": first.name, "active": first.name,
-                 "previous": None, "revision": 9},
+                {
+                    "candidate": first.name,
+                    "active": first.name,
+                    "previous": None,
+                    "revision": 9,
+                },
             )
 
 
@@ -973,7 +989,9 @@ class RunbookContractTests(unittest.TestCase):
 
     def test_the_window_promotes_only_after_validation(self) -> None:
         text = self.RUNBOOK.read_text(encoding="utf-8")
-        window = text[text.index("### The window") : text.index("### Partial-deploy recovery")]
+        window = text[
+            text.index("### The window") : text.index("### Partial-deploy recovery")
+        ]
 
         promote = window.index("brain_bundle.py promote")
         for gate in (

@@ -163,9 +163,7 @@ def create(root: Path, repo: Path, config: Path) -> Path:
             existing = _manifest_for(target)
             rebuilt = _manifest_for(staging)
             if existing != rebuilt:
-                differing = sorted(
-                    set(existing) ^ set(rebuilt)
-                ) or sorted(
+                differing = sorted(set(existing) ^ set(rebuilt)) or sorted(
                     name for name in rebuilt if existing.get(name) != rebuilt[name]
                 )
                 raise BundleError(
@@ -441,7 +439,9 @@ def main() -> int:
     )
     parser.add_argument("ref", nargs="?", default="candidate")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--repo", type=Path, default=Path(__file__).resolve().parents[1]
+    )
     parser.add_argument("--config", type=Path, default=Path("/etc/brain/brain.toml"))
     parser.add_argument(
         "--out",

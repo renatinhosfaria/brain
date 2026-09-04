@@ -253,4 +253,3 @@ class PhoneForContactKeyTests(unittest.TestCase):
         (self.mapping_dir / f"lid-mapping-{phone}.json").write_text(
             json.dumps(lid), encoding="utf-8"
         )
-
