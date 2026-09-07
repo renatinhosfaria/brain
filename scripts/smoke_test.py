@@ -14,6 +14,22 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
+def compatible_health(payload: object) -> bool:
+    expected = {
+        "status": "ok",
+        "hermes_state_db": "ok",
+        "hermes_kanban_db": "ok",
+        "runtime_db": "ok",
+        "whatsapp_identity": "compatible",
+        "gateway_bridge": "configured",
+        "schema": "compatible",
+        "hermes_compatibility": "compatible",
+    }
+    return isinstance(payload, dict) and all(
+        payload.get(key) == value for key, value in expected.items()
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--health-url", default="http://127.0.0.1:8765/health")
@@ -83,17 +99,7 @@ def main() -> int:
             f"FAIL: Brain health request failed ({type(exc).__name__})", file=sys.stderr
         )
         return 1
-    expected = {
-        "status": "ok",
-        "hermes_state_db": "ok",
-        "hermes_kanban_db": "ok",
-        "runtime_db": "ok",
-        "whatsapp_identity": "compatible",
-        "gateway_bridge": "configured",
-        "schema": "compatible",
-        "hermes_compatibility": "compatible",
-    }
-    if status != 200 or payload != expected:
+    if status != 200 or not compatible_health(payload):
         print("FAIL: Brain health is incompatible", file=sys.stderr)
         return 1
 

@@ -11,6 +11,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -156,7 +157,8 @@ def check_upstream_contracts(hermes_root: Path) -> None:
     base_adapter_source = (hermes_root / "gateway/platforms/base.py").read_text(
         encoding="utf-8"
     )
-    gateway_source = (hermes_root / "gateway/run.py").read_text(encoding="utf-8")
+    gateway_source = inspect.getsource(GatewayRunner._hm_pre_gateway_dispatch_hook)
+    adapter_wiring_source = inspect.getsource(GatewayRunner._wire_adapter_handlers)
     identity_source = (hermes_root / "gateway/whatsapp_identity.py").read_text(
         encoding="utf-8"
     )
@@ -200,14 +202,62 @@ def check_upstream_contracts(hermes_root: Path) -> None:
         or "self._wire_plugin_handlers(None)" not in adapter_source
     ):
         fail("Hermes active-session handover interception contract changed")
-    gateway_busy_assignment = (
-        "adapter.set_busy_session_handler(self._handle_active_session_busy_message)"
-    )
-    if gateway_busy_assignment not in "".join(gateway_source.split()):
+    gateway_busy_assignment = "adapter.set_busy_session_handler(busy_session_handler or self._handle_active_session_busy_message)"
+    if "".join(gateway_busy_assignment.split()) not in "".join(
+        adapter_wiring_source.split()
+    ):
         fail("Hermes gateway busy-session handler binding changed")
 
     # The delivery ledger was checked because proving the first successful T1
     # send read its states. Nothing derives that fact any more.
+
+
+def check_trusted_subscription() -> None:
+    """Exercise routing and persistence using synthetic context and a temporary DB."""
+    from gateway.session_context import _VAR_MAP
+    from hermes_cli import kanban_db
+    from hermes_cli.kanban_db_connect import connect
+    from tools.kanban_tools import _maybe_auto_subscribe
+
+    values = {
+        "HERMES_SESSION_PLATFORM": "whatsapp",
+        "HERMES_SESSION_CHAT_ID": "brain-compat-synthetic",
+        "HERMES_SESSION_CHAT_TYPE": "dm",
+        "HERMES_SESSION_PROFILE": "default",
+        "HERMES_SESSION_THREAD_ID": "",
+        "HERMES_SESSION_KEY": "brain-compat-synthetic-key",
+        "HERMES_SESSION_USER_ID": "",
+        "HERMES_SESSION_USER_ID_ALT": "",
+        "HERMES_SESSION_MESSAGE_ID": "",
+    }
+    tokens = [(var, var.set(values.get(name, ""))) for name, var in _VAR_MAP.items()]
+    try:
+        with tempfile.TemporaryDirectory(prefix="brain-compat-") as temporary:
+            conn = connect(Path(temporary) / "kanban.db")
+            try:
+                # Empty project explicitly disables inheritance from the live board.
+                task_id = kanban_db.create_task(
+                    conn, title="Isolated compatibility probe", project_id=""
+                )
+                if not _maybe_auto_subscribe(conn, task_id):
+                    fail("Hermes trusted auto-subscription did not persist")
+                row = conn.execute(
+                    "SELECT platform, chat_id, chat_type, notifier_profile FROM "
+                    "kanban_notify_subs WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                if row is None or tuple(row) != (
+                    "whatsapp",
+                    "brain-compat-synthetic",
+                    "dm",
+                    "default",
+                ):
+                    fail("Hermes trusted auto-subscription derivation changed")
+            finally:
+                conn.close()
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
 
 
 def fail(message: str) -> None:
@@ -280,7 +330,7 @@ def main() -> int:
     from hermes_cli.plugin_dev import doctor_plugin
     from hermes_cli.plugins import discover_plugins
     from hermes_cli.tools_config import _get_platform_tools
-    from tools.mcp_tool import _interpolate_env_vars
+    from tools.mcp_tool_config import _interpolate_env_vars
 
     check_upstream_contracts(args.hermes_root)
     check_sqlite_schema(hermes_home / "state.db", STATE_SCHEMA)
@@ -525,9 +575,9 @@ def main() -> int:
         else:
             os.environ.pop(smoke_name, None)
 
-    kanban_source = (args.hermes_root / "hermes_cli" / "kanban_db.py").read_text(
-        encoding="utf-8"
-    )
+    from hermes_cli.kanban_db_dispatch import _default_spawn
+
+    kanban_source = inspect.getsource(_default_spawn)
     for assignment in (
         'env["HERMES_KANBAN_TASK"] = task.id',
         'env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)',
@@ -535,17 +585,7 @@ def main() -> int:
         if assignment not in kanban_source:
             fail(f"Hermes worker capability export changed: {assignment}")
 
-    tool_source = (args.hermes_root / "tools" / "kanban_tools.py").read_text(
-        encoding="utf-8"
-    )
-    required_subscription_evidence = (
-        'get_session_env("HERMES_SESSION_PLATFORM"',
-        'get_session_env("HERMES_SESSION_CHAT_ID"',
-        "_kb.add_notify_sub(",
-        "platform=platform, chat_id=chat_id",
-    )
-    if not all(fragment in tool_source for fragment in required_subscription_evidence):
-        fail("Hermes trusted auto-subscription derivation changed")
+    check_trusted_subscription()
 
     print(
         "OK: Hermes plugin tool registration, session context, identity mapping, "
