@@ -63,7 +63,9 @@ def _result(value: object, *, error: bool = False) -> mcp_types.CallToolResult:
 
 
 def _accounts(*ids: str) -> mcp_types.CallToolResult:
-    return _result({"data": [{"id": account_id} for account_id in ids]})
+    return _result(
+        {"total": len(ids), "accounts": [{"id": account_id} for account_id in ids]}
+    )
 
 
 class _FakeHttpClient:
@@ -524,6 +526,56 @@ class RemoteMetaAdsMcpClientTests(unittest.TestCase):
             client.probe()
 
         self.assertEqual(session.calls, [])
+
+    def test_account_probe_accepts_remote_accounts_and_legacy_data(self) -> None:
+        account = {
+            "id": f"act_{ACCOUNT_ID}",
+            "name": "Fixture account",
+            "account_id": ACCOUNT_ID,
+            "status": "ACTIVE",
+            "currency": "BRL",
+            "timezone": "America/Sao_Paulo",
+            "amount_spent": "0",
+            "balance": "0",
+            "spend_cap": "0",
+            "business": {"id": "123", "name": "Fixture business"},
+        }
+        for payload in (
+            {"total": 1, "accounts": [account]},
+            {"data": [account]},
+        ):
+            with self.subTest(payload=payload):
+                session = _FakeSession(
+                    responses={"meta_list_ad_accounts": [_result(payload)]}
+                )
+                client = self._client(session)
+                try:
+                    self.assertIsNone(client.probe())
+                finally:
+                    client.close()
+
+    def test_account_probe_rejects_malformed_or_conflicting_account_lists(self) -> None:
+        account = {"id": f"act_{ACCOUNT_ID}"}
+        for payload in (
+            {"accounts": None, "data": [account]},
+            {"accounts": {}, "total": 1},
+            {"accounts": [account], "data": [{"id": "act_2"}]},
+            {"accounts": [account], "total": 2},
+            {"accounts": [account], "total": True},
+            {"accounts": [account], "total": "1"},
+        ):
+            with self.subTest(payload=payload):
+                session = _FakeSession(
+                    responses={"meta_list_ad_accounts": [_result(payload)]}
+                )
+                client = self._client(session)
+                try:
+                    with self.assertRaisesRegex(
+                        MetaAdsError, "^meta_invalid_response$"
+                    ):
+                        client.probe()
+                finally:
+                    client.close()
 
     def test_account_probe_accepts_only_the_single_prefixed_configured_account(
         self,

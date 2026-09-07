@@ -437,8 +437,18 @@ class RemoteMetaAdsMcpClient:
         return result.structured_content
 
     def _verify_account(self, result: Mapping[str, Any]) -> None:
-        accounts = result.get("data")
+        # The remote MCP normalizes Graph's `data` into `accounts`.
+        # Keep the earlier shape readable, but never choose between conflicting lists.
+        accounts = (
+            result.get("accounts") if "accounts" in result else result.get("data")
+        )
         if not isinstance(accounts, list):
+            raise MetaAdsError("meta_invalid_response")
+        if "accounts" in result and "data" in result and result["data"] != accounts:
+            raise MetaAdsError("meta_invalid_response")
+        if "total" in result and (
+            type(result["total"]) is not int or result["total"] != len(accounts)
+        ):
             raise MetaAdsError("meta_invalid_response")
         if len(accounts) != 1:
             raise MetaAdsError("meta_account_mismatch")

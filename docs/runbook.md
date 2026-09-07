@@ -110,6 +110,10 @@ ad name, campaign name, or other remote payload data. Stop the rollout on any
 bounded error code; do not weaken the account, HTTPS, timeout, or response
 bounds.
 
+The remote account listing uses `{"total": 1, "accounts": [...]}`. Brain also
+accepts the older `data` list shape, but rejects conflicting lists, inconsistent
+totals, and any result that does not contain exactly the configured account.
+
 Raw `externalAdReply` is retained as plaintext attribution evidence for the
 transport retention period and is returned only through the authenticated CEO
 WhatsApp DM context. The observer spool and quarantine retain raw data for at
