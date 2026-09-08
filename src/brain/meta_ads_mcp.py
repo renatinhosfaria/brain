@@ -53,6 +53,8 @@ if not any(
 class _Session(Protocol):
     async def initialize(self) -> object: ...
 
+    async def send_ping(self) -> object: ...
+
     async def list_tools(self) -> object: ...
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> object: ...
@@ -385,6 +387,8 @@ class RemoteMetaAdsMcpClient:
     ) -> RemoteAd | RemoteCampaign | None:
         session = await self._ready_session()
         if operation == "probe":
+            # Initialization is cached, but readiness must check the live session.
+            await session.send_ping()
             return None
         if operation == "ad":
             if not self._valid_identifier(identifier):
@@ -569,7 +573,9 @@ class RemoteMetaAdsMcpClient:
             if budget.status_code == 429:
                 return MetaAdsError("meta_rate_limited")
             if budget.status_code == 404:
-                return MetaAdsError("meta_not_found")
+                # HTTP 404 is at the MCP endpoint/session boundary, not an ad
+                # lookup result. Discard the session and let the durable job retry.
+                return MetaAdsError("meta_server_unavailable")
         if isinstance(error, MetaAdsError):
             return error
         if isinstance(error, (asyncio.TimeoutError, httpx2.TimeoutException)):
@@ -581,5 +587,5 @@ class RemoteMetaAdsMcpClient:
             if status == 429:
                 return MetaAdsError("meta_rate_limited")
             if status == 404:
-                return MetaAdsError("meta_not_found")
+                return MetaAdsError("meta_server_unavailable")
         return MetaAdsError("meta_server_unavailable")

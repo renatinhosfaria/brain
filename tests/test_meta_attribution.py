@@ -167,6 +167,34 @@ class MetaAttributionServiceTests(unittest.TestCase):
         self.assertFalse(self.service.resolve_source("101", 21.0, 1.0))
         self.assertEqual(len(self.client.calls), 3)
 
+    def test_lookup_transport_failure_degrades_health_and_keeps_job_retryable(
+        self,
+    ) -> None:
+        self.stage()
+        self.client.ad_error = MetaAdsError("meta_server_unavailable")
+        with patch("brain.meta_attribution.time.time", return_value=100.0):
+            self.assertFalse(self.service.resolve_source("101", 100.0))
+        self.assertEqual(self.row()[:2], ("pending", "meta_server_unavailable"))
+        self.assertEqual(self.service.health(100.0), "degraded")
+        self.assertEqual(
+            self.runtime.read(
+                lambda conn: tuple(
+                    conn.execute(
+                        "SELECT next_attempt_at, attempt_count FROM meta_attribution_jobs"
+                    ).fetchone()
+                )
+            ),
+            (160.0, 1),
+        )
+
+        self.client.ad_error = None
+        with patch("brain.meta_attribution.time.time", return_value=160.0):
+            self.assertEqual(self.service.run_due_jobs(160.0), 1)
+        self.assertEqual(
+            self.row(), ("confirmed", None, "101", "Ad", "202", "Campaign")
+        )
+        self.assertEqual(self.service.health(160.0), "ready")
+
     def test_absolute_deadline_prevents_ad_call_after_probe_consumes_budget(
         self,
     ) -> None:

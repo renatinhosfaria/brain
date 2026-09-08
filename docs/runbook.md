@@ -114,6 +114,20 @@ The remote account listing uses `{"total": 1, "accounts": [...]}`. Brain also
 accepts the older `data` list shape, but rejects conflicting lists, inconsistent
 totals, and any result that does not contain exactly the configured account.
 
+Every probe sends an MCP `ping`, including when initialization is cached. An
+HTTP `404` from the MCP endpoint means the endpoint/session is unavailable;
+it is not evidence that an ad does not exist. Brain discards that session,
+reports `degraded`, and initializes a new session on the next operation.
+Attribution attempts stay `pending` with the existing durable retry backoff;
+there is no immediate retry loop or change to the CEO request budget.
+Transport/contract failures after a successful probe also clear readiness.
+
+Previously terminal `meta_not_found` rows are not automatically reopened:
+recover only an explicitly validated affected event, preserving its original
+CTWA evidence and attempt history, then let normal resolution reconfirm the
+exact ad and campaign. Never fill confirmed names manually or replay a
+WhatsApp message to repair attribution.
+
 Raw `externalAdReply` is retained as plaintext attribution evidence for the
 transport retention period and is returned only through the authenticated CEO
 WhatsApp DM context. The observer spool and quarantine retain raw data for at

@@ -131,6 +131,9 @@ class _FakeSession:
         self.list_calls += 1
         return self.tools
 
+    async def send_ping(self) -> mcp_types.EmptyResult:
+        return mcp_types.EmptyResult()
+
     async def call_tool(
         self, name: str, arguments: dict[str, Any]
     ) -> mcp_types.CallToolResult:
@@ -205,7 +208,129 @@ class _McpRecorderTransport(httpx2.AsyncBaseTransport):
         return None
 
 
+class _SessionExpiryTransport(httpx2.AsyncBaseTransport):
+    """Remote HTTP boundary; keep Brain's budget and real MCP SDK in the tests."""
+
+    def __init__(self) -> None:
+        self.available = True
+        self.session_id = ""
+        self.initializations = 0
+        self.requests: list[tuple[str, str]] = []
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        message = json.loads(request.content)
+        method = message["method"]
+        self.requests.append((request.method, method))
+        if not self.available or (
+            method != "initialize"
+            and request.headers.get("mcp-session-id") != self.session_id
+        ):
+            return httpx2.Response(404, request=request)
+        if method.startswith("notifications/"):
+            return httpx2.Response(202, request=request)
+        if method == "initialize":
+            self.initializations += 1
+            self.session_id = f"session-{self.initializations}"
+            result = {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "fixture", "version": "1.0"},
+            }
+        elif method == "ping":
+            result = {}
+        elif method == "tools/list":
+            result = _tools(*sorted(META_READ_TOOLS)).model_dump(by_alias=True)
+        elif method == "tools/call":
+            name = message["params"]["name"]
+            payloads = {
+                "meta_list_ad_accounts": {
+                    "total": 1,
+                    "accounts": [{"id": f"act_{ACCOUNT_ID}"}],
+                },
+                "meta_get_ad": {
+                    "id": "101",
+                    "name": "Ad",
+                    "campaign_id": "202",
+                    "status": "ACTIVE",
+                    "effective_status": "ACTIVE",
+                },
+                "meta_get_campaign": {
+                    "id": "202",
+                    "name": "Campaign",
+                    "status": "ACTIVE",
+                    "effective_status": "ACTIVE",
+                },
+            }
+            result = _result(payloads[name]).model_dump(by_alias=True)
+        else:
+            raise AssertionError(f"unexpected MCP method: {method}")
+        return httpx2.Response(
+            200,
+            request=request,
+            headers={"mcp-session-id": self.session_id},
+            json={"jsonrpc": "2.0", "id": message["id"], "result": result},
+        )
+
+
 class RemoteMetaAdsMcpClientTests(unittest.TestCase):
+    def _http_client(self, remote: _SessionExpiryTransport) -> RemoteMetaAdsMcpClient:
+        def factory(**kwargs: Any) -> httpx2.AsyncClient:
+            kwargs["transport"]._transport = remote
+            return httpx2.AsyncClient(**kwargs)
+
+        client = RemoteMetaAdsMcpClient(_settings(), _http_client_factory=factory)
+        self.addCleanup(client.close)
+        return client
+
+    def test_expired_http_session_is_retryable_and_recreated_before_next_lookup(
+        self,
+    ) -> None:
+        remote = _SessionExpiryTransport()
+        client = self._http_client(remote)
+        client.probe()
+        remote.session_id = "expired"
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_server_unavailable$"):
+            client.get_ad("101")
+
+        client.probe()
+        self.assertEqual(
+            client.get_ad("101"), RemoteAd("101", "Ad", "202", "ACTIVE", "ACTIVE")
+        )
+        self.assertEqual(client.get_campaign("202").name, "Campaign")
+        self.assertEqual(remote.initializations, 2)
+        self.assertTrue(all(method == "POST" for method, _ in remote.requests))
+
+    def test_cached_probe_checks_remote_liveness_and_recovers_after_404(self) -> None:
+        remote = _SessionExpiryTransport()
+        client = self._http_client(remote)
+        client.probe()
+        remote.available = False
+        before = len(remote.requests)
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_server_unavailable$"):
+            client.probe()
+
+        self.assertEqual(remote.requests[before:], [("POST", "ping")])
+        remote.available = True
+        client.probe()
+        self.assertEqual(remote.initializations, 2)
+
+    def test_missing_mcp_endpoint_is_not_a_terminal_ad_not_found_or_a_retry_loop(
+        self,
+    ) -> None:
+        remote = _SessionExpiryTransport()
+        remote.available = False
+        client = self._http_client(remote)
+
+        with self.assertRaisesRegex(MetaAdsError, "^meta_server_unavailable$"):
+            client.probe()
+
+        self.assertEqual(remote.requests, [("POST", "initialize")])
+        remote.available = True
+        client.probe()
+        self.assertEqual(client.get_ad("101").ad_id, "101")
+
     def _client(
         self,
         *sessions: _FakeSession,

@@ -332,10 +332,13 @@ class MetaAttributionService:
 
     def _fail(self, source_id: str, error: MetaAdsError, lease_token: str) -> None:
         failure_now = time.time()
+        # A successful probe does not outlive a subsequent transport/contract
+        # failure. Valid domain negatives alone do not imply a broken connection.
+        if error.code not in {"meta_not_found", "meta_inactive"}:
+            self._degrade_probe_state()
 
         def fail(conn: sqlite3.Connection) -> None:
             if error.code == "meta_auth_unavailable":
-                self._degrade_probe_state()
                 self._store.open_auth_circuit(
                     conn, failure_now, error.retry_after_seconds or 0.0
                 )
