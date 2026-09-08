@@ -380,7 +380,7 @@ def main() -> int:
         "porteiro": {"brain", "famachat"},
         "cadastro": {"brain", "famachat"},
         "reno": {"brain", "famachat"},
-        "famaagent": {"brain"},
+        "famaagent": {"brain", "famachat"},
     }
     for profile, config in workers.items():
         token = load_env_file(worker_paths[profile].parent / ".env").get("BRAIN_TOKEN")
@@ -424,8 +424,6 @@ def main() -> int:
             fail(f"{profile}: resolver did not expose Brain to CLI workers")
         if not expected_cli_toolsets[profile].issubset(cli):
             fail(f"{profile}: CLI lost a required MCP toolset")
-        if profile == "famaagent" and "famachat" in cli:
-            fail("famaagent: FamaChat must not be exposed to this Profile")
         if "brain" in telegram or "brain" in whatsapp:
             fail(f"{profile}: resolver exposed Brain outside CLI")
         platform_toolsets = config.get("platform_toolsets") or {}

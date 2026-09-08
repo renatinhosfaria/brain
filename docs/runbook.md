@@ -30,8 +30,9 @@
 5. Merge `deploy/hermes-brain.example.yaml` into Porteiro and Cadastro, and
    preserve `famachat` in their CLI toolsets. Merge
    `deploy/hermes-brain-memory.example.yaml` into Reno, preserving `famachat`,
-   and `deploy/hermes-brain-famaagent.example.yaml` into FamaAgent, without
-   adding `famachat`. Put each raw, distinct `BRAIN_TOKEN` only in its
+   and `deploy/hermes-brain-famaagent.example.yaml` into FamaAgent, which since
+   Amendment 4 carries the read-only `famachat` allowlist of spec 12.5. Put each
+   raw, distinct `BRAIN_TOKEN` only in its
    Profile's secret scope. Keep `no_mcp` on worker Telegram/WhatsApp toolsets.
 6. Review the versioned
    `integrations/hermes/brain-ceo-bridge/` source and

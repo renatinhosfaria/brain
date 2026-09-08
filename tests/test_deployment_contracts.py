@@ -524,16 +524,32 @@ class DeploymentContractTests(unittest.TestCase):
         for filename in (
             "deploy/hermes-brain.example.yaml",
             "deploy/hermes-brain-memory.example.yaml",
+            # Amendment 4 (spec 12.5) gave FamaAgent the read-only allowlist, so
+            # its template now carries FamaChat like every other worker.
+            "deploy/hermes-brain-famaagent.example.yaml",
         ):
             source = (ROOT / filename).read_text(encoding="utf-8")
             self.assertIn("famachat", source, filename)
             self.assertIn("- brain", source, filename)
 
-        famaagent = (ROOT / "deploy/hermes-brain-famaagent.example.yaml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("- brain", famaagent)
-        self.assertNotIn("famachat", famaagent)
+    def test_templates_keep_the_famachat_server_definition_out_of_the_repo(
+        self,
+    ) -> None:
+        """This repository is public.
+
+        Naming ``famachat`` in a toolset is the whole contract a template needs:
+        the name alone is what forms the Hermes allowlist. The endpoint, the
+        credential and the enumerated tools live in the Profile configuration,
+        which is not published. Amendment 4 briefly broke this by carrying a
+        full server block into the FamaAgent template.
+        """
+        for path in sorted((ROOT / "deploy").glob("hermes-brain*.example.yaml")):
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("mcp.famachat.com.br", source, path.name)
+            self.assertNotIn("FAMACHAT_MCP_KEY", source, path.name)
+            # A server block would be "  famachat:"; the toolset entry is
+            # "    - famachat", which is the only form allowed here.
+            self.assertNotIn("\n  famachat:", source, path.name)
 
     def test_hermes_check_requires_famachat_by_profile(self) -> None:
         source = (ROOT / "scripts/hermes_integration_check.py").read_text(

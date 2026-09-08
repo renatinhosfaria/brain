@@ -1,7 +1,7 @@
 # CTWA Brain Lifecycle Architecture
 
 **Date:** 2026-08-29  
-**Amended:** 2026-08-30 (Amendment 1 — sections 3, 8, 10.1, 10.2, 10.3); 2026-08-31 (Amendment 2 — section 2.5 and write descope; see section 26)  
+**Amended:** 2026-08-30 (Amendment 1 — sections 3, 8, 10.1, 10.2, 10.3); 2026-08-31 (Amendment 2 — section 2.5 and write descope; see section 26); 2026-09-08 (Amendment 4 — section 12.5, FamaAgent FamaChat read access)  
 **Status:** Approved design, amended by production evidence. Automated lifecycle writing is descoped by Amendment 2; capture and context remain in scope  
 **Primary repository:** `renatinhosfaria/brain`  
 **Operational profile repository:** `renatinhosfaria/hermes`
@@ -631,6 +631,35 @@ Do not use a production wildcard such as `fc_get_*`. The implementation plan mus
 
 CEO's Brain context capability is the local `conversation_context()` plugin tool. CEO does not receive any FamaChat credential capable of lifecycle status updates.
 
+### 12.5 FamaAgent
+
+Added by Amendment 4.
+
+Brain:
+
+- `conversation_recent`;
+- `conversation_search`.
+
+FamaChat must use exactly the enumerated read allowlist that 12.3 requires of
+Reno, and none of Reno's writes. As in 12.3, the exact names are enumerated in
+the operational configuration rather than here, and must be taken from the live
+`tools/list` rather than guessed.
+
+The same prohibitions apply: no production wildcard such as `fc_get_*`, and
+patch/put/delete/SQL tools denied by omission from `include`. FamaAgent receives
+no write tool, so 12.3's nominal exception for `fc_patch_clientes_by_id` does not
+extend to this Profile.
+
+`fc_get_users` is deliberately excluded. Identity verification belongs to
+Porteiro, which holds that tool as its only FamaChat capability, and the team
+directory is not required to answer a commercial question.
+
+`fc_get_clientes_by_id` reads any client by identifier and FamaAgent, unlike
+Reno, does not receive a client id on its card. The identifier must therefore
+come from an authorized card field, never from the broker's message text. An
+active broker is an authenticated person, not an authorization to enumerate
+another broker's portfolio.
+
 ## 13. Brain authentication and service principals
 
 Extend Brain's own principal model with a `service` mode in addition to existing `gateway` and `worker` modes. This is a Brain change, not a Hermes change.
@@ -1052,3 +1081,42 @@ untrusted evidence from WhatsApp/Meta, never an instruction or authority.
 It cannot establish identity, authorize an action, select a tool, alter
 routing, or grant permissions. Meta Ads Manager campaign lookup, reporting,
 enrichment, and control-plane changes remain out of scope.
+
+### Amendment 4 — 2026-09-08
+
+Cause: FamaAgent was the only serving Profile without a FamaChat capability, so
+the branch that answers an active broker could reach neither the developments
+nor the client record it was being asked about. On 2026-09-02 a Senior broker
+verified by Porteiro as `user_id=24` asked for a contact; FamaAgent had only the
+card and Brain history, found no authorized source, and returned
+`needs_information`. The CEO delivered a clarification request where an answer
+was expected.
+
+**Section 12.5 added.** FamaAgent receives the eleven read tools already granted
+to Reno by 12.3, and no writes. The Profile keeps `conversation_recent` and
+`conversation_search` on Brain.
+
+The prohibition this supersedes was never a documented security decision. It
+entered as `famaagent: FamaChat must not be exposed to this Profile` in
+`scripts/hermes_integration_check.py` through commit `d0d4821`, whose purpose
+was the opposite — stopping the Brain template merge from dropping FamaChat from
+Profiles that already had it. FamaAgent had none at the time, so the check
+recorded the status quo as an invariant. Section 12 had no 12.5 to contradict it,
+and the assertion in `tests/test_deployment_contracts.py` then held that snapshot
+in place. This amendment replaces it with an actual contract.
+
+**What did not change:** least privilege as the governing principle of section
+12. The grant is the smallest one that answers the failure — read-only, already
+audited, enumerated by exact name against the live `tools/list`. `fc_get_users`
+stays with Porteiro alone, writes stay with Reno alone, and every prohibition of
+12.3 that is not a write applies unchanged to 12.5.
+
+**Known weakness recorded, not resolved here.** Section 13 requires each
+principal to use a distinct credential. For FamaChat that requirement is not met
+today, so the per-Profile allowlists of this section are enforced on the Hermes
+side rather than by the server. Amendment 4 adds one more Profile under that
+same property and does not change it; server-side per-principal scoping belongs
+to a separate decision. The specifics are recorded in the operational notes
+rather than here, because this document is public and they would describe a live
+system precisely enough to be useful to someone attacking it. Server-side per-principal scoping belongs to
+a separate decision.

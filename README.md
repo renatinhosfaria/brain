@@ -135,7 +135,8 @@ Porteiro/Cadastro,
 for Reno, and
 [`deploy/hermes-brain-famaagent.example.yaml`](deploy/hermes-brain-famaagent.example.yaml)
 for FamaAgent. Porteiro, Cadastro and Reno preserve the existing FamaChat MCP
-server alongside Brain; FamaAgent keeps only Brain. All templates keep Brain
+server alongside Brain; since Amendment 4 (spec 12.5) FamaAgent carries Brain
+plus a read-only FamaChat allowlist. All templates keep Brain
 out of Telegram and WhatsApp via `no_mcp`; the worker's Task/Run headers are
 server-derived and are not tool arguments. Follow
 [`docs/worker-history-invariant.md`](docs/worker-history-invariant.md) for the

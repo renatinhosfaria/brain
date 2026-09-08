@@ -14,12 +14,18 @@ mcp_servers:
     resources: false
     prompts: false
 
-# FamaAgent keeps only the Brain MCP server on CLI. Explicitly disable all MCP
-# servers on Telegram/WhatsApp.
+# Keep Brain and the existing FamaChat MCP server available on CLI. Explicit
+# MCP names form an allowlist in Hermes, so omitting FamaChat would hide it.
+# Since Amendment 4 (spec 12.5) FamaAgent carries the read-only FamaChat
+# allowlist; its endpoint, credential and exact tool names stay in the Profile
+# configuration, never here. No write tool is granted: 12.3's nominal
+# fc_patch_clientes_by_id exception belongs to Reno alone.
+# Explicitly disable all MCP servers on Telegram/WhatsApp.
 platform_toolsets:
   cli:
     - clarify
     - brain
+    - famachat
   telegram:
     - clarify
     - no_mcp
