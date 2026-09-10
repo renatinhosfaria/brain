@@ -9,6 +9,14 @@ CEO, the external bridge reads the current gateway session context and Brain
 revalidates the submitted `session_id`, `session_key`, `chat_id`, platform and
 chat type against `state.db`.
 
+For operator-authorized Telegram resumption, the local administrative grant
+contract in [telegram-whatsapp-resumption.md](telegram-whatsapp-resumption.md)
+keeps the control session separate from the proved WhatsApp context. The model
+cannot issue grants or supply conversation identity; subscription inheritance
+alone never authorizes history. Grants are first-new-run-bound and revalidated
+on every call. This code path requires operator activation and a real grant;
+synthetic tests do not prove a repaired live resumption.
+
 Only WhatsApp direct messages are in scope. The phone resolver accepts a direct
 phone JID or a semantically consistent forward/reverse LID mapping in the
 configured real session directory. A conflict, malformed candidate, symlink,

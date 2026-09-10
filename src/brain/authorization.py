@@ -225,6 +225,19 @@ class Authorizer:
             return str(task["session_id"]), next(iter(chat_ids))
 
         task_session_id, chat_id = self.kanban.read(kanban_gate)
+        origin = self.state.read(
+            lambda conn: conn.execute(
+                "SELECT source FROM sessions WHERE id=?", (task_session_id,)
+            ).fetchone()
+        )
+        if origin is not None and origin["source"] == "telegram":
+            # A separate administrator-issued grant is mandatory. The inherited
+            # notification target alone never authorizes a control session.
+            from .resumption import ResumptionRegistry
+
+            task_session_id = ResumptionRegistry(self.settings).resolve(
+                identity, task_session_id, chat_id
+            )
 
         def state_gate(conn):
             sessions = conn.execute(
@@ -276,11 +289,12 @@ class Authorizer:
             session_ids=session_ids,
         )
 
-    def authorize_gateway(
+    def validated_gateway_session_ids(
         self,
-        identity: GatewayRequestIdentity,
         context: GatewaySessionContext,
-    ) -> AuthorizedConversation:
+    ) -> tuple[str, ...]:
+        """Validate stored conversation evidence, independently of a principal."""
+
         def state_gate(conn):
             session = conn.execute(
                 "SELECT id, session_key, source, chat_id, chat_type "
@@ -317,7 +331,14 @@ class Authorizer:
                 raise BrainError("AUTH_ORIGIN_AMBIGUOUS_ALIAS")
             return tuple(str(row["id"]) for row in longitudinal)
 
-        session_ids = self.state.read(state_gate)
+        return self.state.read(state_gate)
+
+    def authorize_gateway(
+        self,
+        identity: GatewayRequestIdentity,
+        context: GatewaySessionContext,
+    ) -> AuthorizedConversation:
+        session_ids = self.validated_gateway_session_ids(context)
         return AuthorizedConversation(
             principal=identity.principal,
             mode="gateway",
