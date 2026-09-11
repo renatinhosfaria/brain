@@ -51,19 +51,25 @@ class BrainFixture(unittest.TestCase):
                     "porteiro",
                     "worker",
                     token_digest("porteiro-secret"),
-                    frozenset({"conversation_phone"}),
+                    frozenset({"conversation_phone", "conversation_context"}),
                 ),
                 "cadastro": PrincipalConfig(
                     "cadastro",
                     "worker",
                     token_digest("cadastro-secret"),
-                    frozenset({"conversation_phone"}),
+                    frozenset({"conversation_phone", "conversation_context"}),
                 ),
                 "reno": PrincipalConfig(
                     "reno",
                     "worker",
                     token_digest("reno-secret"),
-                    frozenset({"conversation_recent", "conversation_search"}),
+                    frozenset(
+                        {
+                            "conversation_recent",
+                            "conversation_search",
+                            "conversation_context",
+                        }
+                    ),
                 ),
                 "famaagent": PrincipalConfig(
                     "famaagent",
@@ -337,6 +343,45 @@ class BrainFixture(unittest.TestCase):
         capability = self.service.authorizer.authorize_worker(identity)
         self.assertEqual(capability.principal, "porteiro")
         self.assertEqual(capability.chat_id, "5511999990000@s.whatsapp.net")
+
+    def test_worker_conversation_context_uses_same_projection(self) -> None:
+        worker = self.service.call_tool(
+            "conversation_context",
+            {},
+            self.headers(token="porteiro-secret", task="task-p", run="104"),
+        )
+        self.assertEqual(
+            worker, {"status": "unavailable", "reason": "no_recent_transport"}
+        )
+
+    def test_worker_conversation_context_requires_empty_arguments(self) -> None:
+        with self.assertRaises(BrainError) as denied:
+            self.service.call_tool(
+                "conversation_context",
+                {"phone": "5511999990000"},
+                self.headers(token="reno-secret"),
+            )
+        self.assertEqual(denied.exception.code, "AUTH_TASK_INVALID")
+
+    def test_worker_context_rejects_wrong_assignee_and_terminal_run(self) -> None:
+        with self.assertRaises(BrainError) as denied:
+            self.service.call_tool(
+                "conversation_context",
+                {},
+                self.headers(token="cadastro-secret", task="task-p", run="104"),
+            )
+        self.assertEqual(denied.exception.code, "AUTH_PROFILE_MISMATCH")
+        conn = sqlite3.connect(self.kanban_path)
+        conn.execute("UPDATE task_runs SET status='done' WHERE id=104")
+        conn.commit()
+        conn.close()
+        with self.assertRaises(BrainError) as terminal:
+            self.service.call_tool(
+                "conversation_context",
+                {},
+                self.headers(token="porteiro-secret", task="task-p", run="104"),
+            )
+        self.assertEqual(terminal.exception.code, "AUTH_RUN_TERMINAL")
 
     def test_audit_records_execution_mode_without_identity_fields(self) -> None:
         with self.assertLogs("brain.audit", level="INFO") as captured:

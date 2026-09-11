@@ -289,6 +289,18 @@ class Authorizer:
             session_ids=session_ids,
         )
 
+    def authorize_worker_tool(
+        self,
+        identity: WorkerRequestIdentity,
+        capability_name: str,
+        audit_identity: dict[str, object] | None = None,
+    ) -> Capability:
+        """Authorize a worker task and one configured capability together."""
+        principal = self.settings.principals.get(identity.principal)
+        if principal is None or capability_name not in principal.tools:
+            raise BrainError("AUTH_TOOL_DENIED")
+        return self.authorize_worker(identity, audit_identity)
+
     def validated_gateway_session_ids(
         self,
         context: GatewaySessionContext,

@@ -270,18 +270,20 @@ class BrainService:
                 "conversation_recent",
                 "conversation_search",
                 "conversation_phone",
+                "conversation_context",
             }:
                 raise BrainError("AUTH_TASK_INVALID")
-            principal = self.settings.principals[request_identity.principal]
-            if tool not in principal.tools:
-                raise BrainError("AUTH_TOOL_DENIED")
             if not isinstance(arguments, Mapping) or FORBIDDEN_ARGUMENTS.intersection(
                 arguments
             ):
                 raise BrainError("AUTH_TASK_INVALID")
             if tool == "conversation_phone" and arguments:
                 raise BrainError("AUTH_TASK_INVALID")
-            capability = self.authorizer.authorize_worker(request_identity, identity)
+            if tool == "conversation_context" and arguments:
+                raise BrainError("AUTH_TASK_INVALID")
+            capability = self.authorizer.authorize_worker_tool(
+                request_identity, tool, identity
+            )
             identity.update(
                 profile=capability.profile,
                 task_id=capability.task_id,
@@ -306,6 +308,16 @@ class BrainService:
                     decision="allow" if result["status"] == "ok" else "unavailable",
                     duration_ms=(time.perf_counter() - started) * 1000,
                     error=reason if result["status"] != "ok" else None,
+                )
+                return result
+            if tool == "conversation_context":
+                result = self._conversation_context_for_capability(capability)
+                self._audit(
+                    identity=identity,
+                    tool=tool,
+                    decision="allow" if result["status"] == "ok" else "unavailable",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    error=result.get("reason"),
                 )
                 return result
             result = self.conversation_search(capability, arguments)
@@ -424,49 +436,9 @@ class BrainService:
             identity["profile"] = request_identity.principal
             identity["mode"] = self.settings.principals[request_identity.principal].mode
             capability = self.authorizer.authorize_gateway(request_identity, context)
-            resolution = resolve_phone(
-                capability.chat_id, self.settings.whatsapp_session_dir
+            result = self._conversation_context_for_capability(
+                capability, request_deadline=request_deadline
             )
-            if resolution.status != "ok" or not resolution.phone:
-                result = {"status": "unavailable", "reason": "contact_not_resolved"}
-            elif self.runtime_ids is None:
-                raise DatabaseUnavailable()
-            else:
-                contact_key = self.runtime_ids.contact_key(resolution.phone)
-                context_now = time.time()
-                self._resolve_newest_pending_context_source(
-                    contact_key, context_now, request_deadline
-                )
-                try:
-                    result = self.runtime.read(
-                        lambda conn: self._conversation_context_from_runtime(
-                            conn,
-                            contact_key=contact_key,
-                            phone_e164=resolution.phone,
-                            now=context_now,
-                            raw_limits=RawAttributionLimits(
-                                max_bytes=self.settings.ctwa_raw_max_bytes,
-                                max_depth=self.settings.ctwa_raw_max_depth,
-                                max_nodes=self.settings.ctwa_raw_max_nodes,
-                            ),
-                        )
-                    )
-                except (RecursionError, ValueError):
-                    result = {
-                        "status": "unavailable",
-                        "reason": "context_unavailable",
-                    }
-                encoded = json.dumps(
-                    result,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                if len(encoded) > self.settings.context_response_max_bytes:
-                    result = {
-                        "status": "unavailable",
-                        "reason": "context_too_large",
-                    }
             self._audit(
                 identity=identity,
                 tool="conversation_context",
@@ -494,6 +466,47 @@ class BrainService:
                 error="DB_UNAVAILABLE",
             )
             raise DatabaseUnavailable() from exc
+
+    def _conversation_context_for_capability(
+        self, capability: Capability, *, request_deadline: float | None = None
+    ) -> dict[str, Any]:
+        """Return the bounded transport context for an authorized conversation."""
+        deadline = request_deadline or (
+            time.monotonic()
+            + min(1.5, self.settings.meta_ads_mcp_context_budget_seconds)
+        )
+        resolution = resolve_phone(
+            capability.chat_id, self.settings.whatsapp_session_dir
+        )
+        if resolution.status != "ok" or not resolution.phone:
+            return {"status": "unavailable", "reason": "contact_not_resolved"}
+        if self.runtime_ids is None:
+            raise DatabaseUnavailable()
+        contact_key = self.runtime_ids.contact_key(resolution.phone)
+        context_now = time.time()
+        self._resolve_newest_pending_context_source(contact_key, context_now, deadline)
+        try:
+            result = self.runtime.read(
+                lambda conn: self._conversation_context_from_runtime(
+                    conn,
+                    contact_key=contact_key,
+                    phone_e164=resolution.phone,
+                    now=context_now,
+                    raw_limits=RawAttributionLimits(
+                        max_bytes=self.settings.ctwa_raw_max_bytes,
+                        max_depth=self.settings.ctwa_raw_max_depth,
+                        max_nodes=self.settings.ctwa_raw_max_nodes,
+                    ),
+                )
+            )
+        except (RecursionError, ValueError):
+            return {"status": "unavailable", "reason": "context_unavailable"}
+        encoded = json.dumps(
+            result, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(encoded) > self.settings.context_response_max_bytes:
+            return {"status": "unavailable", "reason": "context_too_large"}
+        return result
 
     def _resolve_newest_pending_context_source(
         self, contact_key: str, context_now: float, request_deadline: float
