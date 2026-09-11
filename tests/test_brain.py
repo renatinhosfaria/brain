@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from mcp.types import CallToolRequestParams
 
+from brain.authorization import GatewaySessionContext
 from brain.config import BrainSettings, PrincipalConfig, token_digest
 from brain.db import ReadOnlyDatabase
 from brain.errors import BrainError
@@ -345,14 +346,61 @@ class BrainFixture(unittest.TestCase):
         self.assertEqual(capability.chat_id, "5511999990000@s.whatsapp.net")
 
     def test_worker_conversation_context_uses_same_projection(self) -> None:
+        now = time.time()
+        phone = "5511999990000"
+        contact_key = self.service.runtime_ids.contact_key(phone)
+        conn = sqlite3.connect(self.runtime_path)
+        conn.execute(
+            "INSERT INTO transport_events "
+            "(event_id, observer_device_id, contact_key, direction, received_at, "
+            "transport_kind, source_app, external_ad_reply_raw_json, created_at) "
+            "VALUES (?, ?, ?, 'inbound', ?, 'ctwa_candidate', ?, ?, ?)",
+            (
+                "evt-worker-ctwa",
+                "observer",
+                contact_key,
+                now,
+                "instagram",
+                '{"title":"Recanto"}',
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO ctwa_meta_attributions "
+            "(event_id, account_id, source_id, status, ad_id, ad_name, campaign_id, campaign_name, created_at, updated_at) "
+            "VALUES (?, 'acct', 'src', 'confirmed', 'ad-1', 'Anúncio Recanto', 'camp-1', 'Campanha', ?, ?)",
+            ("evt-worker-ctwa", now, now),
+        )
+        conn.commit()
+        conn.close()
         worker = self.service.call_tool(
             "conversation_context",
             {},
             self.headers(token="porteiro-secret", task="task-p", run="104"),
         )
-        self.assertEqual(
-            worker, {"status": "unavailable", "reason": "no_recent_transport"}
+        gateway = self.service.gateway_conversation_context(
+            {"Authorization": "Bearer gateway-secret"},
+            GatewaySessionContext(
+                platform="whatsapp",
+                chat_type="dm",
+                chat_id="5511999990000@s.whatsapp.net",
+                session_key="wa:a",
+                session_id="a-new",
+            ),
         )
+        self.assertEqual(worker, gateway)
+        self.assertEqual(
+            worker["events"][0]["meta_attribution"]["ad_name"], "Anúncio Recanto"
+        )
+
+    def test_unauthorized_profile_is_denied_before_argument_validation(self) -> None:
+        with self.assertRaises(BrainError) as denied:
+            self.service.call_tool(
+                "conversation_context",
+                {"phone": "forbidden"},
+                self.headers(token="fama-secret", task="task-f", run="103"),
+            )
+        self.assertEqual(denied.exception.code, "AUTH_TOOL_DENIED")
 
     def test_worker_conversation_context_requires_empty_arguments(self) -> None:
         with self.assertRaises(BrainError) as denied:

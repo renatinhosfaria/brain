@@ -273,6 +273,11 @@ class BrainService:
                 "conversation_context",
             }:
                 raise BrainError("AUTH_TASK_INVALID")
+            # Capability denial precedes argument validation so profiles cannot
+            # probe schemas of tools they are not allowed to call.
+            capability = self.authorizer.authorize_worker_tool(
+                request_identity, tool, identity
+            )
             if not isinstance(arguments, Mapping) or FORBIDDEN_ARGUMENTS.intersection(
                 arguments
             ):
@@ -281,9 +286,6 @@ class BrainService:
                 raise BrainError("AUTH_TASK_INVALID")
             if tool == "conversation_context" and arguments:
                 raise BrainError("AUTH_TASK_INVALID")
-            capability = self.authorizer.authorize_worker_tool(
-                request_identity, tool, identity
-            )
             identity.update(
                 profile=capability.profile,
                 task_id=capability.task_id,
