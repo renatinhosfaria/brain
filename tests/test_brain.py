@@ -388,10 +388,150 @@ class BrainFixture(unittest.TestCase):
                 session_id="a-new",
             ),
         )
+        self.assertEqual(gateway.get("status"), "ok", gateway)
         self.assertEqual(worker, gateway)
         self.assertEqual(
             worker["events"][0]["meta_attribution"]["ad_name"], "Anúncio Recanto"
         )
+
+    def test_five_ctwa_events_are_identical_for_ceo_and_context_workers(self) -> None:
+        """The worker capability must expose the exact CEO projection."""
+        now = time.time()
+        contact_key = self.service.runtime_ids.contact_key("5511999990000")
+        conn = sqlite3.connect(self.runtime_path)
+        for index in range(5):
+            event_id = f"evt-five-{index}"
+            raw = json.dumps(
+                {
+                    "sourceType": "ad",
+                    "sourceId": f"source-{index}",
+                    "sourceUrl": f"https://instagram.example/{index}",
+                    "ctwaClid": f"clid-{index}",
+                    "externalAdReply": {
+                        "title": f"Anúncio {index}",
+                        "body": f"Empreendimento {index}",
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            received_at = now - (4 - index)
+            conn.execute(
+                "INSERT INTO transport_events "
+                "(event_id, observer_device_id, contact_key, direction, received_at, "
+                "transport_kind, source_app, external_ad_reply_raw_json, created_at) "
+                "VALUES (?, 'observer', ?, 'inbound', ?, 'ctwa_candidate', ?, ?, ?)",
+                (event_id, contact_key, received_at, "instagram", raw, received_at),
+            )
+            conn.execute(
+                "INSERT INTO ctwa_meta_attributions "
+                "(event_id, account_id, source_id, status, ad_id, ad_name, "
+                "campaign_id, campaign_name, created_at, updated_at) "
+                "VALUES (?, 'acct', ?, 'confirmed', ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    f"source-{index}",
+                    f"ad-{index}",
+                    f"Anúncio {index}",
+                    f"campaign-{index}",
+                    f"Campanha {index}",
+                    received_at,
+                    received_at,
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        gateway = self.service.gateway_conversation_context(
+            {"Authorization": "Bearer gateway-secret"},
+            GatewaySessionContext(
+                platform="whatsapp",
+                chat_type="dm",
+                chat_id="5511999990000@s.whatsapp.net",
+                session_key="wa:a",
+                session_id="a-new",
+            ),
+        )
+        for profile, token, task, run in (
+            ("porteiro", "porteiro-secret", "task-p", "104"),
+            ("cadastro", "cadastro-secret", "task-c", "105"),
+            ("reno", "reno-secret", "task-a", "101"),
+        ):
+            with self.subTest(profile=profile):
+                worker = self.service.call_tool(
+                    "conversation_context",
+                    {},
+                    self.headers(token=token, task=task, run=run),
+                )
+                self.assertEqual(worker.get("status"), "ok", worker)
+                self.assertEqual(worker, gateway)
+                self.assertEqual(len(worker["events"]), 5)
+                for index, event in enumerate(worker["events"]):
+                    self.assertEqual(event["event_id"], f"evt-five-{index}")
+                    self.assertEqual(event["source_app"], "instagram")
+                    attribution = event["meta_attribution"]
+                    self.assertEqual(attribution["status"], "confirmed")
+                    self.assertEqual(attribution["ad_id"], f"ad-{index}")
+                    self.assertEqual(attribution["ad_name"], f"Anúncio {index}")
+                    self.assertEqual(attribution["campaign_id"], f"campaign-{index}")
+                    self.assertEqual(attribution["campaign_name"], f"Campanha {index}")
+                    self.assertEqual(
+                        event["external_ad_reply"]["sourceId"], f"source-{index}"
+                    )
+
+    def test_worker_context_failures_are_closed_for_scope_and_profile(self) -> None:
+        unavailable = self.service.call_tool(
+            "conversation_context",
+            {},
+            self.headers(token="porteiro-secret", task="task-p", run="104"),
+        )
+        self.assertEqual(
+            unavailable, {"status": "unavailable", "reason": "no_recent_transport"}
+        )
+
+        conn = sqlite3.connect(self.kanban_path)
+        conn.execute("DELETE FROM kanban_notify_subs WHERE task_id='task-p'")
+        conn.executemany(
+            "INSERT INTO kanban_notify_subs VALUES ('task-p','whatsapp',?,'dm','default')",
+            [
+                ("5511999990000@s.whatsapp.net",),
+                ("5511888880000@s.whatsapp.net",),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        with self.assertRaises(BrainError) as ambiguous:
+            self.service.call_tool(
+                "conversation_context",
+                {},
+                self.headers(token="porteiro-secret", task="task-p", run="104"),
+            )
+        self.assertEqual(ambiguous.exception.code, "AUTH_ORIGIN_AMBIGUOUS")
+
+        conn = sqlite3.connect(self.kanban_path)
+        conn.execute("DELETE FROM kanban_notify_subs WHERE task_id='task-p'")
+        conn.execute(
+            "INSERT INTO kanban_notify_subs VALUES "
+            "('task-p','telegram','5511999990000@s.whatsapp.net','dm','default')"
+        )
+        conn.commit()
+        conn.close()
+        with self.assertRaises(BrainError) as telegram:
+            self.service.call_tool(
+                "conversation_context",
+                {},
+                self.headers(token="porteiro-secret", task="task-p", run="104"),
+            )
+        self.assertEqual(telegram.exception.code, "AUTH_ORIGIN_MISSING")
+
+        with self.assertRaises(BrainError) as unauthorized:
+            self.service.call_tool(
+                "conversation_context",
+                {},
+                self.headers(token="fama-secret", task="task-f", run="103"),
+            )
+        self.assertEqual(unauthorized.exception.code, "AUTH_TOOL_DENIED")
 
     def test_unauthorized_profile_is_denied_before_argument_validation(self) -> None:
         with self.assertRaises(BrainError) as denied:
