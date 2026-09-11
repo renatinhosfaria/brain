@@ -11,6 +11,7 @@ mcp_servers:
       include:
         - conversation_recent
         - conversation_search
+        - conversation_context
     resources: false
     prompts: false
 

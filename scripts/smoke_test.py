@@ -206,18 +206,22 @@ def main() -> int:
             "conversation_recent",
             "conversation_search",
             "conversation_phone",
+            "conversation_context",
         }:
             raise RuntimeError("MCP tool allowlist failed")
         for tool in tools:
             schema = tool.get("inputSchema", {})
             if forbidden.intersection(schema.get("properties", {})):
                 raise RuntimeError("MCP identity argument leaked into tool schema")
-            if tool.get("name") == "conversation_phone" and schema != {
+            if tool.get("name") in {
+                "conversation_phone",
+                "conversation_context",
+            } and schema != {
                 "type": "object",
                 "properties": {},
                 "additionalProperties": False,
             }:
-                raise RuntimeError("conversation_phone schema is not zero-argument")
+                raise RuntimeError(f"{tool.get('name')} schema is not zero-argument")
 
         # Unresolved Hermes interpolation must fail before any database read.
         status, _, placeholder = post(

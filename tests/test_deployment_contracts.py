@@ -96,10 +96,33 @@ class DeploymentContractTests(unittest.TestCase):
         )
 
         self.assertEqual(data["principals"]["default"]["mode"], "gateway")
-        self.assertEqual(
-            data["principals"]["porteiro"]["tools"], ["conversation_phone"]
-        )
+        self.assertIn("conversation_context", data["principals"]["porteiro"]["tools"])
         self.assertIn("whatsapp_session_dir", data["server"])
+
+    def test_worker_context_capability_is_enabled_only_for_context_profiles(
+        self,
+    ) -> None:
+        templates = (
+            ROOT / "deploy/hermes-brain.example.yaml",
+            ROOT / "deploy/hermes-brain-memory.example.yaml",
+        )
+        for path in templates:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("- conversation_context", text)
+        configs = {
+            name: (Path("/root/.hermes/profiles") / name / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+            for name in ("porteiro", "cadastro", "reno")
+        }
+        for text in configs.values():
+            self.assertIn("- conversation_context", text)
+        self.assertNotIn(
+            "- conversation_context",
+            (Path("/root/.hermes/config.yaml")).read_text(encoding="utf-8")
+            if Path("/root/.hermes/config.yaml").exists()
+            else "",
+        )
 
     def test_runtime_and_observer_paths_are_private_and_separate(self) -> None:
         data = tomllib.loads(
@@ -146,6 +169,11 @@ class DeploymentContractTests(unittest.TestCase):
         # Amendment 2: Brain holds no FamaChat credential and no writer
         # principal. Reno owns the transitions through its own MCP surface.
         self.assertNotIn("writer", data["principals"])
+        for name in ("porteiro", "cadastro", "reno"):
+            self.assertIn("conversation_context", data["principals"][name]["tools"])
+        self.assertNotIn(
+            "conversation_context", data["principals"]["famaagent"]["tools"]
+        )
 
     def test_service_example_is_localhost_private_and_documents_runtime_permissions(
         self,

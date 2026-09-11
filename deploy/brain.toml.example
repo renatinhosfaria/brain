@@ -52,17 +52,17 @@ tools = ["transport_ingest"]
 [principals.porteiro]
 mode = "worker"
 token_sha256 = "replace-with-porteiro-64-hex-digest"
-tools = ["conversation_phone"]
+tools = ["conversation_phone", "conversation_context"]
 
 [principals.cadastro]
 mode = "worker"
 token_sha256 = "replace-with-cadastro-64-hex-digest"
-tools = ["conversation_phone"]
+tools = ["conversation_phone", "conversation_context"]
 
 [principals.reno]
 mode = "worker"
 token_sha256 = "replace-with-reno-64-hex-digest"
-tools = ["conversation_recent", "conversation_search"]
+tools = ["conversation_recent", "conversation_search", "conversation_context"]
 
 [principals.famaagent]
 mode = "worker"

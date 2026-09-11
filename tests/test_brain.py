@@ -512,6 +512,17 @@ class BrainFixture(unittest.TestCase):
             },
         )
 
+    def test_context_schema_is_zero_argument(self) -> None:
+        context = next(tool for tool in _tools() if tool.name == "conversation_context")
+        self.assertEqual(
+            context.model_dump(mode="json", by_alias=True)["inputSchema"],
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        )
+
     def test_health_exposes_v2_identity_and_gateway_status(self) -> None:
         self.assertEqual(
             self.service.health().as_dict(),
@@ -765,7 +776,12 @@ class BrainFixture(unittest.TestCase):
         tools = _tools()
         self.assertEqual(
             {tool.name for tool in tools},
-            {"conversation_recent", "conversation_search", "conversation_phone"},
+            {
+                "conversation_recent",
+                "conversation_search",
+                "conversation_phone",
+                "conversation_context",
+            },
         )
         forbidden = {
             "phone",

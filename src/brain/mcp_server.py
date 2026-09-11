@@ -1,4 +1,4 @@
-"""MCP Streamable HTTP adapter with exactly three model-visible tools."""
+"""MCP Streamable HTTP adapter with capability-scoped model-visible tools."""
 
 from __future__ import annotations
 
@@ -55,6 +55,14 @@ PHONE_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Context is resolved exclusively from the authenticated worker task/run (or
+# the CEO gateway session); callers cannot select a conversation or event.
+CONTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
 
 def _tools() -> list[Tool]:
     return [
@@ -72,6 +80,14 @@ def _tools() -> list[Tool]:
             name="conversation_phone",
             description="Resolve the verified transport phone for the authorized WhatsApp DM.",
             inputSchema=PHONE_SCHEMA,
+        ),
+        Tool(
+            name="conversation_context",
+            description=(
+                "Retrieve the complete authorized WhatsApp conversation context, "
+                "including normalized CTWA attribution."
+            ),
+            inputSchema=CONTEXT_SCHEMA,
         ),
     ]
 

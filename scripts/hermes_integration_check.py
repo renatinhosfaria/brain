@@ -364,9 +364,13 @@ def main() -> int:
         "X-Hermes-Run": "${HERMES_KANBAN_RUN_ID}",
     }
     expected_tools = {
-        "porteiro": {"conversation_phone"},
-        "cadastro": {"conversation_phone"},
-        "reno": {"conversation_recent", "conversation_search"},
+        "porteiro": {"conversation_phone", "conversation_context"},
+        "cadastro": {"conversation_phone", "conversation_context"},
+        "reno": {
+            "conversation_recent",
+            "conversation_search",
+            "conversation_context",
+        },
         "famaagent": {"conversation_recent", "conversation_search"},
     }
     expected_modes = {

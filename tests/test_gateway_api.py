@@ -335,7 +335,7 @@ class GatewayAPITests(unittest.TestCase):
 
         self.assertIn("/internal/gateway/conversation-phone", paths)
 
-    def test_conversation_context_route_is_private_post_only(self) -> None:
+    def test_conversation_context_gateway_route_remains_private_post_only(self) -> None:
         app = BrainMCPServer(self.service).app()
         routes = {route.path: route for route in app.routes if hasattr(route, "path")}
 
@@ -343,7 +343,9 @@ class GatewayAPITests(unittest.TestCase):
         self.assertEqual(
             routes["/internal/gateway/conversation-context"].methods, {"POST"}
         )
-        self.assertNotIn("conversation_context", {tool.name for tool in _tools()})
+        # The gateway route remains private even though workers now receive a
+        # separately authenticated MCP entry point for the same projection.
+        self.assertIn("conversation_context", {tool.name for tool in _tools()})
         response = self.post_context(self.context_payload(), method="GET")
         self.assertEqual(response.status_code, 405)
 
